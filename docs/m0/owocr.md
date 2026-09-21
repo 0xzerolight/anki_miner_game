@@ -256,9 +256,13 @@ swaps; how stabilisation delays typewriter-style text is T32's (H4) question.
    `[general]`. Replace "the app never reads or writes `~/.config/owocr_config.ini`" with "neither the
    app nor its owocr child touches the user's file". Windows `USERPROFILE` redirection and OneOCR's
    `~/.config/oneocr` copy under it are H5 checks.
-2. **14, install.** Set `UV_PYTHON_INSTALL_DIR` and `UV_CACHE_DIR` under `addons/ocr/` alongside
+2. **14 and 13.1, install.** Set `UV_PYTHON_INSTALL_DIR` and `UV_CACHE_DIR` under `addons/ocr/` alongside
    `UV_TOOL_DIR`/`UV_TOOL_BIN_DIR`; add a constraints file pinning the resolved transitive set
-   (meikiocr, onnxruntime, numpy, opencv-python-headless, mss) so an install is reproducible.
+   (meikiocr, onnxruntime, numpy, opencv-python-headless, mss) so an install is reproducible. The
+   VAD add-on drives the same uv, so spec 13.1 gets the same rule under `addons/vad/`: every uv call
+   of either add-on runs with `addons.bootstrap.uv_environment(home, addon)`, which also sets
+   `UV_NO_CONFIG` (the user's `uv.toml` never applies) and `UV_MANAGED_PYTHON` (`--managed-python`:
+   never a system Python).
 3. **14, Linux install (may need an owner call).** The specified `uv tool install` fails on a Linux
    host without cairo/GObject-introspection dev packages, and without `PyGObject` owocr cannot
    capture on Wayland, which is most current Linux desktops. Options: (a) document the dev packages

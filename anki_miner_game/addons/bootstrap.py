@@ -1,6 +1,7 @@
 """Download a sha256-pinned ``uv`` into ``<home>/bin/`` (spec 19, last bullet).
 
-The VAD and OCR add-ons build their environments with this ``uv``. The checks are a minimal copy
+The VAD and OCR add-ons build their environments with this ``uv``, always under
+``uv_environment(home, addon)``. The checks are a minimal copy
 of the idea in Anki Miner's ``anki_miner/services/_install_common.py`` (``verify_sha256``, ``.part``
 cleanup) at commit ``ea4a30ce``: copied, not imported. Deliberately no resume, no receipt files and
 no resolver tiers; an installed ``uv`` is recognised by the sha256 of the executable itself.
@@ -28,7 +29,7 @@ from dataclasses import dataclass
 from email.message import Message
 from http.client import HTTPException
 from pathlib import Path, PurePosixPath
-from typing import IO, Final
+from typing import IO, Final, Literal
 from urllib.parse import urljoin, urlsplit
 
 from anki_miner_game.interfaces.addons import ProgressCallback
@@ -136,6 +137,27 @@ def urllib_transport(url: str) -> Iterator[Reply]:
 
 _LOCK = threading.Lock()
 """Serialises installs, so two add-ons installing at once share one download."""
+
+
+def uv_environment(home: Path, addon: Literal["vad", "ocr"]) -> dict[str, str]:
+    """Environment overrides for every ``uv`` call an add-on makes: merge them into ``os.environ``.
+
+    They keep what ``uv`` stores for the add-on under ``<home>/addons/<addon>/`` (spec 13.1, 14).
+    Without them ``uv`` links the environment to a Python in ``~/.local/share/uv/python`` or a
+    system Python, caches wheels in ``~/.cache/uv``, puts tool commands in ``~/.local/bin`` and
+    reads the user's own ``uv.toml``, so the user's ``uv cache clean``, ``uv python uninstall`` or
+    index setting could break or change the add-on. ``UV_MANAGED_PYTHON`` is ``--managed-python``.
+    Creates nothing.
+    """
+    root = home / "addons" / addon
+    return {
+        "UV_NO_CONFIG": "1",
+        "UV_MANAGED_PYTHON": "1",
+        "UV_PYTHON_INSTALL_DIR": str(root / "python"),
+        "UV_CACHE_DIR": str(root / "cache"),
+        "UV_TOOL_DIR": str(root / "tools"),
+        "UV_TOOL_BIN_DIR": str(root / "bin"),
+    }
 
 
 def ensure_uv(

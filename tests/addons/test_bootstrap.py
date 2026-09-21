@@ -562,6 +562,28 @@ def test_urllib_transport_returns_error_statuses(local_server):
         assert reply.status == 404
 
 
+# --- uv environment for the add-ons -----------------------------------------
+
+
+@pytest.mark.parametrize("addon", ["vad", "ocr"])
+def test_uv_environment_keeps_every_uv_location_under_the_addon_folder(tmp_path, addon):
+    env = bootstrap.uv_environment(tmp_path, addon)
+
+    root = tmp_path / "addons" / addon
+    locations = {"UV_PYTHON_INSTALL_DIR", "UV_CACHE_DIR", "UV_TOOL_DIR", "UV_TOOL_BIN_DIR"}
+    assert locations <= env.keys()
+    assert all(Path(env[name]).is_relative_to(root) for name in locations)
+    assert len({env[name] for name in locations}) == len(locations)
+    assert not root.exists()  # nothing is created here
+
+
+def test_uv_environment_ignores_user_config_and_system_pythons(tmp_path):
+    env = bootstrap.uv_environment(tmp_path, "vad")
+
+    assert env["UV_NO_CONFIG"] == "1"  # no user or system uv.toml
+    assert env["UV_MANAGED_PYTHON"] == "1"  # --managed-python: never a system interpreter
+
+
 # --- the real release -------------------------------------------------------
 
 
