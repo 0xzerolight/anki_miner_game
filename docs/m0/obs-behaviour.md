@@ -87,10 +87,11 @@ root after each step, run `provision-183652`):
   `Scene` (`provision.jsonl`).
 - Special inputs: `GetSpecialInputs` answered every slot `null`. That holds on every host, not
   only in this display without audio devices: OBS creates the desktop and mic special inputs only
-  in the collection it makes at its first run (`frontend/widgets/OBSBasic_SceneCollections.cpp:1047-1048,
-  1163-1165`, and then only for devices that exist, `frontend/widgets/OBSBasic_SceneItems.cpp:91-110`),
-  so a collection created later, like the app's, has none. Provisioning therefore creates its own
-  desktop-audio input and mutes a special input only when the user has added one.
+  in the collection it makes at its first run
+  (`frontend/widgets/OBSBasic_SceneCollections.cpp:1047-1048, 1163-1165`), and then only for
+  devices that exist (`frontend/widgets/OBSBasic_SceneItems.cpp:91-110`), so a collection created
+  later, like the app's, has none. Provisioning therefore creates its own desktop-audio input and
+  mutes a special input only when the user has added one.
 - `xcomposite_input` created with a placeholder `capture_window` (R1 side finding 2) lists the
   placeholder as disabled item 0 and the live windows after it; the probe window's item value was
   `4194311\r\namg-probe-window\r\nprobe_window.py`.
