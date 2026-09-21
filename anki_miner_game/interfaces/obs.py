@@ -72,20 +72,37 @@ class ObsDiscovery(Protocol):
 
         Generates a password only when auth is required and none exists.
         Returns whether the server is enabled afterwards: ``False`` means it
-        is off and OBS is running, so the file must be left alone.
+        is off and OBS is running (``is_running``), so the file must be left
+        alone, or that no install was found (``find_install`` tells the two
+        apart). Raises ``ObsConfigError`` when the file exists but cannot be
+        read or parsed, or cannot be written; an unusable file is never
+        overwritten.
         """
         ...
 
-    def is_running(self) -> bool: ...
+    def is_running(self) -> bool:
+        """Whether an OBS of this user runs.
+
+        ``True`` when the process list cannot be read: "cannot tell" never
+        reads as "not running", which would end a recording OBS is still
+        writing or start a second OBS.
+        """
+        ...
 
     def launch(self) -> None:
-        """Start OBS minimised to the tray, in the folder it needs."""
+        """Start OBS minimised to the tray, in the folder it needs; nothing while ``is_running``.
+
+        Raises ``ObsConnectError`` when no install is found or the program
+        cannot be started.
+        """
         ...
 
     async def wait_ready(self, timeout_s: float = 30.0) -> bool:
         """``True`` once ``GetVersion`` succeeds; ``False`` after ``timeout_s``.
 
         OBS answers every request with 207 ``NotReady`` until it has loaded.
+        Raises ``ObsAuthError`` when OBS rejects the password on two tries in
+        a row; the credentials are read again once in between (spec 17).
         """
         ...
 

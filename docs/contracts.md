@@ -70,3 +70,13 @@ Filed by T14 (`.orchestration/status/t14-provision.json`), applied by C3.
 | Name | Where | What it is |
 |---|---|---|
 | `REQUIRED_REQUESTS` | `models/obs.py` | 31 names: the 26 of W0 plus `GetSceneList`, `SetCurrentProgramScene`, `GetInputSettings`, `GetInputMute`, `RemoveInput` (all obs-websocket 5.0.0; OBS 30.0 floor unchanged). Provisioning diffs scenes, inputs and mute state, makes `Game` the program scene, and removes app inputs a game no longer uses |
+
+## W2b-early integration (fix round 1)
+
+Found by the wave 2b-early cross-task reviews (`.orchestration/reviews/wave-2b-early-cross-*.md`),
+applied by the integration fixer on `integration/wave-2b-early`. Docstrings only.
+
+| Name | Where | What it is |
+|---|---|---|
+| `ObsDiscovery.wait_ready`, `launch`, `ensure_server_enabled` (docstrings) | `interfaces/obs.py` | T13's request: `wait_ready` raises `ObsAuthError` after two rejections in a row (one re-read between); `launch` raises `ObsConnectError` without an install or when OBS cannot start, and does nothing while OBS runs; `ensure_server_enabled` raises `ObsConfigError` for a file it cannot read, parse or write, and returns `False` also when no install is found |
+| `ObsDiscovery.is_running` (docstring) | `interfaces/obs.py` | `True` when the process list cannot be read: "cannot tell" never reads as "OBS gone" |
