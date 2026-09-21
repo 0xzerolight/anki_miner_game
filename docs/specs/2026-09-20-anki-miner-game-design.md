@@ -872,8 +872,15 @@ Per game, off by default. It uses only signals the app already has; there is no 
 - **Auto-stop, idle**: no accepted line for `auto.stop_idle_minutes`. The idle tail cannot stretch
   the last cue, because the cap in section 9 already bounds it; the video simply carries some dead
   time at the end.
-- **Auto-stop, window closed**: every 5 s, `GetInputPropertiesListPropertyItems("window")` is checked
-  for the pinned window string; two consecutive misses stop the session. Windows and X11 only.
+- **Auto-stop, window closed**: every 5 s the window list of section 11.3 is read; two consecutive
+  "closed" readings stop the session. Only items with `itemEnabled: true` count, because OBS keeps
+  listing the configured value as a disabled item after the window closes and also while it is
+  open under a changed title (FPS or level in the title), and capture keeps following it. Windows:
+  open while an enabled item has the class and exe of `capture.window` (decode `#3A` and `#22`,
+  compare case-insensitively), queried on the `game_capture` input, whose list keeps minimized
+  windows (provisional until H5). X11: open while item 0 is enabled or an enabled item has the
+  stored xid, which R2 confirmed for a retitled and a closed window (`docs/m0/source-findings.md`
+  section 10, `docs/m0/obs-behaviour.md` section 7). Windows and X11 only.
   PipeWire capture exposes no window list, so Wayland relies on the idle timeout.
 
 `auto.py` subscribes to the session actor's events and sends it ordinary `UserCommand`s. No other
