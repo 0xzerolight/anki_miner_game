@@ -306,3 +306,27 @@ def test_contract_packages_keep_the_dependency_rule(package, allowed):
         if not name.startswith(allowed)
     ]
     assert offenders == []
+
+
+def test_vad_progress_total_may_be_unknown():
+    from typing import get_type_hints
+
+    from anki_miner_game.interfaces.presenter import Presenter
+
+    assert get_type_hints(Presenter.vad_progress)["total_ms"] == int | None
+
+
+def test_obs_ready_and_requests_document_207_not_ready():
+    from anki_miner_game.interfaces.obs import ObsDiscovery, ObsGateway
+
+    assert "GetVersion" in (ObsDiscovery.wait_ready.__doc__ or "")
+    for method in (ObsDiscovery.wait_ready, ObsGateway.connect, ObsGateway.request):
+        assert "207 ``NotReady``" in (method.__doc__ or ""), method.__name__
+
+
+def test_replaced_documents_its_merge_base():
+    from anki_miner_game.models.pipeline import Replaced
+
+    doc = Replaced.__doc__ or ""
+    assert "TextPipeline.reset()" in doc
+    assert "ReplaceRecord" in doc
