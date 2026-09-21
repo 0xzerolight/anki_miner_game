@@ -28,10 +28,11 @@ def _network_guard(request):
     """Fail any test whose code attempted a real non-loopback TCP connect.
 
     See ``tests/_network_tripwire.py`` for the record-and-block mechanism this
-    asserts on. Tests marked ``network`` or ``e2e`` genuinely need it, so the
-    wrapper is suppressed for their duration.
+    asserts on. Only ``network``-marked tests genuinely need it (and the gate
+    deselects them), so the wrapper is suppressed for their duration alone;
+    ``e2e`` tests run in the gate and stay guarded.
     """
-    if any(request.node.get_closest_marker(m) for m in ("network", "e2e")):
+    if request.node.get_closest_marker("network"):
         _net.SUPPRESSED = True
         try:
             yield

@@ -80,7 +80,7 @@ markers = [
     "obs_live: needs a real, reachable OBS instance",
     "network: genuinely needs real network beyond loopback",
     "windows_only: exercises Windows-only behaviour (hotkey registration, job objects)",
-    "e2e: real-service end-to-end test, excluded by default",
+    "e2e: end-to-end test across real components over loopback; runs in the gate",
 ]
 
 [tool.black]
