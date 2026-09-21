@@ -20,7 +20,7 @@ from typing import Final
 from anki_miner_game import paths
 from anki_miner_game.models.codec import DecodeError, UnsupportedSchemaError, dump_document, load_document
 from anki_miner_game.models.config import AppConfig
-from anki_miner_game.models.profile import GameProfile, validate
+from anki_miner_game.models.profile import GameProfile, is_safe_slug, validate
 
 
 def _read_umask() -> int:
@@ -104,7 +104,8 @@ def save_config(cfg: AppConfig) -> Path:
 def load_profiles() -> LoadedProfiles:
     """Every ``<home>/games/*.json``; a file that fails to load is reported in ``errors``, not raised.
 
-    A profile whose ``slug`` differs from its file name is reported as corrupt.
+    A profile whose ``slug`` differs from its file name, or cannot be a file name
+    (so ``save_profile`` would refuse it), is reported as corrupt.
     """
     profiles: dict[str, GameProfile] = {}
     errors: list[StoreError] = []
@@ -120,6 +121,8 @@ def load_profiles() -> LoadedProfiles:
                 continue
             if profile.slug != path.stem:
                 errors.append(CorruptFileError(path, f"slug {profile.slug!r} does not match the file name"))
+            elif not is_safe_slug(profile.slug):
+                errors.append(CorruptFileError(path, f"slug {profile.slug!r} cannot be a file name"))
             else:
                 profiles[profile.slug] = profile
     return LoadedProfiles(profiles=profiles, errors=tuple(errors))

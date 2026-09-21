@@ -160,19 +160,22 @@ def test_load_profiles_reports_an_unreadable_file():
     assert [(type(e).__name__, e.path.name) for e in loaded.errors] == [("StoreError", "folder.json")]
 
 
-def test_load_profiles_rejects_a_slug_that_differs_from_the_file_name():
+def test_load_profiles_rejects_a_slug_that_differs_from_the_file_name_or_cannot_be_one():
     first = _profile("a")
     store.save_profile(first)
     (paths.games_dir() / "zz.json").write_text(dump_document(_profile("a")), encoding="utf-8")
     evil = dataclasses.replace(_profile("x"), slug="../evil")
     (paths.games_dir() / "evil.json").write_text(dump_document(evil), encoding="utf-8")
+    # "a." matches its file name "a..json" but save_profile and profile_path refuse it (trailing dot).
+    unsafe = dataclasses.replace(_profile("x"), slug="a.")
+    (paths.games_dir() / "a..json").write_text(dump_document(unsafe), encoding="utf-8")
     loaded = store.load_profiles()
     assert loaded.profiles == {"a": first}
-    assert sorted((type(e).__name__, e.path.name) for e in loaded.errors) == [
-        ("CorruptFileError", "evil.json"),
-        ("CorruptFileError", "zz.json"),
+    assert sorted((type(e).__name__, e.path.name, str(e).split(": ", 1)[1]) for e in loaded.errors) == [
+        ("CorruptFileError", "a..json", "slug 'a.' cannot be a file name"),
+        ("CorruptFileError", "evil.json", "slug '../evil' does not match the file name"),
+        ("CorruptFileError", "zz.json", "slug 'a' does not match the file name"),
     ]
-    assert all("does not match the file name" in str(e) for e in loaded.errors)
 
 
 def test_write_text_atomic_creates_the_folder_and_keeps_lf(tmp_path):
