@@ -981,29 +981,59 @@ second `.srt` ever exists.
 For games with no working hook. owocr runs as a managed subprocess, so OCR is one more websocket
 text source and none of owocr's roughly 20k lines enter this app.
 
-Install (`addons/ocr_addon.py`): `uv tool install "owocr[<extra>]==<pinned>"` into
-`~/.anki_miner_game/addons/ocr/`, extra `oneocr` on Windows and `meikiocr` on Linux.
+Install (`addons/ocr_addon.py`): `uv tool install --python 3.12 "owocr[<extra>]==<pinned>"` into
+`~/.anki_miner_game/addons/ocr/`, extra `oneocr` on Windows and `meikiocr` on Linux, with the uv
+environment of section 13.1. owocr 1.26.8 needs Python >= 3.11.
+
+On Linux owocr depends on PyGObject, which has no wheel and builds from source only with a C
+toolchain and the cairo and GObject-introspection development packages; R3's install stopped at
+`Dependency "cairo" not found`. PyGObject serves only owocr's Wayland capture, so the Linux install
+adds `--overrides overrides.txt`, a file holding `pygobject; sys_platform == "never"`. It then
+installs without system packages, and **Linux OCR is X11-only: Wayland OCR is unsupported in v1**.
+The add-on says so on a Wayland session (`docs/m0/owocr.md` amendment 3). The Windows install
+floor with `oneocr` is an H5 check.
 
 Command line, built only from flags:
 
 ```
-owocr -r screencapture -w websocket -wp <free port> -t False -l <lang> -e <engine> \
+owocr -r screencapture -w websocket -wp <free port> -t False -l <lang> -e <engine> -el <engine> \
       -sa "<window title>" -swa <rects>          # Windows: window-relative rectangles
-owocr -r screencapture -w websocket -wp <free port> -t False -l <lang> -e <engine> \
-      -sa <rects>                                # Linux: screen rectangles; Wayland via the portal
+owocr -r screencapture -w websocket -wp <free port> -t False -l <lang> -e <engine> -el <engine> \
+      -sa <rects>                                # Linux X11: screen rectangles
 ```
 
-- The app never reads or writes `~/.config/owocr_config.ini`, which belongs to the user's own owocr.
+`-el` carries the same engine as `-e`, so owocr loads that one engine and cannot fall back to a
+cloud engine the user did not choose (section 3.4).
+
+- Neither the app nor its owocr child touches `~/.config/owocr_config.ini`, which belongs to the
+  user's own owocr. Managed owocr runs with a private `HOME` (`USERPROFILE` on Windows) at
+  `~/.anki_miner_game/addons/ocr/home/`, pre-seeded with a minimal `.config/owocr_config.ini`
+  holding only `[general]`. owocr parses it, skips the GitHub download, and takes every other
+  setting from the command line and its defaults. owocr's other `~`-relative paths (Screen AI,
+  OneOCR) land in that home too; whether the model caches follow `HOME` or `XDG_CACHE_HOME` is
+  open. `USERPROFILE` redirection with OneOCR is an H5 check.
 - **Select OCR area** in the game profile dialog runs owocr once with `-sa`/`-swa` empty, which
   opens owocr's own picker, and reads `Selected coordinates:` / `Selected window coordinates:` from
-  its log output into `ocr.rects`.
+  its log output into `ocr.rects`. owocr keeps running after the selection, so the dialog kills it
+  once the line is read, on a picker-closed line, or when it exits. A closed window picker keeps
+  owocr running on the whole window and prints no coordinate line.
 - owocr's frame stabilisation, repetition filter and furigana filter stay at their defaults. They
   are why OCR lines arrive late, which the -1000 ms start shift and the VAD start snap compensate.
+  In R3 a changed line reached the websocket 54-65 ms after the change, and the first frame came
+  3.4 s after spawn with models cached.
 - Supervisor: start at arm, stop at disarm; restart on crash with backoff, three attempts, then a
-  banner. The whole process tree is killed through a job object with kill-on-close on Windows and a
-  process group on POSIX, because `uv tool` launches through a shim. Disarm and quit wait for the
-  kill (`TextSource.wait_closed`). A crash of the app itself is covered on Windows by the job
-  object; on Linux owocr leads its own session and keeps running, still capturing and serving on
+  banner. The attempt count resets after 60 s of stable running, so only exits in a row add up.
+  An exit with a known configuration error (`Invalid coordinate set(s)`, `Window capture is only
+  currently supported`, `Picker window was closed`) is not a crash: it shows a banner without
+  spending the restarts. The banner quotes owocr's real error, never its closing `Terminated!`
+  line, and a traceback in the log (the stdin `termios` one of a non-TTY start) is not a failure.
+  The whole process tree is killed through a job object with kill-on-close on Windows (provisional
+  until H5) and a process group on POSIX: owocr starts in its own session, and a stop sends SIGTERM
+  to the group, waits 2 s for it to empty, then sends SIGKILL to the group. Signalling the parent
+  alone orphans the picker child and `multiprocessing.resource_tracker`, and SIGTERM alone is not
+  enough because the tracker ignores it while any other member lives (`docs/m0/owocr.md` "Process
+  tree"). Disarm and quit wait for the kill (`TextSource.wait_closed`). A crash of the app itself
+  is covered on Windows by the job object; on Linux owocr leads its own session and keeps running, still capturing and serving on
   `0.0.0.0`, until the user ends it. Accepted risk for v1; the user guide says how to end it.
 - owocr binds `0.0.0.0`. The user guide mentions the Windows firewall prompt and that the OCR text
   is reachable from the local network while it runs.
