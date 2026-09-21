@@ -68,10 +68,11 @@ _obsws_log = logging.getLogger("obsws_python")
 if _obsws_log.level < logging.WARNING:  # NOTSET too: it logs the password at INFO when it connects
     _obsws_log.setLevel(logging.WARNING)
 
-# Values that M0 runtime checks may still change live here and nowhere else.
-# Provisional until R2 (Flatpak, Linux) or H5 (Windows) confirms them at runtime; the source
-# evidence is docs/m0/source-findings.md sections 3-5.
 FLATPAK_APP_ID: Final = "com.obsproject.Studio"
+
+# Values that M0 runtime checks may still change live here and nowhere else.
+# PROVISIONAL until R2 (Flatpak, Linux) or H5 (Windows) confirms them at runtime; the source
+# evidence is docs/m0/source-findings.md sections 3-5.
 FLATPAK_CONFIG_ROOT: Final = PurePath(".var", "app", FLATPAK_APP_ID, "config", "obs-studio")
 """Relative to the home folder: Flatpak points ``XDG_CONFIG_HOME`` at ``~/.var/app/<id>/config`` [R2]."""
 LAUNCH_FLAGS: Final = ("--minimize-to-tray",)
@@ -81,7 +82,11 @@ REGISTRY_KEY: Final = r"SOFTWARE\OBS Studio"
 REGISTRY_VIEWS: Final = ("64", "32")
 """The installer writes the key in both views; the 64-bit one is read first [H5]."""
 WINDOWS_EXE: Final = PurePath("bin", "64bit", "obs64.exe")
-"""Relative to the install folder; OBS must start with its folder as the working directory."""
+"""Relative to the install folder; OBS must start with its folder as the working directory [H5]."""
+WINDOWS_PROCESS: Final = "obs64.exe"
+TASKLIST: Final = ("tasklist", "/FI", f"IMAGENAME eq {WINDOWS_PROCESS}", "/FO", "CSV", "/NH")
+"""Lists a running ``obs64.exe`` as a CSV row that starts with the quoted image name [H5]."""
+# End of the provisional values.
 
 WS_CONFIG_PATH: Final = PurePath("plugin_config", "obs-websocket", "config.json")
 """Relative to the config root."""
@@ -94,9 +99,7 @@ PASSWORD_LENGTH: Final = 16
 """What obs-websocket's own ``Utils::Crypto::GeneratePassword`` makes."""
 
 LINUX_PROCESS: Final = "obs"
-"""``comm`` of the OBS main process, native or Flatpak."""
-WINDOWS_PROCESS: Final = "obs64.exe"
-TASKLIST: Final = ("tasklist", "/FI", f"IMAGENAME eq {WINDOWS_PROCESS}", "/FO", "CSV", "/NH")
+"""``comm`` of the OBS main process, native or Flatpak (the Flatpak's command is ``obs``)."""
 RUN_TIMEOUT_S: Final = 10.0
 READY_POLL_S: Final = 0.5
 """Pause between two ``GetVersion`` tries in ``wait_ready``."""
@@ -173,8 +176,8 @@ def get_version_succeeds(creds: ObsCredentials, timeout_s: float) -> bool:
     except (OSError, ValueError, LookupError, TypeError, OBSSDKError, WebSocketException) as exc:
         log.debug("OBS not ready: %s: %s", type(exc).__name__, exc)
         return False
-    if status.get("result") is not True:
-        log.debug("OBS not ready: GetVersion answered %s", status.get("code"))
+    if not isinstance(status, dict) or status.get("result") is not True:
+        log.debug("OBS not ready: GetVersion answered %s", status)
         return False
     return True
 
@@ -201,7 +204,8 @@ def read_registry_install_dir(view: str) -> str | None:
 class LocalObsDiscovery:
     """``ObsDiscovery`` for the OBS installed on this machine (spec 11.1).
 
-    ``config`` returns the app's current settings; ``wait_ready`` reads its credentials through it.
+    ``config`` returns the app's current settings; ``wait_ready`` reads its credentials through it,
+    on a worker thread.
     Everything else is injected for tests: ``platform`` (``sys.platform``), ``which`` (``PATH``
     lookup), ``registry`` (Windows install folder), ``runner`` (``flatpak``, ``tasklist``, starting
     OBS), ``proc_root`` (Linux process table), ``probe`` (one ``GetVersion``), ``now`` and ``sleep``.

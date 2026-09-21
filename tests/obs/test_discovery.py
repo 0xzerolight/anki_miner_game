@@ -3,6 +3,7 @@
 import asyncio
 import base64
 import hashlib
+import inspect
 import json
 import logging
 import socket
@@ -18,6 +19,7 @@ from anki_miner_game.models.config import AppConfig, ObsSettings
 from anki_miner_game.models.obs import ObsConfigError, ObsConnectError, ObsCredentials, ObsInstall, WsConfig
 from anki_miner_game.obs import discovery
 from anki_miner_game.obs.discovery import LocalObsDiscovery
+from tests.test_contracts import _assert_conforms
 
 WS_CONFIG = Path("plugin_config", "obs-websocket", "config.json")
 
@@ -111,6 +113,13 @@ def windows_exe(folder: Path) -> Path:
     exe.parent.mkdir(parents=True)
     exe.write_bytes(b"MZ")
     return exe
+
+
+def test_conforms_to_the_obs_discovery_protocol():
+    from anki_miner_game.interfaces.obs import ObsDiscovery
+
+    _assert_conforms(ObsDiscovery, LocalObsDiscovery)
+    assert inspect.signature(LocalObsDiscovery.wait_ready).parameters["timeout_s"].default == 30.0
 
 
 # --- find_install ------------------------------------------------------------------------------
