@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Text feed</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #ffffff;
+    --fg: #111111;
+    --muted: #6b6b6b;
+    --rule: #e3e3e3;
+    --ok: #2e9d4f;
+    --off: #c0392b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #111111;
+      --fg: #ececec;
+      --muted: #9a9a9a;
+      --rule: #2a2a2a;
+    }
+  }
+  html, body { margin: 0; background: var(--bg); color: var(--fg); }
+  body { font: 1.5rem/1.6 system-ui, sans-serif; }
+  header {
+    position: sticky; top: 0; display: flex; align-items: center; gap: 0.5rem;
+    padding: 0.4rem 1rem; background: var(--bg); border-bottom: 1px solid var(--rule);
+    font-size: 0.8rem; color: var(--muted);
+  }
+  #light { width: 0.6rem; height: 0.6rem; border-radius: 50%; background: var(--off); }
+  #light.on { background: var(--ok); }
+  #count { margin-left: auto; font-variant-numeric: tabular-nums; }
+  main { padding: 0.5rem 1rem 2rem; }
+  main p { margin: 0; padding: 0.5rem 0; border-bottom: 1px solid var(--rule); white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<header>
+  <span id="light" title="Disconnected"></span>
+  <span id="state">Disconnected</span>
+  <span id="count">0 lines</span>
+</header>
+<main id="lines"></main>
+<script>
+  "use strict";
+  // The feed's HTTP server writes its websocket port over the placeholder; 6678 is the default
+  // for a copy of this page opened as a file.
+  const WS_PORT = Number("__FEED_WS_PORT__") || 6678;
+  const host = location.hostname || "127.0.0.1";
+  const lines = document.getElementById("lines");
+  const light = document.getElementById("light");
+  const state = document.getElementById("state");
+  const count = document.getElementById("count");
+  let received = 0;
+  let retryMs = 500;
+
+  function setConnected(on) {
+    light.classList.toggle("on", on);
+    const label = on ? "Connected" : "Disconnected";
+    light.title = label;
+    state.textContent = label;
+  }
+
+  function append(text) {
+    const p = document.createElement("p");
+    p.textContent = text;
+    lines.appendChild(p);
+    received += 1;
+    count.textContent = received + (received === 1 ? " line" : " lines");
+    p.scrollIntoView({ block: "end" });
+  }
+
+  function connect() {
+    const socket = new WebSocket("ws://" + host + ":" + WS_PORT);
+    socket.onopen = () => { retryMs = 500; setConnected(true); };
+    socket.onmessage = (event) => { if (typeof event.data === "string") append(event.data); };
+    socket.onclose = () => {
+      setConnected(false);
+      setTimeout(connect, retryMs);
+      retryMs = Math.min(retryMs * 2, 5000);
+    };
+  }
+
+  connect();
+</script>
+</body>
+</html>
