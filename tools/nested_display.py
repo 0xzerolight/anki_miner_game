@@ -865,6 +865,37 @@ def _supervise(nested: NestedDisplay, done: Callable[[], bool]) -> int:
     return 0
 
 
+def _inside(nested: NestedDisplay, args: argparse.Namespace, extra: Mapping[str, str]) -> int:
+    """Run the command, or serve until stopped. Returns the exit code."""
+    if args.verb == "run":
+        child = nested.popen(args.command, extra_env=extra)
+        rc = _supervise(nested, lambda: child.poll() is not None)
+        return child.returncode if child.returncode is not None else rc
+    env_file: Path = args.env_file
+    data = {"display": nested.display, "pgid": nested.pgid, "token": nested.token, "env": nested.env(extra)}
+    tmp = env_file.with_name(env_file.name + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    os.replace(tmp, env_file)
+    print(f"nested_display.py: env file {env_file}", file=sys.stderr, flush=True)
+    try:
+        rc = _supervise(nested, lambda: False)
+        return 0 if rc == 130 else rc
+    finally:
+        env_file.unlink(missing_ok=True)
+
+
+def _stop(nested: NestedDisplay) -> tuple[IsolationBreachError | None, bool]:
+    """Stop the display. Returns the breach it found, and whether teardown fell short otherwise."""
+    try:
+        nested.stop()
+    except IsolationBreachError as exc:
+        return exc, False
+    except NestedDisplayError as exc:
+        print(f"nested_display.py: {exc}", file=sys.stderr)
+        return None, True
+    return None, False
+
+
 def _display_verb(args: argparse.Namespace) -> int:
     missing = [tool for tool in (KWIN, DBUS_DAEMON) + ((XWAYLAND,) if args.rootful else ()) if not shutil.which(tool)]
     if missing:
@@ -875,8 +906,8 @@ def _display_verb(args: argparse.Namespace) -> int:
     if protected:
         print(f"nested_display.py: --setenv may not set {', '.join(protected)}", file=sys.stderr)
         return 2
-    signal.signal(signal.SIGTERM, _STOP)
-    signal.signal(signal.SIGINT, _STOP)
+    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(sig, _STOP)
     try:
         nested = NestedDisplay(
             caller=args.caller,
@@ -901,35 +932,20 @@ def _display_verb(args: argparse.Namespace) -> int:
     )
     rc, breach = 1, None
     try:
-        if args.verb == "run":
-            child = nested.popen(args.command, extra_env=extra)
-            rc = _supervise(nested, lambda: child.poll() is not None)
-            if child.returncode is not None:
-                rc = child.returncode
-        else:
-            env_file: Path = args.env_file
-            data = {"display": nested.display, "pgid": nested.pgid, "token": nested.token, "env": nested.env(extra)}
-            tmp = env_file.with_name(env_file.name + ".tmp")
-            tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
-            os.replace(tmp, env_file)
-            print(f"nested_display.py: env file {env_file}", file=sys.stderr, flush=True)
-            try:
-                rc = _supervise(nested, lambda: False)
-                rc = 0 if rc == 130 else rc
-            finally:
-                env_file.unlink(missing_ok=True)
+        rc = _inside(nested, args, extra)
     except IsolationBreachError as exc:
         breach = exc
     except (NestedDisplayError, OSError) as exc:
         print(f"nested_display.py: {exc}", file=sys.stderr)
         rc = 1
-    try:
-        nested.stop()
-    except IsolationBreachError as exc:
-        breach = breach or exc
-    except NestedDisplayError as exc:
-        print(f"nested_display.py: {exc}", file=sys.stderr)
-        rc = rc or 1
+    except BaseException:
+        stop_breach, _ = _stop(nested)  # anything else still tears the display down
+        if stop_breach is not None:
+            _critical(stop_breach)
+        raise
+    stop_breach, stop_failed = _stop(nested)
+    breach = breach or stop_breach
+    rc = rc or int(stop_failed)
     if breach is not None:
         _critical(breach)
         return EXIT_BREACH

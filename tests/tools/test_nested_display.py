@@ -620,3 +620,49 @@ def test_a_relative_xdg_root_becomes_absolute(tmp_path, monkeypatch):
     guard = nd.OwnerGuard(home=tmp_path, doc_path=Path("/run/user/1000/doc"), run=_Findmnt())
     display = nd.NestedDisplay(xdg_root=Path("rel/xdg"), guard=guard, owner_env={"PATH": "/usr/bin", "HOME": "/h"})
     assert display.xdg.root == tmp_path / "rel" / "xdg"
+
+
+class _BrokenDisplay:
+    """Stands in for NestedDisplay in the CLI: starts, then its guard poll raises."""
+
+    last: "_BrokenDisplay | None" = None
+
+    def __init__(self, **kwargs: object) -> None:
+        self.display, self.pgid, self.token = ":9", 4242, "tok"
+        self.xdg = nd.XdgDirs(Path("/x/xdg"), Path("/tmp/amg-00000000"))
+        self.stopped = False
+        self.child: subprocess.Popen[bytes] | None = None
+        _BrokenDisplay.last = self
+
+    def start(self) -> str:
+        return self.display
+
+    def popen(self, argv: list[str], *, extra_env: dict[str, str] | None = None) -> subprocess.Popen[bytes]:
+        self.child = subprocess.Popen(["sleep", "30"])
+        return self.child
+
+    def alive(self) -> bool:
+        return True
+
+    def check(self) -> None:
+        raise subprocess.TimeoutExpired(["findmnt"], 10)
+
+    def stop(self) -> None:
+        self.stopped = True
+
+
+def test_the_cli_tears_down_on_an_unexpected_error_and_on_sighup(monkeypatch):
+    handlers: dict[int, object] = {}
+    monkeypatch.setattr(nd.signal, "signal", lambda sig, handler: handlers.__setitem__(sig, handler))
+    monkeypatch.setattr(nd.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(nd, "NestedDisplay", _BrokenDisplay)
+    try:
+        with pytest.raises(subprocess.TimeoutExpired):
+            nd.main(["run", "--caller", "r1", "--", "true"])
+    finally:
+        fake = _BrokenDisplay.last
+        if fake is not None and fake.child is not None:
+            fake.child.kill()
+            fake.child.wait()
+    assert fake is not None and fake.stopped
+    assert handlers[signal.SIGHUP] is nd._STOP  # a closed terminal tears down like SIGTERM
