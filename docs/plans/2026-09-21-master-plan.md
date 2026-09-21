@@ -508,7 +508,9 @@ case in that row of the spec's unit-test table.
 ### M0 gate (orchestrator + Sonnet amender)
 - Read `docs/m0/*.md` and T04's sanitiser note; grep-check claims; the amender edits the repo spec
   copy (3.3 states, 7 constants, 10.1 sanitiser, 11.1 registry and minimum version, 11.3 keys and
-  restart rows, Appendix B) in one commit, marking Windows-derived values provisional (D2).
+  restart rows, Appendix B, plus the sections `docs/m0/wave-1-amendments.md` names: 7, 8.1, 8.2,
+  9, 10.3, 11.2, 12, 13.1, 13.2, 13.3) in one commit, marking Windows-derived values provisional
+  (D2).
 - A finding that breaks the design beyond the spec's own fallbacks goes to the user.
 
 ### T12 OBS gateway + FakeObsServer (Opus xhigh, judge, W2)
@@ -517,6 +519,9 @@ case in that row of the spec's unit-test table.
   only enqueue with the injected `now`; requests wait while `collection_changing`; reconnect backoff;
   credentials from `ObsDiscovery.credentials` at every connect; on auth failure re-read once, then a
   banner; `ObsInfo` check names the missing request.
+- 207 `NotReady` (OBS still loading, or a collection change whose `...Changing` event has not
+  arrived yet) is retried until a timeout, then `ObsRequestError`, in `connect()` and `request()`
+  (S1 summary 5 and 11; contract change request from the W1 integration fix).
 - Fake: obs-websocket v5 ops 0/1/2/5/6/7 with auth; replays R2 transcripts. One test per transcript.
 
 ### T13 OBS discovery + launch (Opus xhigh, W2)
@@ -524,7 +529,8 @@ case in that row of the spec's unit-test table.
 - Install lookup (Windows ProgramFiles, then the S1 registry key; Linux PATH, then Flatpak); config
   roots incl. Flatpak and `$XDG_CONFIG_HOME` for native Linux OBS; websocket config read;
   enable-when-closed; password generated only when auth is required and none exists; running-OBS
-  check; launch minimised with the right cwd; 30 s wait.
+  check; launch minimised with the right cwd; 30 s wait. `wait_ready` is true once `GetVersion`
+  succeeds, not once the websocket accepts a connection (S1 summary 11).
 - Tests with temp config roots, an injected registry reader and process runner.
 
 ### T14 OBS provisioning (Opus xhigh, W2)
@@ -533,6 +539,8 @@ case in that row of the spec's unit-test table.
 - Profile (record dir, scaled output size, fps, container, split off with the M0 keys), scene
   collection and scene `Game`, per-platform inputs feature-detected with `GetInputKindList`, mic muted,
   window list; idempotent diff; `ProvisionResult.needs_restart` from the M0 restart rows.
+  `list_windows` keeps each item's `itemEnabled` (`WindowItem.enabled`, contract change request)
+  and reads `capture_window` on `xcomposite_input`, `window` on the Windows kinds (S1 summary 12).
 - Tests: scaling math; second run sends no mutating request; each platform row with a fake gateway;
   provisioning transcript replay.
 
@@ -545,6 +553,14 @@ case in that row of the spec's unit-test table.
   OBS is confirmed absent; ending without STOPPED; `RecordFileChanged`; pause edges; the auto-start
   first line held while `armed` and journalled at offset 0 on STARTED; `SessionEvent` publication;
   no-source and free-space banners.
+- Pipeline and journal agree on "the previous line" (W1 integration): call `TextPipeline.reset()`
+  after dropping an accepted line as `paused`, at STARTED unless the held auto-start line is the one
+  journalled at offset 0, and after a split stop (`RecordFileChanged`). Journal a `Replaced` as
+  `ReplaceRecord` only when its base line is the journal's last `LineRecord`; otherwise as a
+  `LineRecord` at `clock.offset_ms(line.t_mono)` (`None`: drop, count `paused`).
+- Finalise runs on one dedicated worker shared by every caller under the output root (a
+  single-thread executor or a lock), one call at a time, never the default `run_in_executor` pool:
+  its NN bump is check-then-act (`session/finalise.py` docstring).
 - Tests with injected `now`, fake gateway/provisioner/discovery, deterministic.
 
 ### T16 runtime, composition, CLI verbs (Opus xhigh, judge, W2, after T12-T15)
@@ -552,6 +568,9 @@ case in that row of the spec's unit-test table.
   `gui/cli_verbs.py`, minimal `gui/main_window.py` (Arm/Start/Stop, state, elapsed, cue count),
   logging to `<home>/anki_miner_game.log` (password never logged); tests.
 - Spec 4.2, 16 global control, 17 feed-port row.
+- Any `OSError` from `FeedServer.start()` means feed off + banner (`FeedPortInUseError` names the
+  port; a missing `page.html` or another bind error gives its text). Launch-time orphan finalises go
+  through T15's single finalise worker, never a shared pool.
 - Tests: verbs reach the running instance; launch restores `obs_restore.json` and hands orphan
   handling to reconcile; feed port in use -> banner and feed off; offscreen launch with an isolated
   home writes `config.json` and the log.
@@ -565,7 +584,8 @@ case in that row of the spec's unit-test table.
 
 ### T17 auto mode (Opus high, W2)
 - `lifecycle/auto.py`; spec 12; subscribes to `SessionEvent`, sends `UserCommand`s; tests with fake
-  clock and fake `SessionControl`.
+  clock and fake `SessionControl`. The window-closed check counts enabled items only (spec 12 as
+  amended at the M0 gate, `docs/m0/wave-1-amendments.md` item 10).
 
 ### T18 clipboard source (Opus high, W2)
 - `text/sources/clipboard_source.py`; spec 8.1; main thread, text only, ignores own changes, `t_mono`
@@ -578,12 +598,15 @@ case in that row of the spec's unit-test table.
 ### T23 VAD add-on + trimmer (Opus xhigh, W2)
 - `addons/vad_addon.py` (implements `AddonService`), `vad/trimmer.py` (implements `VadJobs`); spec 13,
   17 VAD row. Fake worker script in tests; re-run and restore from `live_cues`; manifest `vad`
-  record and `vad_running` state; a real install test marked `network` + `vad`.
+  record and `vad_running` state; a real install test marked `network` + `vad`. Every uv call
+  runs with `addons.bootstrap.uv_environment(home, "vad")`. Worker `total_ms` may be `null`
+  (indeterminate progress; `Presenter.vad_progress` contract change request).
 
 ### T24 OCR add-on + supervisor (Opus xhigh, W2)
 - `addons/ocr_addon.py` (`AddonService`, `OcrAreaPicker`), `text/sources/ocr_source.py`; spec 14,
   17 owocr row. Command builder; log parser against R3 fixtures; supervisor tree-kill with a fake
   child that spawns a grandchild; three restarts then a banner; Windows job-object test `windows_only`.
+  Every uv call runs with `addons.bootstrap.uv_environment(home, "ocr")`.
 
 ### T19 main window, tray, banners, live list, recent sessions (Opus xhigh, W3)
 - `gui/main_window.py` (replaces the minimal one), `gui/tray.py`, `gui/widgets/*`; spec 16, 17,
@@ -592,7 +615,8 @@ case in that row of the spec's unit-test table.
 
 ### T20 game profile + settings dialogs (Opus xhigh, W3)
 - `gui/game_profile_dialog.py`, `gui/settings_dialog.py`; spec 5 tables, 11.3 window picker, 12
-  settings texts, 14 area selection through `OcrAreaPicker`, cloud-OCR privacy text.
+  settings texts, 14 area selection through `OcrAreaPicker`, cloud-OCR privacy text. The window
+  picker offers enabled items only.
 
 ### T21 first-run wizard (Opus xhigh, W3)
 - `gui/wizard.py`; spec 16 wizard, 11.1 (incl. restarting OBS when `needs_restart`), Wayland clipboard
@@ -611,6 +635,11 @@ case in that row of the spec's unit-test table.
 - `anki_miner_game.spec` (one-folder, data files `page.html`, `vad_worker.py`, `requirements.txt`,
   `excludes` onnxruntime/numpy/av/owocr), `scripts/bundle_smoke.sh` (offscreen launch, isolated home,
   asserts `config.json`, the log, and absent modules). Spec 19.
+- `feed/page.html` is package data and the smoke fetches the page from a started feed.
+- Frozen Linux HTTPS: at frozen launch, when OpenSSL's default CA file and directory are both
+  missing, set `SSL_CERT_FILE` to the first distro bundle that exists (for example
+  `/etc/pki/tls/certs/ca-bundle.crt`, `/etc/ssl/certs/ca-certificates.crt`); the smoke makes one real
+  `bootstrap.urllib_transport` HTTPS GET.
 
 ### T28 installers (Opus high, W4)
 - `packaging/`: Inno Setup, AppImage, nfpm `.deb`, `.tar.gz`, shaped on Anki Miner's.
@@ -632,8 +661,8 @@ case in that row of the spec's unit-test table.
 
 ### T31 VAD tuning (Opus xhigh, after H3) and T32 OCR tuning (Opus xhigh, after H4)
 - T31: thresholds against at least three real recordings (voiced VN, voiced RPG with music,
-  unvoiced); report plus sample clips for the user's ear check. T32: start shift and VAD start snap
-  against real OCR sessions; owocr picker round trip.
+  unvoiced); report plus sample clips for the user's ear check. T32: start shift, VAD start snap
+  and `SNAP_LOOKBACK_MS` (provisional 10 s) against real OCR sessions; owocr picker round trip.
 
 ## 8. Verification
 
