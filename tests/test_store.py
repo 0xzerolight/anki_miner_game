@@ -1,6 +1,7 @@
 import dataclasses
 import json
 import os
+import stat
 import sys
 
 import pytest
@@ -204,3 +205,54 @@ def test_saving_into_an_unwritable_folder_is_a_store_error():
     assert profile_info.value.path == paths.profile_path("steins-gate")
     assert isinstance(profile_info.value, store.StoreError)
     assert "cannot be written" in str(profile_info.value)
+
+
+posix_only = pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes")
+
+
+def _mode(path) -> int:
+    return stat.S_IMODE(path.stat().st_mode)
+
+
+@posix_only
+@pytest.mark.parametrize(
+    ("umask", "expected"), [(0o022, 0o644), (0o027, 0o640), (0o002, 0o664)], ids=["022", "027", "002"]
+)
+def test_write_text_atomic_gives_the_umask_mode_not_mkstemps_0600(tmp_path, monkeypatch, umask, expected):
+    monkeypatch.setattr(store, "_UMASK", umask)
+    target = tmp_path / "x.srt"
+    store.write_text_atomic(target, "1\n")
+    assert _mode(target) == expected
+
+
+@posix_only
+def test_write_text_atomic_takes_an_explicit_mode(tmp_path, monkeypatch):
+    monkeypatch.setattr(store, "_UMASK", 0o022)
+    target = tmp_path / "secret.json"
+    store.write_text_atomic(target, "{}", mode=0o600)
+    assert _mode(target) == 0o600
+
+
+@posix_only
+def test_config_stays_private_and_profiles_follow_the_umask(monkeypatch):
+    monkeypatch.setattr(store, "_UMASK", 0o022)
+    assert _mode(store.save_config(AppConfig())) == 0o600
+    assert _mode(store.save_profile(_profile())) == 0o644
+
+
+@posix_only
+def test_the_umask_is_read_as_the_process_has_it():
+    current = os.umask(0o022)
+    os.umask(current)
+    assert store._read_umask() == current
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="/proc/self/status is Linux")
+def test_the_umask_is_read_without_changing_it_on_linux(monkeypatch):
+    """Setting the umask to read it would race with other threads creating files."""
+
+    def no_umask_change(_mask):
+        raise AssertionError("os.umask called")
+
+    monkeypatch.setattr(store.os, "umask", no_umask_change)
+    assert isinstance(store._read_umask(), int)
