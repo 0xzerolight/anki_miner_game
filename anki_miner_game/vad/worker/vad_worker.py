@@ -3,7 +3,8 @@
 #   faster_whisper/audio.py  decode_audio, _ignore_invalid_frames
 # Changed for this app: the audio is streamed through the model and the segmenter instead of being
 # decoded into one array, so a region is emitted as soon as it closes and memory stays flat over a
-# long session. The max_speech_duration_s split is left out: the app never limits speech length.
+# long session. Invalid data is skipped per packet, so decoding goes on after a bad one. The
+# max_speech_duration_s split is left out: the app never limits speech length.
 #
 # MIT License. Copyright (c) 2023 SYSTRAN.
 #
@@ -23,15 +24,44 @@
 # OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 """Silero VAD over a recording's audio track (spec 13.2).
 
-A standalone script, run by the VAD add-on's own Python, never imported by the app at runtime.
+A standalone script, run by the VAD add-on's own Python, never imported by the app at runtime::
+
+    <addon python> vad_worker.py --video <path> --model <onnx> [--track 0]
+
+``--track`` counts audio tracks only. stdout carries one ASCII JSON object per line, in file
+milliseconds::
+
+    {"t": "region", "start_ms": 5310, "end_ms": 8920}       as each region closes, in order
+    {"t": "progress", "done_ms": 600000, "total_ms": 5248120}  after each model batch
+    {"t": "done"}                                            last line, exit code 0
+    {"t": "error", "message": "..."}                         last line instead, exit code 1
+
+``total_ms`` is null when the file does not state its duration (a recording cut off by a crash).
 """
 
 from __future__ import annotations
 
+import argparse
+import itertools
+import json
+import sys
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+from typing import Any
+
+try:
+    import av
+    import numpy as np
+    import onnxruntime
+except ImportError as exc:  # an incomplete add-on environment; main() reports it on the protocol
+    _MISSING_DEPENDENCY: ImportError | None = exc
+else:
+    _MISSING_DEPENDENCY = None
 
 SAMPLING_RATE = 16000
 WINDOW_SAMPLES = 512
+CONTEXT_SAMPLES = 64
+BATCH_WINDOWS = 1024  # 32.8 s of audio per model call; the model's cost per window does not depend on it
 
 
 @dataclass(frozen=True)
@@ -134,3 +164,133 @@ def region_ms(start_samples: int, end_samples: int, offset_ms: int) -> tuple[int
     start_ms = start_samples * 1000 // SAMPLING_RATE
     end_ms = -(-end_samples * 1000 // SAMPLING_RATE)
     return start_ms + offset_ms, end_ms + offset_ms
+
+
+class SileroVADModel:
+    """The Silero model, with its LSTM state and 64-sample context carried from call to call.
+
+    faster-whisper runs the whole track as consecutive batches that share this state; carrying it
+    across calls gives the same probabilities one batch at a time.
+    """
+
+    def __init__(self, path: str) -> None:
+        opts = onnxruntime.SessionOptions()
+        opts.inter_op_num_threads = 1
+        opts.intra_op_num_threads = 1
+        opts.enable_cpu_mem_arena = False
+        opts.log_severity_level = 4
+        self._session = onnxruntime.InferenceSession(path, providers=["CPUExecutionProvider"], sess_options=opts)
+        self._h = np.zeros((1, 1, 128), dtype=np.float32)
+        self._c = np.zeros((1, 1, 128), dtype=np.float32)
+        self._context = np.zeros(CONTEXT_SAMPLES, dtype=np.float32)
+
+    def __call__(self, windows: Any) -> Any:
+        """Speech probability of each row of a ``(n, 512)`` float32 array."""
+        context = np.empty((len(windows), CONTEXT_SAMPLES), dtype=np.float32)
+        context[0] = self._context
+        context[1:] = windows[:-1, -CONTEXT_SAMPLES:]
+        batch = np.concatenate([context, windows], axis=1)
+        probs, self._h, self._c = self._session.run(None, {"input": batch, "h": self._h, "c": self._c})
+        self._context = windows[-1, -CONTEXT_SAMPLES:].copy()
+        return probs
+
+
+def _decoded_frames(container: Any, stream: Any) -> Iterator[Any]:
+    """Every frame of the track; a packet the decoder rejects as invalid data is skipped."""
+    for packet in container.demux(stream):
+        try:
+            frames = packet.decode()
+        except av.InvalidDataError:
+            continue
+        yield from frames
+
+
+def _duration_ms(container: Any, stream: Any) -> int | None:
+    if container.duration is not None:
+        return int(container.duration * 1000 // av.time_base)
+    if stream.duration is not None and stream.time_base is not None:
+        return int(stream.duration * stream.time_base * 1000)
+    return None
+
+
+def run(video: str, model_path: str, track: int, emit: Callable[[dict[str, Any]], None]) -> None:
+    """Emit every speech region of one audio track, then return; raises on any failure."""
+    model = SileroVADModel(model_path)
+    segmenter = SpeechSegmenter()
+    with av.open(video, mode="r", metadata_errors="ignore") as container:
+        audio_streams = container.streams.audio
+        if not 0 <= track < len(audio_streams):
+            raise ValueError(f"no audio track {track}: the file has {len(audio_streams)} audio track(s)")
+        stream = audio_streams[track]
+        total_ms = _duration_ms(container, stream)
+
+        frames = _decoded_frames(container, stream)
+        first = next(frames, None)
+        # Regions are on the file's timeline: a track that starts after the file does shifts them.
+        offset_ms = 0
+        if first is not None and first.time is not None:
+            file_start_s = container.start_time / av.time_base if container.start_time is not None else 0.0
+            offset_ms = max(0, round((first.time - file_start_s) * 1000))
+
+        resampler = av.AudioResampler(format="s16", layout="mono", rate=SAMPLING_RATE)
+        chunks: list[Any] = []
+        buffered = 0
+        audio_length = 0
+        windows_done = 0
+
+        def process(samples: Any) -> None:
+            nonlocal windows_done
+            for prob in model(samples.reshape(-1, WINDOW_SAMPLES)).tolist():
+                for start, end in segmenter.push(prob):
+                    start_ms, end_ms = region_ms(start, end, offset_ms)
+                    emit({"t": "region", "start_ms": start_ms, "end_ms": end_ms})
+            windows_done += len(samples) // WINDOW_SAMPLES
+            done = min(windows_done * WINDOW_SAMPLES, audio_length)
+            emit({"t": "progress", "done_ms": offset_ms + done * 1000 // SAMPLING_RATE, "total_ms": total_ms})
+
+        for frame in itertools.chain([first] if first is not None else [], frames, [None]):
+            if frame is not None:
+                frame.pts = None  # as faster-whisper: timestamps play no part once decoded
+            for resampled in resampler.resample(frame):
+                chunk = resampled.to_ndarray().reshape(-1).astype(np.float32) / 32768.0
+                chunks.append(chunk)
+                buffered += len(chunk)
+                audio_length += len(chunk)
+                if buffered >= BATCH_WINDOWS * WINDOW_SAMPLES:
+                    data = np.concatenate(chunks)
+                    whole = len(data) - len(data) % WINDOW_SAMPLES
+                    process(data[:whole])
+                    chunks, buffered = [data[whole:]], len(data) - whole
+
+        # faster-whisper pads the track with 512 - len % 512 zeros, a whole window when it divides.
+        data = np.concatenate(chunks) if chunks else np.zeros(0, dtype=np.float32)
+        process(np.pad(data, (0, WINDOW_SAMPLES - len(data) % WINDOW_SAMPLES)))
+        for start, end in segmenter.finish(audio_length):
+            start_ms, end_ms = region_ms(start, end, offset_ms)
+            emit({"t": "region", "start_ms": start_ms, "end_ms": end_ms})
+
+
+def _emit(message: dict[str, Any]) -> None:
+    sys.stdout.buffer.write(json.dumps(message).encode("ascii") + b"\n")
+    sys.stdout.buffer.flush()
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Silero VAD over a recording's audio track, as JSON lines.")
+    parser.add_argument("--video", required=True, help="the recording")
+    parser.add_argument("--model", required=True, help="path to silero_vad_v6.onnx")
+    parser.add_argument("--track", type=int, default=0, help="index among the file's audio tracks (default 0)")
+    args = parser.parse_args(argv)
+    try:
+        if _MISSING_DEPENDENCY is not None:
+            raise RuntimeError(f"the VAD add-on environment is incomplete: {_MISSING_DEPENDENCY}")
+        run(args.video, args.model, args.track, _emit)
+    except Exception as exc:  # the protocol's single failure report; the session row shows it (spec 17)
+        _emit({"t": "error", "message": f"{type(exc).__name__}: {exc}"})
+        return 1
+    _emit({"t": "done"})
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
