@@ -118,9 +118,11 @@ through `tail`) and keep the file as evidence. Set
 - Tests reach no network beyond loopback (`tests/_network_tripwire.py`); mark
   a genuinely networked test `network`, and a real-OBS test `obs_live`.
 - Every top-level `QWidget` a Qt test constructs goes through
-  `qtbot.addWidget`; the suite runs offscreen (`QT_QPA_PLATFORM=offscreen`)
-  with an isolated `ANKI_MINER_GAME_HOME` per test (autouse in
-  `tests/conftest.py`).
+  `qtbot.addWidget`; use pytest-qt's `qapp`, never construct a
+  `QApplication`. The suite runs offscreen (`QT_QPA_PLATFORM=offscreen`)
+  with an isolated `ANKI_MINER_GAME_HOME`, `HOME`/`USERPROFILE` and
+  platform config/data dirs per test (autouse in `tests/conftest.py`), so
+  `~` never reaches the real home.
 
 ## Commit rules
 
