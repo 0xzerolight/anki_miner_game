@@ -1,5 +1,7 @@
 # Wave 1 integration: spec amendments for the M0 gate
 
+Applied to `docs/specs/2026-09-20-anki-miner-game-design.md` by the M0 gate on 2026-09-21.
+
 Spec readings and departures that came out of the wave 1 integration review
 (`.orchestration/reviews/wave-1-cross-*.md`) and its fix round. The code already follows each one;
 the M0 amender writes them into `docs/specs/2026-09-20-anki-miner-game-design.md` beside the

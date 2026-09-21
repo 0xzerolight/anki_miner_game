@@ -2,6 +2,9 @@
 
 Status: design approved 2026-09-20. No code exists. Implementation happens in a new repository,
 `anki_miner_game`. This file is the input to that repository's first implementation plan.
+Amended at the M0 gate on 2026-09-21 with what the spikes found (`docs/m0/*.md`) and the
+orchestrator's rulings on them. The spikes ran on Linux; every Windows-derived value is marked
+provisional until the Windows checks of pre-release QA (H5, owner decision D2).
 
 Working name "Anki Miner Game". A standalone desktop app that records a video-game session through
 OBS and writes a subtitle file from text-hooker lines, so that Anki Miner can mine games the way it
@@ -63,7 +66,9 @@ Made by the maintainer on 2026-09-20. Not open for re-litigation in the implemen
 ## 3. External contracts
 
 Everything here was checked against source on 2026-09-19/20. Line numbers for Anki Miner are at
-commit `380e83f3`; for GSM at `479747fe`; owocr at 1.26.8. Appendix B lists what was verified how.
+commit `380e83f3`; for GSM at `479747fe`; owocr at 1.26.8. M0 re-read the OBS facts in obs-studio
+32.2.2 and obs-websocket 5.7.4 source and ran them against a real OBS 32.2.2 on Linux
+(`docs/m0/source-findings.md`, `clock.md`, `obs-behaviour.md`). Appendix B lists what was verified how.
 
 ### 3.1 Anki Miner input contract
 
@@ -112,7 +117,9 @@ Defaults and the JSON shape are GSM's (`util/config/configuration.py:580-602`, `
 - Websocket settings live in `plugin_config/obs-websocket/config.json` under the OBS config root.
   Keys: `server_enabled`, `server_port`, `server_password`, `auth_required`, `alerts_enabled`,
   `first_load`. OBS's own default port is 4455. GSM treats this file as the source of truth
-  (`obs/launch.py:440-483`); so does this app.
+  (`obs/launch.py:440-483`); so does this app. obs-websocket reads it once, when OBS starts, and
+  writes it at start and when the user saves its settings dialog, never at exit
+  (`docs/m0/source-findings.md` section 5). The server listens on all interfaces.
 - Config roots: Windows `%APPDATA%\obs-studio`; Linux `~/.config/obs-studio`; Flatpak
   `~/.var/app/com.obsproject.Studio/config/obs-studio`.
 - Requests used: `GetVersion`, `GetRecordStatus`, `StartRecord`, `StopRecord`, `GetStreamStatus`,
@@ -121,37 +128,76 @@ Defaults and the JSON shape are GSM's (`util/config/configuration.py:580-602`, `
   `GetProfileParameter`, `SetProfileParameter`, `GetVideoSettings`, `SetVideoSettings`,
   `GetRecordDirectory`, `SetRecordDirectory`, `CreateScene`, `GetInputKindList`, `CreateInput`,
   `SetInputSettings`, `GetSpecialInputs`, `SetInputMute`, `GetInputPropertiesListPropertyItems`,
-  `GetSceneList`, `SetCurrentProgramScene`, `GetInputSettings`, `GetInputMute`, `RemoveInput`.
+  `GetSceneList`, `SetCurrentProgramScene`, `GetInputSettings`, `GetInputMute`, `RemoveInput`,
+  `GetOutputSettings` (27; the last one ties an active recording to its manifest after a reconnect,
+  section 6.3). The app never sends `PauseRecord` (section 7).
+- Minimum OBS: **30.0.0** (obs-websocket 5.3.3). `SetRecordDirectory` (5.3.0) is the newest of the
+  27; every other request exists since 5.0.0. `RecordFileChanged` needs OBS 30.2.0; on 30.0 and 30.1
+  a split is silent, and the app's profile keeps splitting off (`docs/m0/source-findings.md`
+  section 9).
+- OBS is ready when `GetVersion` succeeds, not when the websocket accepts a connection. Until OBS
+  has loaded, and between `CurrentSceneCollectionChanging` and `...Changed`, every request gets
+  status 207 `NotReady` and every event is dropped, not queued (`docs/m0/source-findings.md`
+  sections 5 and 8, confirmed by R2 in `switch_not_ready`). The protocol calls requests during a
+  collection change undefined behaviour; obs-websocket 5.7.4 rejects them.
 - `GetRecordStatus` returns `outputActive`, `outputPaused`, `outputTimecode`, `outputDuration` (ms),
-  `outputBytes`.
+  `outputBytes`, and no path. `outputDuration` counts frames delivered to the output (it trails the
+  capture by the encoder's latency, section 7) and is 0 once the output is inactive. After
+  `STOPPED` it still reports `outputActive: true` for about 170 ms (`docs/m0/obs-behaviour.md`
+  section 4).
+- `GetOutputSettings {outputName}` on `simple_file_output` (Simple output mode) or `adv_file_output`
+  (Advanced) returns the file being written as `outputSettings.path`, identical to
+  `STARTED.outputPath` (R2 `reconnect`). After a split it still names the first file.
+- `GetReplayBufferStatus` and `GetVirtualCamStatus` answer 604 when that output is not configured or
+  not installed; the app reads 604 as "not active".
 - Events used: `RecordStateChanged {outputActive, outputState, outputPath}` where `outputPath` is
-  populated on both STARTED and STOPPED; `RecordFileChanged {newOutputPath}`;
+  populated on both STARTED and STOPPED (the protocol comment says STOPPED only; the code sets both)
+  and null otherwise; `RecordFileChanged {newOutputPath}`;
   `CurrentSceneCollectionChanging` / `CurrentSceneCollectionChanged`; `CurrentProfileChanging` /
   `CurrentProfileChanged`; `ExitStarted`.
 - Output states: `OBS_WEBSOCKET_OUTPUT_STARTING`, `_STARTED`, `_STOPPING`, `_STOPPED`, `_PAUSED`,
-  `_RESUMED`. STARTED and STOPPED were confirmed in obs-websocket source this session; the pause pair
-  comes from the protocol enum and is confirmed when M0 records real transcripts.
-- Sending requests while a scene collection is changing is documented as undefined behaviour.
+  `_RESUMED`, all confirmed in source and in R2's transcripts. A `PAUSED` event carries
+  `outputActive: false`, so the session keys on `outputState`, never on `outputActive`.
+- Order: obs-websocket sends each event and each response from its own thread-pool task, so neither
+  two events nor an event and a response have a guaranteed order. R2 saw a response arrive before
+  its `...Changed` event twice in 27 switches. The first event on a freshly identified connection
+  arrives about 40 ms late (`docs/m0/obs-behaviour.md` section 3).
 - Input kinds: Windows `game_capture`, `window_capture`, `monitor_capture`,
   `wasapi_process_output_capture` (one application's audio), `wasapi_output_capture` (desktop audio).
   Linux `pipewire-screen-capture-source`, `xcomposite_input`, `pulse_output_capture`. Always
-  feature-detected with `GetInputKindList`, never assumed.
-- Client library: `obsws-python` (`ReqClient`, `EventClient`), the one GSM and owocr both use.
+  feature-detected with `GetInputKindList`, never assumed. `wasapi_process_output_capture` exists
+  only on Windows 10 build 19041 or later.
+- Client library: `obsws-python` 1.8.0 (`ReqClient`, `EventClient`), the one GSM and owocr both use.
+  It logs the password at INFO when it connects and puts it in `repr()`; `ReqClient` does not match
+  request ids, so one client allows one request at a time from one thread and must be reconnected
+  after a timeout; `EventClient`'s thread ends silently when the connection closes
+  (`docs/m0/source-findings.md` section 11). Section 11.2 says how the gateway copes.
 
 ### 3.4 owocr
 
 `pip install owocr`, GPL-3.0-only, Python >= 3.11, a CLI with no library API.
 
-- Flags used: `-r screencapture`, `-w websocket`, `-wp <port>`, `-e <engine>`, `-l <lang>`,
-  `-sa <area>`, `-swa <rects>`, `-t False` (`owocr/config.py:21-105`).
+- Flags used: `-r screencapture`, `-w websocket`, `-wp <port>`, `-e <engine>`, `-el <engine>`,
+  `-l <lang>`, `-sa <area>`, `-swa <rects>`, `-t False` (`owocr/config.py:21-105`). Without `-el`,
+  owocr builds every engine it can import, and an unavailable `-e` engine falls back to any other,
+  cloud ones included (`run.py:3261-3266,3297-3298`).
 - Output: plain-text frames broadcast to every websocket client (`owocr/run.py:486-490,2730`).
 - The server binds `0.0.0.0` (`run.py:528`).
 - The config file path is fixed at `~/.config/owocr_config.ini` with no override flag
-  (`config.py:110`). This app never reads or writes it.
+  (`config.py:110`). owocr reads it for every key the command line does not pass, and downloads a
+  default copy from GitHub when it is missing (`config.py:188-194`); R3 saw it created on a first
+  run. So the app's owocr child runs with a private home (section 14), and neither the app nor its
+  child touches the user's file.
+- Every start also contacts `pypi.org` (version check, 5 s timeout) and tries to fetch Chrome
+  Screen AI into `~/.config/screen_ai`; both only log on failure (`docs/m0/owocr.md`).
 - `-r obs` captures the whole program scene with no crop (`run.py:1830-1845`) and needs the OBS
   password on the command line. Not used in v1.
-- It logs `Selected coordinates: <rects>` and `Selected window coordinates: <rects>`
-  (`run.py:1956,2035,2480,2517`), which is how the chosen OCR area is read back.
+- It logs, to stderr as `HH:MM:SS | <message>`, `Selected coordinates: <rects>` for an explicit
+  `-sa` at start and after the screen picker (`run.py:1956,2480`), and `Selected window coordinates:
+  <rects>` for an explicit `-swa` and after the window picker (`run.py:2035,2517`). That is how the
+  chosen OCR area is read back. Rectangles print as `x1,y1,x2,y2`, several joined with `_`. The
+  window line is Windows-only: on Linux X11 a window title in `-sa` is an error, and on Wayland it
+  falls back to the screen picker. After a picker selection owocr keeps running and starts OCR.
 - Frame stabilisation is on by default (`config.py:140`): a line is emitted only once the text has
   stopped changing, so OCR lines arrive after the voice has started.
 - Local engines: OneOCR (Windows 10/11), meikiocr (any platform, onnxruntime). Cloud engines Google
@@ -277,7 +323,7 @@ One session has exactly one start shift: `START_SHIFT_MS = {"hook": 0, "ocr": -1
   "stopped_at": "2026-10-02T19:31:40Z",
   "obs": {"version": "31.0.2", "websocket": "5.5.4", "profile": "Anki Miner Game",
           "collection": "Anki Miner Game", "output_path": ".../_incoming/2026-10-02 18-04-11.mkv"},
-  "clock": {"kind": "event", "zero_event": "STARTED", "capture_latency_ms": 0,
+  "clock": {"kind": "event", "zero_event": "STARTED", "capture_latency_ms": 10,
             "degraded": false, "drift_samples": [{"at_ms": 0, "output_duration_ms": 0}]},
   "text_mode": "hook",
   "sources_used": ["textractor"],
@@ -317,11 +363,22 @@ Arming switches OBS to the app's profile and scene collection. The switch happen
 never at Start, so Start is a single `StartRecord` with no collection reload in front of it.
 
 1. Refuse if any output is active: `GetStreamStatus`, `GetRecordStatus`, `GetReplayBufferStatus`,
-   `GetVirtualCamStatus`. Banner names the active output.
+   `GetVirtualCamStatus`. Banner names the active output. A 604 answer from the last two means the
+   output is not configured or not installed, so not active. OBS itself switches profile and
+   collection under a live recording, stream or replay buffer and keeps them running (a recording
+   started on the user's profile keeps writing into the user's folder), so this refusal is the only
+   guard (`docs/m0/obs-behaviour.md` item 6).
 2. Read the current profile and collection names; write them to `obs_restore.json`.
 3. `SetCurrentProfile`, wait for `CurrentProfileChanged`. `SetCurrentSceneCollection`, wait for
    `CurrentSceneCollectionChanged`. No other request is sent between a `...Changing` event and its
-   `...Changed` event. Timeout 15 s, then restore and report.
+   `...Changed` event. Timeout 15 s, then restore and report. A switch whose target is already
+   current is skipped: OBS answers it and sends no event. A step completes on its `...Changed`
+   event, never on the answer, whose order against the events is not guaranteed (section 3.3).
+   `CreateProfile` answers before the profile exists and then switches to it with
+   `CurrentProfileChanged` and no `...Changing`, so it too waits for the event. A 207 answer is
+   retried (section 11.2). When `CurrentProfileChanged` arrives and the answer does not follow
+   within a few seconds, OBS is showing its modal restart question (section 11.3): a banner says
+   "OBS is asking to restart" and points at OBS's window (`docs/m0/obs-behaviour.md` items 3-5).
 4. Apply the game profile to the inputs (section 11.3). Connect text sources. State `armed`.
 
 Disarm restores the names from `obs_restore.json` and deletes the file. If the file still exists at
@@ -334,9 +391,20 @@ the app's profile and record directory by construction, whoever pressed the butt
 hotkey or OBS itself). A `STARTED` event in any other state is ignored, so the app never renames a
 file from the user's own setup.
 
+The session keys every record transition on `RecordStateChanged.outputState`, never on
+`outputActive` (a `PAUSED` event carries `outputActive: false`), and tolerates events that arrive
+out of order (section 3.3).
+
 ### 6.3 Reconcile on connect
 
 Run after every connect and reconnect, before any event is trusted.
+
+"Manifest for `outputPath`" means the manifest in `_incoming/` whose `obs.output_path` equals the
+active file's path, read with `GetOutputSettings` on `simple_file_output` or `adv_file_output`
+according to the profile's `[Output] Mode`. `outputBytes` against the file size is no substitute:
+the file on disk trails it by the muxer's buffering, and is 0 bytes 5 s into a recording
+(`docs/m0/obs-behaviour.md` item 8 and section 5). `GetRecordStatus` still reads active for about
+170 ms after `STOPPED`; a `STOPPED` event already received wins over that reading.
 
 | `GetRecordStatus` | App state | Manifest for `outputPath` in `_incoming/` | Action |
 |---|---|---|---|
@@ -353,6 +421,12 @@ Run after every connect and reconnect, before any event is trusted.
 the stop offset set to the last clock reading and the flag `obs_exited`. An `.mkv` survives an OBS
 crash, which is why the profile records to `.mkv`.
 
+R2 confirmed both paths (`docs/m0/obs-behaviour.md` item 12). A clean exit sends `ExitStarted`, then
+OBS closes the connection with 1001 "Server stopping." about 330 ms later, with no `STOPPED`. A
+killed OBS drops the connection with 1006 and sends no `ExitStarted`. The `.mkv` was readable both
+times. After a kill the next launch stops at OBS's modal "OBS Studio Crash Detected" with no
+websocket until the user answers it (section 17). The app never signals OBS itself.
+
 ## 7. Record clock
 
 ```python
@@ -364,10 +438,29 @@ class RecordClock(Protocol):
 ```
 
 `EventClock` (primary). `offset = (t_mono - zero_mono - paused_total) * 1000 + capture_latency_ms`.
-`zero_mono` is the monotonic time of the zero event; pause edges come from the
-`OBS_WEBSOCKET_OUTPUT_PAUSED` and `_RESUMED` events. Which moment is the zero (the `StartRecord`
-response, `STARTING`, or `STARTED`) and the value of `capture_latency_ms` are measured in M0, not
-assumed. The default until then is `STARTED` and 0.
+`zero_mono` is the monotonic time at which the `STARTED` event arrived, and `capture_latency_ms` is
+**10**. M0 measured both against flash timestamps (`docs/m0/clock.md`): with `STARTED` as the zero
+the encoder medians lie within 50 ms of each other (NVENC with lookahead, x264, x264 with
+`rc-lookahead = 60`), under the 100 ms criterion, so one constant ships and there is no calibration
+step. The `StartRecord` response and `STARTING` arrive before the encoder has started, 7-15 ms early
+for x264 and 132-184 ms for NVENC, which would widen the spread to about 183 ms. Against 10 the
+largest residual was 50 ms without overload and 133 ms under encoder overload. Both values are
+Linux measurements, provisional for Windows until H5 (D2), which also checks the resolution of
+`time.monotonic()` on the shipped Windows Python: a coarse tick would add its size to every line's
+error (`docs/m0/clock.md` Limits).
+
+Pause edges come only from the `OBS_WEBSOCKET_OUTPUT_PAUSED` and `_RESUMED` events. The app never
+sends `PauseRecord`: a pause is whatever OBS reports, whoever caused it. On OBS's default profile
+(Simple output, recording "Same as stream") the recording shares the stream encoder and cannot
+pause; a `PauseRecord` there answers success and nothing happens, no event, no pause. Provisioning
+therefore gives the app's profile a separate recording encoder (section 11.3). With one, the
+frame-aligned pause edges moved offsets after a resume by under 10 ms at the median, inside the
+150 ms bound.
+
+Under encoder overload OBS keeps its frame timeline and repeats the last frame, so the clock does
+not drift; a flash rendered while the encoder was behind is simply missing from the file. A line
+can then reach the subtitle before its picture reaches the video. Up to at least 14 % skipped
+frames that stayed inside 150 ms; nothing in the clock can correct it.
 
 `OutputDurationClock` (fallback). Anchors on `(monotonic midpoint of the request round trip,
 GetRecordStatus.outputDuration + lag)` and re-anchors every 10 s. `outputDuration` counts frames
@@ -379,8 +472,11 @@ the fallback back within the 150 ms bound. A session with no such sample has no 
 cues may start seconds early, and a banner says so. The fallback is used only when reconcile says
 the event history is incomplete (section 6.3).
 
-Rules for both: offsets are clamped to be non-negative and non-decreasing; a line arriving while
-paused is dropped and counted; the hooker's own `time` field is ignored, since mixing wall-clock
+Rules for both: line offsets are clamped to be non-negative and non-decreasing; a stop reading or a
+drift sample is never below the latest line offset but does not move that clamp; an
+`outputDuration` anchor whose round-trip midpoint falls before the latest pause edge is carried
+forward by the time the recording ran in between (`docs/m0/wave-1-amendments.md` item 7); a line
+arriving while paused is dropped and counted; the hooker's own `time` field is ignored, since mixing wall-clock
 with monotonic invites skew for a gain of milliseconds on localhost. `outputDuration` is sampled
 while the `EventClock` is in use and the recording runs unpaused: at start, 10 s after start, at
 each resume and at stop. Each sample is written to the manifest's `clock.drift_samples`, and the
@@ -389,7 +485,17 @@ fallback takes its lag from them.
 File splitting is off in the app's profile. If `RecordFileChanged` fires anyway, the session is
 finalised against the first file, flagged `split_unsupported`, and a banner says later lines were
 not subtitled. The event carries only a path and the real split lands on a keyframe, so a rebase
-would be a guess. Not in v1.
+would be a guess. Not in v1. R2 saw `RecordFileChanged` 5.6 s after the split request, and after it
+`STOPPED.outputPath`, `StopRecord.outputPath` and `GetOutputSettings` all still name the first file;
+only `RecordFileChanged` names the second, so the session never reads `STOPPED.outputPath` as the
+last file (`docs/m0/obs-behaviour.md` item 10). With several `stop` records in the journal the
+first wins (section 10.3).
+
+The stop offset is the clock reading at the receipt of `STOPPING`, not of `STOPPED`. The video
+ends at `StopRecord` / `STOPPING` within one frame, while `STOPPED` follows 560-620 ms later
+(Simple, NVENC) or about 1.3 s later (Advanced, x264); stopping on `STOPPED` would let the last cue
+run past the end of the video (`docs/m0/obs-behaviour.md` item 9). When no `STOPPING` was seen
+(a reconnect), the rules of sections 6.3 and 6.4 apply.
 
 ## 8. Text intake
 
@@ -406,9 +512,11 @@ class TextSource(Protocol):
 
 - `WebsocketSource`: `websockets` asyncio client. Connect to `ws://<uri>`; on handshake failure try
   `ws://<uri>/api/ws/text/origin` once (LunaTranslator). Reconnect with backoff 1, 2, 5, 10 s, then
-  every 10 s. `ping_interval=None`, as GSM does, because hookers do not answer pings. Frame parse:
-  try JSON; if the result is a dict take `sentence` (fall back to the whole frame when absent) and
-  `source`; any other JSON value, or invalid JSON, means the frame is the line. GSM's version calls
+  every 10 s. `ping_interval=None`, as GSM does, because hookers do not answer pings, and
+  `close_timeout=1.0`, because they do not answer close frames either. Frame parse:
+  try JSON; if the result is a dict take `sentence` (fall back to the whole frame when absent);
+  `source` and `time` are ignored: a line belongs to the configured source, and its time is read at
+  receipt. Any other JSON value, or invalid JSON, means the frame is the line. GSM's version calls
   `.get` on whatever `json.loads` returns (`gametext.py:691-700`); the port guards that.
 - `ClipboardSource`: `QClipboard.dataChanged` on the main thread, text only, ignores changes made
   by this app. Works on Windows and X11. On Wayland Qt sees the clipboard only while focused; the
@@ -421,10 +529,12 @@ class TextSource(Protocol):
 Applied in this order to every received line. Each drop increments one counter in the manifest.
 
 1. Unicode NFC.
-2. Remove control characters and zero-width characters (`Cc`, `Cf` categories) except newline.
+2. Remove control characters and zero-width characters (`Cc`, `Cf`) and lone surrogates (`Cs`)
+   except newline. `json.loads` turns an unpaired `\udXXX` escape into a lone surrogate, which the
+   journal, the subtitle and the feed cannot encode.
 3. Newlines to spaces; collapse whitespace; strip.
 4. Speaker strip (when enabled): remove one leading `【…】` group and following whitespace.
-5. Drop if empty.
+5. Drop if empty. Counter `no_letters`: an empty line has no letter either.
 6. Drop if no character is a letter (`str.isalpha`): punctuation-only and digit-only lines. A
    digit-only cue can also be mistaken for an index line by SRT parsers. Counter `no_letters`.
 7. Drop if longer than 300 characters. Counter `junk`.
@@ -434,6 +544,14 @@ Applied in this order to every received line. Each drop increments one counter i
    line's text, arrived within 2 s of it, and is longer, it replaces the previous line's text and
    keeps the previous line's offset. It is opt-in because it would swallow a short real line such
    as え followed by えっと….
+
+"The previous accepted line" in steps 8 and 9 means the previous line journalled in the current
+recording. The session resets the pipeline whenever the line it accepted last will not be
+journalled: after dropping an accepted line as `paused`, at `STARTED` (unless the auto-start line
+held while armed is journalled at offset 0), and after a split stop. A typewriter merge is
+journalled as a `replace` record only when its base line is the journal's last `line` record;
+otherwise it is journalled as a new line at its own offset, or dropped as `paused` when the clock
+reads `None`. A new session's first line is therefore never a duplicate of the last one.
 
 An accepted line is journalled (section 10.2), broadcast to the text feed, and shown in the live list.
 
@@ -469,7 +587,8 @@ Order of evaluation: (1) starts for every line; (2) the drop test, with `D` meas
 **immediately following** line, kept or not, so a burst of click-through lines is dropped as a
 whole; (3) ends, with `next` meaning the next **kept** line, so a dropped line never shortens its
 neighbour. Starts are non-decreasing. Two lines can share a start only when the OCR shift clamps at
-`prev.start`; the earlier of the two then has `D = 0` and is dropped.
+`prev.start`; the earlier of the two then has `D = 0` and is dropped. Finalise passes no line
+recorded after the first `stop` record (section 10.3), so no line starts past `stop_ms`.
 
 SRT output (`session/srt_writer.py`): UTF-8 without BOM, `\n` line ends, index from 1, timestamps
 `HH:MM:SS,mmm` formatted from integer milliseconds (GSM's formatter floors seconds and takes
@@ -483,16 +602,35 @@ cues. Written to a temporary name in the same folder and moved into place with `
 Folder `<output_root>/<sanitised title>/`, stem `<sanitised title> - NN`, NN zero-padded to two
 digits and growing naturally to 9999. Anki Miner's extractor reads at most four digits.
 
-Sanitiser, in order:
+Sanitiser, in order (amended at M0, `docs/m0/sanitiser.md`):
 
 1. Replace `< > : " / \ | ? *` and control characters with a space.
-2. Replace every inner ` - ` with ` ~ `, so the only ` - ` in the stem is the one before NN.
-3. Rewrite any `S<digits>` + optional separators + `E<digits>` token (either case) as
+2. Collapse every whitespace run to one space; trim both ends.
+3. Replace every hyphen that has a space on both sides with `~`, so the only ` - ` in the stem is
+   the one before NN.
+4. Rewrite any `S<digits>` + optional separators + `E<digits>` token (either case) as
    `S<digits>~E<digits>`, because that pattern outranks ` - NN` in Anki Miner.
-4. Collapse whitespace; strip trailing dots and spaces; empty becomes `Game`.
+5. Strip trailing dots and spaces; empty becomes `Game`.
+6. Steps 3 and 4 must also hold for the stem as Anki Miner reads it. Its extractor deletes
+   technical tokens (`1080p`, `1280x720`, `x264`, `10bit`, `[1A2B3C4D]`, `v2`) before matching.
+   Where that deletion would leave a hyphen between whitespace, the hyphen becomes `~`. Where it
+   would join an `S<digits>` to an `E<digits>`, a `~` goes in directly before the `E`. Repeat until
+   neither applies.
 
-Verified against Anki Miner's real `EpisodeNumberExtractor` on 2026-09-20; each extracts the session
-number with no season:
+Step 6 only replaces a hyphen or inserts a `~`, so no letter or digit the user typed is lost; a
+title with no hazard passes through unchanged, and the rule is idempotent. `session/naming.py`
+simulates the extractor's token deletion (a port of its six patterns) rather than approximating it.
+All whitespace, U+3000 included, becomes an ASCII space.
+
+The first rule (` - ` to ` ~ ` before collapsing whitespace, on the title as typed) failed three
+ways. A deleted token could join `S1` and `E2` or put spaces around a hyphen (`S1 1080p E2` was
+read as season 1, episode 2); U+3000 and U+00A0 around a hyphen are not control characters but
+match the extractor's `\s` (`A　-　5` was read as episode 5); two hyphens sharing a space defeated a
+plain replace (`A - - 5` was read as episode 5). With the amended rule they give `S1 1080p ~E2 - 03`,
+`A ~ 5 - 01` and `A ~ ~ 5 - 01`. `docs/m0/sanitiser.md` lists all seventeen counterexamples.
+
+Verified against Anki Miner's real `EpisodeNumberExtractor` (at `ea4a30ce` for the amended rule);
+each extracts the session number with no season:
 
 | Title | Stem |
 |---|---|
@@ -507,8 +645,13 @@ number with no season:
 | `Ep 5 Simulator` | `Ep 5 Simulator - 04` |
 | `NieR:Automata 1.1a` | `NieR Automata 1.1a - 9999` |
 
-Without step 2, `Zero - 3 - 01` extracts 3. Without step 3, `S01E05 The Game - 02` extracts season 1
+Without step 3, `Zero - 3 - 01` extracts 3. Without step 4, `S01E05 The Game - 02` extracts season 1
 episode 5. The contract test (section 18) keeps this honest.
+
+Known limits in v1, outside the extractor contract: a title that is a Windows device name (`CON`,
+`NUL`, `COM1`) makes an invalid folder name on Windows (the stem `CON - 01` is fine); there is no
+length cap, so a long CJK title can pass the 255-byte file-name limit on Linux or `MAX_PATH` on
+Windows; a leading dot is kept, so `.hack` makes a hidden folder on Linux.
 
 ### 10.2 While recording
 
@@ -533,6 +676,9 @@ The journal is one JSON object per line, flushed after each write:
 {"t":"stop","offset_ms":5248120}
 ```
 
+The `stop` record's offset is the reading at `STOPPING` (section 7). `pause` and `resume` records
+come only from OBS's `PAUSED` and `RESUMED` events.
+
 Every accepted line is durable the moment it arrives. Cue ends are not journalled; they are a pure
 function of the journal (section 9). This replaces GSM's approach of appending SRT cues one line
 late, which needs special handling for the last line and loses it on a crash.
@@ -542,7 +688,8 @@ late, which needs special handling for the last line and loses it on a crash.
 One routine, idempotent, used by normal stop, by reconcile and at launch:
 
 1. Read the journal. If there is no `stop` record, stop offset = the last record's offset +
-   `max_cue_seconds`.
+   `max_cue_seconds`. With several `stop` records the first wins and every record after it is
+   ignored: its lines are neither cues nor `skip`, and a `replace` record there rewrites nothing.
 2. `build_cues`. No cues: keep the video, write no subtitle, flag `no_cues`.
 3. Write `<obs stem>.srt` atomically; write `live_cues` and counts into the manifest.
 4. Rename video, subtitle and manifest to `<Game>/<Game> - NN.*`. Same volume, so the renames are
@@ -553,30 +700,46 @@ One routine, idempotent, used by normal stop, by reconcile and at launch:
 
 Each step checks whether it has already happened, so a crash between any two steps is repaired by
 running the routine again. At launch the app runs it for every manifest in `_incoming/` whose
-recording is not active.
+recording is not active. Finalise calls under one output root run on one worker, one at a time,
+never on a shared pool: the NN bump is check-then-act, and two sessions of one game bumped to the
+same NN would both move onto one video.
 
 ## 11. OBS
 
 ### 11.1 Discovery (`obs/discovery.py`)
 
 1. Find the install. Windows: `%ProgramFiles%\obs-studio\bin\64bit\obs64.exe`, then the install
-   path the OBS installer records in the registry (key confirmed in M0). Linux: `obs` on PATH, then Flatpak `com.obsproject.Studio`.
+   folder the OBS installer records in the registry: `HKLM\SOFTWARE\OBS Studio`, default value, read
+   in the 64-bit view and then the 32-bit view, with `bin\64bit\obs64.exe` appended. The NSIS
+   installer and the Steam build both write that key in both views (`docs/m0/source-findings.md`
+   section 3; provisional until H5). Linux: `obs` on PATH, then Flatpak `com.obsproject.Studio`.
    Not found: the wizard links to `https://obsproject.com/download` and re-checks on demand.
 2. Find the config root (section 3.3) and read `plugin_config/obs-websocket/config.json`.
 3. `server_enabled` false and OBS not running: set it true, leave `auth_required` and the password
    as they are (generate a password only if auth is required and none exists), then launch OBS.
-   `server_enabled` false and OBS running: OBS would overwrite the file on exit, so the wizard asks
-   the user to tick Tools -> WebSocket Server Settings -> Enable, or to close OBS and press Fix.
+   `server_enabled` false and OBS running: obs-websocket read the file when OBS started and does not
+   read it again, so a change takes effect only at the next start, and saving its settings dialog
+   would overwrite it (section 3.3). The wizard asks the user to tick Tools -> WebSocket Server
+   Settings -> Enable, or to close OBS and press Fix.
 4. Port and password are read from that file at every connect. The password is never logged and
-   never copied into the app's own config unless the user types an override.
+   never copied into the app's own config unless the user types an override. The port override
+   and the password override each win over the file. `ObsDiscovery.credentials` raises
+   `ObsConfigError` only when no port is known, neither an override nor a readable file; with a
+   port override and an unreadable file it connects without a password unless one is overridden.
 
-Minimum OBS: the first version whose `GetVersion.availableRequests` contains every request in
-section 3.3. The app checks the list, not a version number, and names the missing request when it
-refuses. Expect this to mean OBS 30 or newer; M0 records the exact floor.
+Minimum OBS: **30.0.0** (obs-websocket 5.3.3), the first release whose
+`GetVersion.availableRequests` contains every request in section 3.3 (`SetRecordDirectory` is the
+newest). The app checks the list, not a version number, and names the missing request when it
+refuses: on OBS 29 that is `SetRecordDirectory`.
 
 Launching OBS: `obs64.exe --minimize-to-tray` on Windows (working directory must be the `bin\64bit`
-folder), `obs --minimize-to-tray` or `flatpak run com.obsproject.Studio --minimize-to-tray` on Linux.
-The app does not pass `--profile` or `--collection`; arming does the switch, one code path.
+folder), `obs --minimize-to-tray` or `flatpak run com.obsproject.Studio --minimize-to-tray` on Linux
+(R2 confirmed that `flatpak run` passes the flag through). The app does not pass `--profile` or
+`--collection`; arming does the switch, one code path. Readiness is a successful `GetVersion`
+(section 3.3): on the Linux host it first succeeded 2.3-5.5 s after launch, median 3.0 s. Two
+modal dialogs can stop a launch before the websocket answers: "already running" for a second
+instance, and "OBS Studio Crash Detected" after a crash or kill, which no flag in 32.2.2 skips.
+`wait_ready`'s timeout banner names the second (section 17).
 
 ### 11.2 Gateway (`obs/client.py`)
 
@@ -593,6 +756,14 @@ class ObsGateway(Protocol):
 and only enqueue onto the session actor with the monotonic time at which they arrived. Connection
 loss triggers reconnect with backoff, and every successful connect runs reconcile (section 6.3).
 
+A 207 `NotReady` answer (OBS still loading, or a collection change whose `...Changing` event has
+not arrived yet) is retried in `connect()` and `request()` until a timeout, then raised as
+`ObsRequestError`. Because of obsws-python's behaviour (section 3.3) the gateway sets the
+`obsws_python` logger to WARNING and never formats a client with `repr`, sends every request from
+one thread (a single-thread executor), drops and reconnects the request client after a timeout,
+since a late reply would be read as the next request's, and watches the event thread to detect a
+lost connection. Nothing depends on the order of a response against events.
+
 ### 11.3 Provisioning (`obs/provision.py`)
 
 Idempotent; runs from the wizard and again at each arm, touching only what differs.
@@ -601,24 +772,59 @@ Profile `Anki Miner Game`:
 
 | Setting | Value | How |
 |---|---|---|
-| Record directory | `<output_root>/_incoming` | `SetRecordDirectory` |
-| Output size | base size scaled so height <= `recording.max_height`, aspect kept | `SetVideoSettings` |
+| Record directory | `<output_root>/_incoming` | `SetRecordDirectory` (writes `[SimpleOutput] FilePath` and `[AdvOut] RecFilePath`) |
+| Output size | base size scaled so height <= `recording.max_height`, aspect kept, then the width rounded down to a multiple of 4 and the height to a multiple of 2 | `SetVideoSettings` |
 | Frame rate | `recording.fps` / 1 | `SetVideoSettings` |
-| Container | `mkv` | `SetProfileParameter`; expected keys `SimpleOutput` / `RecFormat2` and `AdvOut` / `RecFormat2`, **unverified** |
-| Automatic file splitting | off | `SetProfileParameter`; expected key `AdvOut` / `RecSplitFile`, **unverified** |
-| Encoder, bitrate, audio codec | untouched | OBS's own defaults suit the machine better than a guess |
+| Container | `mkv` | `SetProfileParameter` `[SimpleOutput] RecFormat2` and `[AdvOut] RecFormat2` |
+| Automatic file splitting | off | `SetProfileParameter` `[AdvOut] RecSplitFile` = `false`. Simple output mode never splits |
+| Automatic remux | off | `SetProfileParameter` `[Video] AutoRemux` = `false` |
+| Recording encoder | separate from the stream encoder | `SetProfileParameter`: Simple mode `[SimpleOutput] RecQuality` = `Small` when it is `Stream`; Advanced mode `[AdvOut] RecEncoder` set to the stream encoder's type (`[AdvOut] Encoder`) when it is `none` |
+| Audio sample rate, channels | the values of the profile provisioning started on | `GetProfileParameter` there, `SetProfileParameter` `[Audio] SampleRate` and `ChannelSetup` here |
+| Encoder, bitrate, audio codec | untouched except that recording uses its own encoder | OBS's own defaults suit the machine better than a guess |
 
-`SetProfileParameter` is used only where obs-websocket has no first-class request. The two key names
-marked unverified could not be checked this session (no OBS install on the design machine, and GSM
-sets neither); M0 reads them from a real `basic.ini` before any code depends on them. GSM logs that one
-of its profile changes needs an OBS restart (`obs/actions.py:224`). M0 found that every row above
-applies at the next `StartRecord` except the container: OBS reads it, like the output mode and the
-recording quality or encoder, only when it builds its outputs, at launch and when a profile is
-activated (`docs/m0/source-findings.md` section 2, `docs/m0/obs-behaviour.md` item 2). After
-changing one of them, provisioning switches to the profile it started on and back. Before that it
-gives the app's profile that profile's `[Audio] SampleRate` and `ChannelSetup`, since a switch
-between profiles where they differ stops at OBS's modal restart question (item 3). The app never
-restarts OBS.
+`SetProfileParameter` is used only where obs-websocket has no first-class request. It takes a string
+and saves the profile at once. The key names are confirmed in source and in a real `basic.ini`
+written by these requests (`docs/m0/source-findings.md` section 1, `docs/m0/obs-behaviour.md`
+item 1). OBS's default container is `hybrid_mp4`, and `AutoRemux` has no default, so it is off
+unless the user turned it on; on, it would remux each finished recording to a second video while
+finalise renames the first.
+
+The recording encoder row follows from the pause ruling of section 7: a recording that shares the
+stream encoder, OBS's default, cannot pause, and OBS then sends no pause event at all. Simple mode
+keeps OBS's own encoder for the `Small` quality (R2's `pause_resume` transcript); Advanced mode
+keeps the user's settings of the chosen encoder (R1 validated pause with an Advanced recording
+encoder, `docs/m0/clock.md` "Pause"). Like every other row it is re-checked at every arm.
+
+Output size alignment: libobs rounds the running output down to a width divisible by 4 and an even
+height, which `GetVideoSettings` reports while `basic.ini` keeps the value sent (854x480 ran as
+852x480; 2560x1080 scaled to 720 lines gives 1706, which runs as 1704). Provisioning aligns before
+comparing or sending, or it would re-send `SetVideoSettings` at every arm (`docs/m0/obs-behaviour.md`
+item 16).
+
+Restarts. GSM logs that one of its profile changes needs an OBS restart (`obs/actions.py:224`). M0
+found that record directory, output size, frame rate and splitting apply at the next `StartRecord`.
+The container does not: OBS picks the muxer, like the output mode and the recording quality or
+encoder, only when it builds its outputs, at launch and when a profile is activated. The first
+recording after provisioning was MP4 data in a `.mkv` file (`docs/m0/source-findings.md` section 2,
+`docs/m0/obs-behaviour.md` item 2). After changing one of those keys, provisioning re-activates the
+app's profile by switching to the profile it started on and back (31 and 84 ms in R2); the next
+recording is Matroska. When the app's profile is already current there is nowhere to switch to,
+and provisioning reports that the change needs a restart of OBS.
+
+A profile switch between profiles whose `[Audio] SampleRate` or `ChannelSetup` differ stops at
+OBS's modal restart question; `...Changed` arrives and the answer does not (`docs/m0/obs-behaviour.md`
+item 3). `CreateProfile` itself never asks, and the new profile runs at OBS's defaults (48000,
+`Stereo`), so a user at 44.1 kHz meets the question at the first switch from the app's profile back
+to their own: the switch-away above. Provisioning therefore reads both values with
+`GetProfileParameter` while the user's profile is current, before `CreateProfile`, and writes them
+with `SetProfileParameter` right after it, before any switch away. `SetProfileParameter` writes the
+running profile, the side OBS compares, so neither the switch away nor the switch back asks. This
+order is from source, not run (provisional until E1). The app never restarts OBS; if the question
+appears anyway, arming shows the banner of section 6.2.
+
+`CreateProfile` over the websocket also sets `[Basic] ConfigOnNewProfile=false` in the user's
+`user.ini`, which turns off OBS's offer to run its auto-configuration wizard for new profiles. The
+wizard says so (section 16).
 
 Scene collection `Anki Miner Game`, scene `Game`:
 
@@ -631,11 +837,26 @@ Scene collection `Anki Miner Game`, scene `Game`:
 
 The app's collection has none of OBS's special audio inputs: OBS creates them only in the
 collection of its first run (`docs/m0/obs-behaviour.md` section 1). A special input the user adds
-to it later, desktop or microphone, is muted through `GetSpecialInputs` and `SetInputMute`. The game
-profile dialog fills its window list from `GetInputPropertiesListPropertyItems(inputName,
-propertyName="window")`, the same call GSM uses, and stores the returned item value verbatim in
-`capture.window`. Input kinds that `GetInputKindList` does not report are skipped, and the dialog
-says which capture method is in use.
+to it later, desktop or microphone, is muted through `GetSpecialInputs` and `SetInputMute`.
+
+`CreateSceneCollection` gives the new collection OBS's default scene `Scene`, which stays the
+program scene after `CreateScene Game`; provisioning sets `Game` with `SetCurrentProgramScene`, or
+the app would record an empty scene (`docs/m0/obs-behaviour.md` item 13).
+
+The game profile dialog fills its window list from `GetInputPropertiesListPropertyItems(inputName,
+propertyName)`, the same call GSM uses, offers enabled items only, and stores the chosen item value
+verbatim in `capture.window`. `propertyName` is `window` for `game_capture`, `window_capture` and
+`wasapi_process_output_capture`, whose values share the format `<title>:<class>:<exe>` with `#` and
+`:` escaped as `#22` and `#3A` (built by one function, so the `game_capture` string is valid for
+application audio; provisional until H5). It is `capture_window` for `xcomposite_input`, value
+`<xid>\r\n<name>\r\n<class>` (`docs/m0/source-findings.md` section 10). An `xcomposite_input` is
+created with a non-empty placeholder `capture_window`: listing the windows of one whose value is
+empty aborts OBS 32.2.2 (`std::logic_error` on a NULL item value, `docs/m0/clock.md` side
+finding 2), so the app never lists windows of such an input. Input kinds that `GetInputKindList`
+does not report are skipped, and the dialog says which capture method is in use.
+
+On the Linux host `xcomposite_input` recorded black with OBS 32.2.2 on EGL, NVIDIA and Mesa alike
+(`docs/m0/clock.md` side finding 1); whether real X11 desktops hit this is an H5 check.
 
 ### 11.4 Recorder (`obs/recorder.py`)
 
@@ -653,8 +874,15 @@ Per game, off by default. It uses only signals the app already has; there is no 
 - **Auto-stop, idle**: no accepted line for `auto.stop_idle_minutes`. The idle tail cannot stretch
   the last cue, because the cap in section 9 already bounds it; the video simply carries some dead
   time at the end.
-- **Auto-stop, window closed**: every 5 s, `GetInputPropertiesListPropertyItems("window")` is checked
-  for the pinned window string; two consecutive misses stop the session. Windows and X11 only.
+- **Auto-stop, window closed**: every 5 s the window list of section 11.3 is read; two consecutive
+  "closed" readings stop the session. Only items with `itemEnabled: true` count, because OBS keeps
+  listing the configured value as a disabled item after the window closes and also while it is
+  open under a changed title (FPS or level in the title), and capture keeps following it. Windows:
+  open while an enabled item has the class and exe of `capture.window` (decode `#3A` and `#22`,
+  compare case-insensitively), queried on the `game_capture` input, whose list keeps minimized
+  windows (provisional until H5). X11: open while item 0 is enabled or an enabled item has the
+  stored xid, which R2 confirmed for a retitled and a closed window (`docs/m0/source-findings.md`
+  section 10, `docs/m0/obs-behaviour.md` section 7). Windows and X11 only.
   PipeWire capture exposes no window list, so Wayland relies on the idle timeout.
 
 `auto.py` subscribes to the session actor's events and sends it ordinary `UserCommand`s. No other
@@ -673,6 +901,12 @@ sha256. PyAV wheels carry their own FFmpeg libraries, so the app needs no `ffmpe
 is a download rather than part of the bundle: it is optional by decision, and onnxruntime, numpy
 and PyAV would add roughly 80 MB to an app that sits in the tray beside a game.
 
+Every uv call of either add-on runs with `addons.bootstrap.uv_environment(home, addon)`: uv's
+managed Python (`UV_PYTHON_INSTALL_DIR`), cache (`UV_CACHE_DIR`) and tool folders live under the
+add-on's own folder, `UV_NO_CONFIG` keeps the user's `uv.toml` out, and `UV_MANAGED_PYTHON` never
+lets a system Python in. Without them uv puts its Python in `~/.local/share/uv/python` and its cache
+in `~/.cache/uv` (`docs/m0/owocr.md` amendment 2).
+
 ### 13.2 Worker (`vad/worker/vad_worker.py`)
 
 A standalone script shipped as data and run by the add-on's Python:
@@ -684,6 +918,11 @@ stdout, one JSON object per line:
   {"t":"progress","done_ms":600000,"total_ms":5248120}
   {"t":"done"}            or  {"t":"error","message":"…"}
 ```
+
+`total_ms` is `null` when the file states no duration (a recording cut off by a crash, which
+section 6.4 keeps). `--track` counts audio tracks only. Regions are on the file's timeline: a track
+that starts after the file shifts them by its start offset, and audio the demuxer lost is replaced
+by silence so later regions keep their place.
 
 It decodes the first audio track with PyAV, resamples to 16 kHz mono, and feeds fixed 512-sample
 windows through the stateful Silero model, emitting regions as they close. The track is never held
@@ -712,6 +951,18 @@ steps interact.
    invariant of section 9 (`end >= start + MIN_CUE_MS` where the next start allows, and never past
    it). No chain: keep the live end. A cue may grow past the live 15 s cap, never past that clamp.
 
+Readings of these steps (`docs/m0/wave-1-amendments.md` item 14):
+
+- Windows are half-open: a region that begins exactly at the next cue's live start belongs to the
+  next cue.
+- OCR mode keeps step 1's skip rule for a cue that finds no snap region.
+- The snap interval of step 2 is `[max(prev.live_end, start - SNAP_LOOKBACK_MS), start]`, and the
+  first cue's interval opens at `max(0, start - SNAP_LOOKBACK_MS)`. `SNAP_LOOKBACK_MS` is 10 s,
+  provisional until tuned against real OCR sessions (M4).
+- A cue whose chain is empty keeps its live start and end, except when the next cue's start snapped
+  back: its live end then gets the step 3 clamp (`next.final_start - end_gap_ms`, with the
+  `MIN_CUE_MS` floor). Hook mode is unchanged.
+
 Worked example, hook mode, regions R1 5.31-8.92 s, R2 9.60-11.05 s, R3 14.2-16.0 s:
 
 | Cue | Live start-end | Window | Chain | Final end |
@@ -732,29 +983,59 @@ second `.srt` ever exists.
 For games with no working hook. owocr runs as a managed subprocess, so OCR is one more websocket
 text source and none of owocr's roughly 20k lines enter this app.
 
-Install (`addons/ocr_addon.py`): `uv tool install "owocr[<extra>]==<pinned>"` into
-`~/.anki_miner_game/addons/ocr/`, extra `oneocr` on Windows and `meikiocr` on Linux.
+Install (`addons/ocr_addon.py`): `uv tool install --python 3.12 "owocr[<extra>]==<pinned>"` into
+`~/.anki_miner_game/addons/ocr/`, extra `oneocr` on Windows and `meikiocr` on Linux, with the uv
+environment of section 13.1. owocr 1.26.8 needs Python >= 3.11.
+
+On Linux owocr depends on PyGObject, which has no wheel and builds from source only with a C
+toolchain and the cairo and GObject-introspection development packages; R3's install stopped at
+`Dependency "cairo" not found`. PyGObject serves only owocr's Wayland capture, so the Linux install
+adds `--overrides overrides.txt`, a file holding `pygobject; sys_platform == "never"`. It then
+installs without system packages, and **Linux OCR is X11-only: Wayland OCR is unsupported in v1**.
+The add-on says so on a Wayland session (`docs/m0/owocr.md` amendment 3). The Windows install
+floor with `oneocr` is an H5 check.
 
 Command line, built only from flags:
 
 ```
-owocr -r screencapture -w websocket -wp <free port> -t False -l <lang> -e <engine> \
+owocr -r screencapture -w websocket -wp <free port> -t False -l <lang> -e <engine> -el <engine> \
       -sa "<window title>" -swa <rects>          # Windows: window-relative rectangles
-owocr -r screencapture -w websocket -wp <free port> -t False -l <lang> -e <engine> \
-      -sa <rects>                                # Linux: screen rectangles; Wayland via the portal
+owocr -r screencapture -w websocket -wp <free port> -t False -l <lang> -e <engine> -el <engine> \
+      -sa <rects>                                # Linux X11: screen rectangles
 ```
 
-- The app never reads or writes `~/.config/owocr_config.ini`, which belongs to the user's own owocr.
+`-el` carries the same engine as `-e`, so owocr loads that one engine and cannot fall back to a
+cloud engine the user did not choose (section 3.4).
+
+- Neither the app nor its owocr child touches `~/.config/owocr_config.ini`, which belongs to the
+  user's own owocr. Managed owocr runs with a private `HOME` (`USERPROFILE` on Windows) at
+  `~/.anki_miner_game/addons/ocr/home/`, pre-seeded with a minimal `.config/owocr_config.ini`
+  holding only `[general]`. owocr parses it, skips the GitHub download, and takes every other
+  setting from the command line and its defaults. owocr's other `~`-relative paths (Screen AI,
+  OneOCR) land in that home too; whether the model caches follow `HOME` or `XDG_CACHE_HOME` is
+  open. `USERPROFILE` redirection with OneOCR is an H5 check.
 - **Select OCR area** in the game profile dialog runs owocr once with `-sa`/`-swa` empty, which
   opens owocr's own picker, and reads `Selected coordinates:` / `Selected window coordinates:` from
-  its log output into `ocr.rects`.
+  its log output into `ocr.rects`. owocr keeps running after the selection, so the dialog kills it
+  once the line is read, on a picker-closed line, or when it exits. A closed window picker keeps
+  owocr running on the whole window and prints no coordinate line.
 - owocr's frame stabilisation, repetition filter and furigana filter stay at their defaults. They
   are why OCR lines arrive late, which the -1000 ms start shift and the VAD start snap compensate.
+  In R3 a changed line reached the websocket 54-65 ms after the change, and the first frame came
+  3.4 s after spawn with models cached.
 - Supervisor: start at arm, stop at disarm; restart on crash with backoff, three attempts, then a
-  banner. The whole process tree is killed through a job object with kill-on-close on Windows and a
-  process group on POSIX, because `uv tool` launches through a shim. Disarm and quit wait for the
-  kill (`TextSource.wait_closed`). A crash of the app itself is covered on Windows by the job
-  object; on Linux owocr leads its own session and keeps running, still capturing and serving on
+  banner. The attempt count resets after 60 s of stable running, so only exits in a row add up.
+  An exit with a known configuration error (`Invalid coordinate set(s)`, `Window capture is only
+  currently supported`, `Picker window was closed`) is not a crash: it shows a banner without
+  spending the restarts. The banner quotes owocr's real error, never its closing `Terminated!`
+  line, and a traceback in the log (the stdin `termios` one of a non-TTY start) is not a failure.
+  The whole process tree is killed through a job object with kill-on-close on Windows (provisional
+  until H5) and a process group on POSIX: owocr starts in its own session, and a stop sends SIGTERM
+  to the group, waits 2 s for it to empty, then sends SIGKILL to the group. Signalling the parent
+  alone orphans the picker child and `multiprocessing.resource_tracker`, and SIGTERM alone is not
+  enough because the tracker ignores it while any other member lives (`docs/m0/owocr.md` "Process
+  tree"). Disarm and quit wait for the kill (`TextSource.wait_closed`). A crash of the app itself
+  is covered on Windows by the job object; on Linux owocr leads its own session and keeps running, still capturing and serving on
   `0.0.0.0`, until the user ends it. Accepted risk for v1; the user guide says how to end it.
 - owocr binds `0.0.0.0`. The user guide mentions the Windows firewall prompt and that the OCR text
   is reachable from the local network while it runs.
@@ -796,6 +1077,20 @@ First-run wizard: (1) OBS found, websocket enabled, connection made, profile and
 created; (2) text sources, each showing "waiting for a line" until one arrives; (3) output folder;
 (4) optional add-ons with sizes. Every step can be re-run from Settings.
 
+Step 1 states what the app changes in OBS, before it changes anything:
+
+- It turns on OBS's websocket server when it is off and OBS is closed (section 11.1).
+- It creates a profile and a scene collection named `Anki Miner Game` and switches OBS to them
+  while armed, back to the user's own when disarmed.
+- In its own profile only: the record folder, output size and frame rate, the `.mkv` container,
+  file splitting and automatic remux off, a recording encoder separate from the stream encoder so
+  that pause works, and the audio sample rate and channels copied from the user's profile. Stream
+  settings and the user's own profiles are not touched.
+- In its own collection only: the scene `Game` with the capture and audio inputs, set as the
+  program scene.
+- OBS itself turns off its offer to run the auto-configuration wizard for new profiles
+  (`[Basic] ConfigOnNewProfile` in `user.ini`) when the app creates its profile.
+
 Global control:
 
 - Windows: `RegisterHotKey` through `ctypes` with a `QAbstractNativeEventFilter` for `WM_HOTKEY`.
@@ -813,13 +1108,15 @@ The hand-off text shown after each session (Appendix C) tells the user what to d
 | Situation | Behaviour |
 |---|---|
 | OBS not installed | wizard step 1 blocks with a download link; re-check button |
-| OBS not running | Arm launches it minimised, waits up to 30 s for the websocket |
+| OBS not running | Arm launches it minimised, waits up to 30 s for a successful `GetVersion` |
+| No `GetVersion` within the wait | banner: OBS may be waiting on a dialog in its own window, such as "OBS Studio Crash Detected" after a crash |
 | Websocket server disabled | fix automatically when OBS is closed; otherwise instructions and a Fix button |
 | Authentication fails | re-read `config.json` once; then a banner asking for the password override |
 | A required request is missing | refuse to arm; banner names the request and the OBS version |
 | An output is active at Arm | refuse; banner names it |
 | Profile or collection switch times out | restore the previous names; banner |
-| `StartRecord` fails | banner with OBS's message; state stays `armed` |
+| `CurrentProfileChanged` arrives, the switch's answer does not | banner "OBS is asking to restart", pointing at OBS's window (section 6.2) |
+| `StartRecord` fails | failure = no `STARTED` within 10 s of `StartRecord` and `GetRecordStatus` inactive. OBS answers a failed start with success and shows its message as a modal in its own window, never on the websocket (`docs/m0/obs-behaviour.md` item 11), so the banner says to look at OBS's window; state stays `armed` |
 | No text source connected at Start | recording starts; persistent warning banner |
 | Connection lost while recording | lines keep being journalled on `EventClock`; reconcile on reconnect |
 | OBS exits while recording | finalise with flag `obs_exited` |
@@ -849,12 +1146,14 @@ The hand-off text shown after each session (Appendix C) tells the user what to d
 | `vad/assign.py` | the worked example; region in progress at window start; OCR start snap claiming a region from the previous chain; no regions; end clamp against a snapped next start |
 | Reconcile | every row of the table in section 6.3 |
 
-**Naming contract test.** The repository vendors Anki Miner's episode patterns (`PATTERNS`,
-`BARE_NUMBER`, `YEAR_LIKE`, `_strip_technical_tokens` from `anki_miner/utils/episode_matcher.py`)
-into `tests/contract/`, with the source commit in the file header. The test is property-based: for
-arbitrary Unicode titles and NN in 1-9999, the vendored extractor must return exactly NN and no
-season for `stem(title, NN)`. A dev script diffs the vendored copy against an Anki Miner checkout
-when one is given by path; it is not part of CI, because CI has no such checkout.
+**Naming contract test.** The repository vendors `EpisodeInfo`, `_strip_technical_tokens` and the
+whole `EpisodeNumberExtractor` class from Anki Miner's `anki_miner/utils/episode_matcher.py` into
+`tests/contract/anki_miner_episode_matcher.py`, with the source commit in the file header. The test
+is property-based: for arbitrary Unicode titles and NN in 1-9999, the vendored extractor must return
+exactly NN and no season for `stem(title, NN)`. An adversarial generator mixes the tokens the
+extractor deletes with S/E fragments, spaced hyphens and Unicode whitespace; the port of the
+deletion must equal the vendored one. `scripts/diff_vendored_matcher.py <anki_miner checkout>`
+diffs the vendored copy against a checkout; it is not part of CI, because CI has no such checkout.
 
 ### 18.2 Fakes and integration
 
@@ -862,7 +1161,9 @@ when one is given by path; it is not part of CI, because CI has no such checkout
   `websockets`, in the style of Anki Miner's `tests/e2e/fake_ankiconnect.py`. It replays
   **transcripts recorded from a real OBS** in M0: normal session, pause and resume, reconnect
   mid-session, missed pause event, OBS exit, profile and collection switch, a refused switch.
-  Hand-written fakes would only encode the author's assumptions.
+  Hand-written fakes would only encode the author's assumptions. R2 recorded them into
+  `tests/fixtures/obs_transcripts/` (23 real, 1 labelled synthetic; its `README.md` says how each
+  was made).
 - `FakeHookerServer`: broadcasts scripted lines on a schedule driven by an injected clock.
 - Integration: scripted session against both fakes, asserting a byte-exact `.srt`, the manifest
   counts and the final file names. One run per transcript.
@@ -925,19 +1226,23 @@ Copied in shape from Anki Miner, not shared as code:
 Throwaway scripts against a real OBS on the Win11 VM and the Linux host. Each has a pass criterion;
 a failure changes this design before code is written.
 
-| Spike | Pass criterion / output |
-|---|---|
-| Sync probe and clock | Measure the `StartRecord` response, `STARTING` and `STARTED` against flash timestamps on at least two encoders including one hardware encoder, with x264 lookahead on, and under encoder overload. Output: the zero event and `capture_latency_ms`. If the spread across encoders exceeds 100 ms, a per-install calibration step is designed before M1; otherwise one constant ships |
-| Pause | Offsets after a pause and resume stay within the 150 ms bound |
-| Profile and collection switch on a user's live OBS | Duration; behaviour with each kind of output active; restore works; events arrive in the documented order. Record the transcripts |
-| Settings without restart | Which rows of the provisioning table apply to the next `StartRecord`. Confirm the `basic.ini` key names for container and file splitting from a real profile |
-| Application audio capture | The window string format `wasapi_process_output_capture` accepts, and that it matches the `game_capture` string |
-| Rename after `STOPPED` on Windows | How long the handle stays locked; the retry window covers it |
-| `RegisterHotKey` | Fires while a fullscreen game has focus, and while an elevated game has focus |
-| owocr | The coordinate log line parses; the process tree dies through the uv shim on both platforms; exact install floor |
-| QClipboard on Wayland | What is and is not received, for the wizard text |
-| Disk rate | GB per hour at 1080p30 and 720p30 with OBS's default encoder settings, for the user guide and the free-space warning |
-| OBS discovery | Registry key on Windows; Flatpak launch command; the minimum OBS version that has every request |
+Results, 2026-09-21: source research (S1) and three spikes on the Linux host (R1 clock, R2 OBS
+behaviour, R3 owocr) against Flathub OBS 32.2.2. Windows rows wait for pre-release QA (H5, owner
+decision D2); the values they feed are marked provisional where they appear.
+
+| Spike | Pass criterion / output | Result |
+|---|---|---|
+| Sync probe and clock | Measure the `StartRecord` response, `STARTING` and `STARTED` against flash timestamps on at least two encoders including one hardware encoder, with x264 lookahead on, and under encoder overload. Output: the zero event and `capture_latency_ms`. If the spread across encoders exceeds 100 ms, a per-install calibration step is designed before M1; otherwise one constant ships | Linux pass: zero `STARTED`, `capture_latency_ms` 10, spread 50 ms across NVENC and x264 (lookahead on), so one constant and no calibration. Largest residual 50 ms, 133 ms under overload. `OutputDurationClock` trails by 0.46-5.6 s (section 7). Windows: H5 (`docs/m0/clock.md`) |
+| Pause | Offsets after a pause and resume stay within the 150 ms bound | Pass with a separate recording encoder (under 10 ms at the median). OBS's default profile cannot pause at all, hence the recording-encoder row of section 11.3 |
+| Profile and collection switch on a user's live OBS | Duration; behaviour with each kind of output active; restore works; events arrive in the documented order. Record the transcripts | Switches take 24-143 ms; OBS switches under any active output and keeps it running; no event for a switch to the current target; the answer came before `...Changed` twice in 27; unequal sample rates stop a profile switch at a modal restart question. 23 real transcripts in `tests/fixtures/obs_transcripts/` (`docs/m0/obs-behaviour.md`) |
+| Settings without restart | Which rows of the provisioning table apply to the next `StartRecord`. Confirm the `basic.ini` key names for container and file splitting from a real profile | Keys confirmed. All rows apply at the next start except the container, which needs the profile re-activated (switch away and back); no OBS restart |
+| Application audio capture | The window string format `wasapi_process_output_capture` accepts, and that it matches the `game_capture` string | Source: one function builds all three kinds' strings, so they match. Runtime: H5 |
+| Rename after `STOPPED` on Windows | How long the handle stays locked; the retry window covers it | H5 |
+| `RegisterHotKey` | Fires while a fullscreen game has focus, and while an elevated game has focus | H5 |
+| owocr | The coordinate log line parses; the process tree dies through the uv shim on both platforms; exact install floor | Linux: `Selected coordinates:` captured and parsed (the window line is Windows-only, fixtures synthetic); the tree dies with SIGTERM, a grace period and SIGKILL to the process group; the install needs PyGObject overridden out, so Linux OCR is X11-only. Windows: H5 (`docs/m0/owocr.md`) |
+| QClipboard on Wayland | What is and is not received, for the wizard text | Dropped from M0: section 8.1 already fixes the wizard text; behaviour is checked at H5 |
+| Disk rate | GB per hour at 1080p30 and 720p30 with OBS's default encoder settings, for the user guide and the free-space warning | 2.78 GB/h at both 1080p30 and 720p30 (CBR 6000 kb/s video, 160 kb/s audio; NVENC and x264 alike): with OBS's defaults resolution does not change it |
+| OBS discovery | Registry key on Windows; Flatpak launch command; the minimum OBS version that has every request | Registry `HKLM\SOFTWARE\OBS Studio` from the installer source (provisional until H5); `flatpak run com.obsproject.Studio --minimize-to-tray` confirmed; minimum OBS 30.0.0 |
 
 ### M1: core loop, on the app's own profile from the first commit
 
@@ -974,11 +1279,11 @@ Miner hand-off, troubleshooting), first tagged release.
 
 | Risk | Mitigation |
 |---|---|
-| Cue-to-frame sync is worse than assumed, or varies by encoder | M0 measures it first; the clock is a Protocol with two implementations; calibration is the designed fallback |
+| Cue-to-frame sync is worse than assumed, or varies by encoder | M0 measured a 50 ms spread across encoders on Linux, so one constant ships; the clock is a Protocol with two implementations. A Windows spread over 100 ms would surface only at H5 (accepted risk, D2); calibration stays the designed fallback |
 | Switching a user's OBS profile and collection misbehaves | M0 spike; refusal while outputs are active; restore file; ownership rule |
 | Hook text is not dialogue (menus, choices, narration bursts) | pipeline drops, the skip rule, and Anki Miner's curator downstream. The text feed makes a bad hook visible immediately |
 | Unvoiced games | cards carry music only; the sentence and screenshot are still correct. The VAD pass leaves such cues at their live ends |
-| Disk use | roughly 1.5-3 GB per hour at 1080p30 with OBS defaults (estimate, measured in M0); 720p is one setting away; free-space warning at Arm |
+| Disk use | 2.8 GB per hour at 1080p30 and at 720p30 with OBS's default encoder settings (measured in M0: OBS's default is constant bitrate, so 720p does not reduce it); free-space warning at Arm |
 | owocr changes its flags or log format | pinned version; the parse is covered by a test against captured output; upgrades are deliberate |
 | GSM makes Longplay good | this app still differs by install size, setup time and having no Anki coupling; its output would stay compatible |
 | A second app to release and support | packaging copied from a working pipeline; no macOS lane; no shared library to keep in step |
@@ -1033,11 +1338,21 @@ leave `screenshot_offset` at 1.0 s; keep sentence de-duplication on, since games
 | obs-websocket requests, events and fields | Context7, `/obsproject/obs-websocket` protocol documentation |
 | `websockets` stance on one-port HTTP | upstream FAQ, `docs/faq/server.rst` |
 | faster-whisper VAD symbols and model file | installed package in Anki Miner's environment |
+| OBS facts in sections 3.3, 6, 7, 11 (M0 S1) | read in obs-studio 32.2.2 (`ba2f32bd`), obs-websocket 5.7.4 (`1ef34bf4`), obsws-python 1.8.0, bouf v0.6.5; cites machine-checked; `docs/m0/source-findings.md` |
+| Zero event, `capture_latency_ms`, pause, fallback lag, disk rate (M0 R1) | flash probe against real OBS 32.2.2 on Linux, 20 sessions over NVENC and x264, overload included; `docs/m0/clock.md` |
+| Profile keys, restart rows, switches, events, reconnect, exit, window list (M0 R2) | real OBS 32.2.2 on Linux through a logging proxy, `ffprobe` on the files; transcripts in `tests/fixtures/obs_transcripts/`; `docs/m0/obs-behaviour.md` |
+| owocr log lines, process tree, install, config file (M0 R3) | owocr 1.26.8 installed with uv and run on Linux X11; fixtures in `tests/fixtures/owocr/`; `docs/m0/owocr.md` |
+| Sanitiser in section 10.1 (amended) | contract test against the vendored extractor at `ea4a30ce`, 2000 adversarial examples a run; offline campaign of 2 million titles; `docs/m0/sanitiser.md` |
+| Readings from the wave 1 integration review | `docs/m0/wave-1-amendments.md`; the code follows each one |
 
-Not verified, and therefore assigned to M0 rather than stated as fact: the `basic.ini` key names for
-container and file splitting; the OBS registry key on Windows; the pause output-state names; the
-relation between `outputDuration` and file timestamps; whether profile changes need an OBS restart;
-the application-audio window string; the minimum OBS version.
+Not verified before M0, and assigned to it: the `basic.ini` key names for container and file
+splitting; the OBS registry key on Windows; the pause output-state names; the relation between
+`outputDuration` and file timestamps; whether profile changes need an OBS restart; the
+application-audio window string; the minimum OBS version. M0 settled all of them on Linux or in
+source. Still open until H5 (D2), and marked provisional where they appear: the registry key on a
+real install, the application-audio string at runtime, the Windows zero event and latency with
+`game_capture`, the job-object kill of owocr, rename-lock timing, `RegisterHotKey` under a game,
+and `xcomposite_input` capture on a real X11 desktop.
 
 Two adversarial review rounds were run on this design before it was written up (one judge each,
 criteria: correctness, simplicity, reuse, scope, verification). Round 1: 14 findings. Round 2: 8.
