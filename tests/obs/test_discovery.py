@@ -16,7 +16,14 @@ import pytest
 from websockets.asyncio.server import Server, ServerConnection, serve
 
 from anki_miner_game.models.config import AppConfig, ObsSettings
-from anki_miner_game.models.obs import ObsConfigError, ObsConnectError, ObsCredentials, ObsInstall, WsConfig
+from anki_miner_game.models.obs import (
+    ObsAuthError,
+    ObsConfigError,
+    ObsConnectError,
+    ObsCredentials,
+    ObsInstall,
+    WsConfig,
+)
 from anki_miner_game.obs import discovery
 from anki_miner_game.obs.discovery import LocalObsDiscovery
 from tests.test_contracts import _assert_conforms
@@ -706,15 +713,21 @@ class FakeClock:
 
 
 class ScriptedProbe:
-    """Answers each ``GetVersion`` probe from ``answers``; the last answer repeats."""
+    """Answers each ``GetVersion`` probe from ``answers``, raising an exception answer; the last answer repeats."""
 
-    def __init__(self, answers: Sequence[bool]) -> None:
+    def __init__(self, answers: Sequence[bool | Exception]) -> None:
         self.answers = list(answers)
         self.seen: list[tuple[ObsCredentials, float]] = []
 
     def __call__(self, creds: ObsCredentials, timeout_s: float) -> bool:
         self.seen.append((creds, timeout_s))
-        return self.answers.pop(0) if len(self.answers) > 1 else self.answers[0]
+        answer = self.answers.pop(0) if len(self.answers) > 1 else self.answers[0]
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+
+REJECTED = ObsAuthError("OBS rejected the websocket password")
 
 
 def ready_obs(tmp_path: Path, probe: Callable[[ObsCredentials, float], bool], clock: FakeClock, **kwargs: object):
@@ -799,6 +812,37 @@ async def test_reads_the_current_settings_at_every_probe(tmp_path):
     assert [creds.password for creds, _ in probe.seen] == ["s3cretPassw0rd12", "typed"]
 
 
+async def test_a_rejected_password_is_read_again_once_then_raised(tmp_path):
+    """Spec 17: a failed authentication re-reads ``config.json`` once, then asks for the override."""
+    write_ws(native_root(), FULL)
+    clock, probe = FakeClock(), ScriptedProbe([REJECTED])
+
+    with pytest.raises(ObsAuthError):
+        await ready_obs(tmp_path, probe, clock).wait_ready()
+
+    assert len(probe.seen) == 2
+    assert clock.sleeps == [discovery.READY_POLL_S]
+
+
+async def test_a_password_accepted_after_the_re_read_is_ready(tmp_path):
+    write_ws(native_root(), {**FULL, "server_password": "old"})
+    clock, probe = FakeClock(), ScriptedProbe([REJECTED, True])
+    clock.on_sleep = lambda: write_ws(native_root(), FULL)  # OBS wrote its config after the first read
+
+    assert await ready_obs(tmp_path, probe, clock).wait_ready()
+
+    assert [creds.password for creds, _ in probe.seen] == ["old", "s3cretPassw0rd12"]
+
+
+async def test_only_consecutive_rejections_raise(tmp_path):
+    write_ws(native_root(), FULL)
+    clock, probe = FakeClock(), ScriptedProbe([REJECTED, False, REJECTED, True])
+
+    assert await ready_obs(tmp_path, probe, clock).wait_ready()
+
+    assert len(probe.seen) == 4
+
+
 # --- the default GetVersion probe, against a minimal obs-websocket server on loopback ----------
 
 SALT = "lM1GncleQOaCu9lT1yeUZhFYnqhsLLP1G5lAGo3ixaI="
@@ -814,13 +858,16 @@ class MiniObs:
     """Just enough obs-websocket v5 for a ``GetVersion`` probe.
 
     Hello (with auth when ``password`` is set), Identify (closing with 4009 on a wrong answer, as
-    obs-websocket does), then one ``requestStatus`` per request from ``codes``: 100 succeeds, 207 is
-    ``NotReady``. The last code repeats.
+    obs-websocket does, or with 1001 on every Identify when ``drop_identify``), then one
+    ``requestStatus`` per request from ``codes``: 100 succeeds, 207 is ``NotReady``. The last code
+    repeats.
     """
 
-    def __init__(self, codes: Sequence[int], password: str | None = None) -> None:
+    def __init__(self, codes: Sequence[int], password: str | None = None, *, drop_identify: bool = False) -> None:
         self.codes = list(codes)
         self.password = password
+        self.drop_identify = drop_identify
+        self.identifies = 0
         self.requests: list[str] = []
         self._server: Server | None = None
 
@@ -844,6 +891,10 @@ class MiniObs:
             hello["authentication"] = {"challenge": CHALLENGE, "salt": SALT}
         await ws.send(json.dumps({"op": 0, "d": hello}))
         identify = json.loads(await ws.recv())["d"]
+        self.identifies += 1
+        if self.drop_identify:
+            await ws.close(1001, "Server stopping.")
+            return
         if self.password is not None and identify.get("authentication") != auth_string(self.password):
             await ws.close(4009, "Authentication failed.")
             return
@@ -888,14 +939,22 @@ async def test_the_probe_authenticates_with_the_password():
 
 
 @pytest.mark.parametrize("password", ["wrong", None])
-async def test_the_probe_fails_without_the_right_password(password):
+async def test_the_probe_raises_when_obs_rejects_the_password(password):
     started = time.monotonic()
     async with MiniObs([100], password="s3cretPassw0rd12") as obs:
-        assert not await probe(ObsCredentials("127.0.0.1", obs.port, password))
+        with pytest.raises(ObsAuthError):
+            await probe(ObsCredentials("127.0.0.1", obs.port, password))
 
     assert obs.requests == []
     # The probe closed its socket: the server did not wait out its 10 s close timeout.
     assert time.monotonic() - started < 5
+
+
+async def test_a_dropped_identify_without_auth_is_not_an_auth_failure():
+    async with MiniObs([100], drop_identify=True) as obs:
+        assert not await probe(ObsCredentials("127.0.0.1", obs.port))
+
+    assert obs.identifies == 1
 
 
 async def test_the_probe_fails_when_nothing_listens():
@@ -928,7 +987,8 @@ async def test_the_probe_logs_no_password_and_no_errors(caplog):
         creds = ObsCredentials("127.0.0.1", obs.port, "s3cretPassw0rd12")
         assert not await probe(creds)
         assert await probe(creds)
-        assert not await probe(ObsCredentials("127.0.0.1", obs.port, "wrong"))
+        with pytest.raises(ObsAuthError):
+            await probe(ObsCredentials("127.0.0.1", obs.port, "wrong"))
 
     assert "s3cretPassw0rd12" not in caplog.text
     assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
@@ -942,3 +1002,17 @@ async def test_wait_ready_polls_obs_until_it_has_loaded(tmp_path):
         assert await obs.wait_ready(timeout_s=10)
 
     assert server.requests == ["GetVersion"] * 3
+
+
+async def test_wait_ready_raises_when_obs_rejects_a_stale_password_override(tmp_path):
+    """Spec 17 row 4: the password-override banner after one re-read, not the 30 s timeout."""
+    async with MiniObs([100], password="s3cretPassw0rd12") as server:
+        write_ws(native_root(), {**FULL, "server_port": server.port})
+        stale = AppConfig(obs=ObsSettings(password_override="stale"))
+        obs = native_linux(tmp_path, cfg=stale, sleep=lambda seconds: asyncio.sleep(0))
+
+        with pytest.raises(ObsAuthError):
+            await obs.wait_ready(timeout_s=10)
+
+    assert server.identifies == 2
+    assert server.requests == []

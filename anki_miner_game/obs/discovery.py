@@ -21,7 +21,8 @@
 - ``wait_ready``: ready once ``GetVersion`` succeeds on a fresh connection. Until OBS has loaded,
   obs-websocket accepts connections and answers every request with 207 ``NotReady``
   (``docs/m0/source-findings.md`` summary 11), so a refused connection, a failed handshake and a
-  non-success answer all mean "not yet", with the credentials read again before every try.
+  non-success answer all mean "not yet", with the credentials read again before every try. A
+  rejected password is not "not yet": after one re-read it raises ``ObsAuthError`` (spec 17).
 
 The probe uses obsws-python's shared connection class (``obsws_python.baseclient.ObsClient``) rather
 than ``ReqClient``, which logs every failed identify or request at ERROR: a probe fails many times
@@ -59,7 +60,14 @@ from obsws_python.error import OBSSDKError
 from websocket import WebSocketException
 
 from anki_miner_game.models.config import AppConfig
-from anki_miner_game.models.obs import ObsConfigError, ObsConnectError, ObsCredentials, ObsInstall, WsConfig
+from anki_miner_game.models.obs import (
+    ObsAuthError,
+    ObsConfigError,
+    ObsConnectError,
+    ObsCredentials,
+    ObsInstall,
+    WsConfig,
+)
 from anki_miner_game.store import write_text_atomic
 
 log = logging.getLogger(__name__)
@@ -158,17 +166,27 @@ class SubprocessRunner:
 RegistryReader = Callable[[str], str | None]
 """The default value of ``HKLM\\SOFTWARE\\OBS Studio`` in one registry view (``"64"`` or ``"32"``)."""
 Probe = Callable[[ObsCredentials, float], bool]
-"""One ``GetVersion`` with a timeout in seconds; ``True`` when it succeeds. Runs on a worker thread."""
+"""One ``GetVersion`` with a timeout in seconds; ``True`` when it succeeds, ``ObsAuthError`` when OBS
+rejects the password. Runs on a worker thread."""
 
 
 def get_version_succeeds(creds: ObsCredentials, timeout_s: float) -> bool:
-    """One ``GetVersion`` on a fresh connection; ``False`` for any failure, never raising for one."""
+    """One ``GetVersion`` on a fresh connection; ``False`` for any failure but a rejected password.
+
+    Raises ``ObsAuthError`` when OBS asked for authentication and the handshake failed: obs-websocket
+    closes the connection (4009) on a wrong password, and obsws-python refuses to send none.
+    """
     try:
         # obsws-python logs a refused connection at ERROR with a traceback: look quietly first.
         socket.create_connection((creds.host, creds.port), timeout=timeout_s).close()
         client = ObsClient(host=creds.host, port=creds.port, password=creds.password or "", timeout=timeout_s)
         try:
-            client.authenticate()
+            try:
+                client.authenticate()
+            except OBSSDKError as exc:
+                if "authentication" in client.server_hello["d"]:
+                    raise ObsAuthError("OBS rejected the websocket password") from exc
+                raise
             status = client.req("GetVersion")["requestStatus"]
         finally:
             client.ws.close()
@@ -406,15 +424,27 @@ class LocalObsDiscovery:
 
         Tries at once, then every ``READY_POLL_S``, the last time at the deadline. Each try reads
         the credentials again (OBS may still be writing its config) and runs on a worker thread.
+        Raises ``ObsAuthError`` when OBS rejects the password on two tries in a row, so the
+        credentials are read again once before giving up (spec 17).
         """
         deadline = self._now() + timeout_s
-        while not await asyncio.to_thread(self._ready_once):
+        rejected = False
+        while True:
+            try:
+                if await asyncio.to_thread(self._ready_once):
+                    return True
+                rejected = False
+            except ObsAuthError:
+                if rejected:
+                    log.info("OBS rejected the websocket password again")
+                    raise
+                rejected = True
+                log.info("OBS rejected the websocket password; reading it again")
             remaining = deadline - self._now()
             if remaining <= 0:
                 log.info("OBS not ready after %.0f s", timeout_s)
                 return False
             await self._sleep(min(READY_POLL_S, remaining))
-        return True
 
     def _ready_once(self) -> bool:
         try:
