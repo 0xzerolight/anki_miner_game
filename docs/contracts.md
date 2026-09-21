@@ -91,3 +91,4 @@ Applied by C4.
 | Name | Where | What it is |
 |---|---|---|
 | `REQUIRED_REQUESTS` | `models/obs.py` | 32 names: T14's 31 plus `GetOutputSettings` (obs-websocket 5.0.0; OBS 30.0 floor unchanged). After a reconnect it returns the active file's `path` on `simple_file_output` / `adv_file_output` (R2 item 8, `docs/m0/obs-behaviour.md`) |
+| `Provisioner.capture_method(profile) -> str` | `interfaces/obs.py` | The OBS input kind provisioning would create for the profile's capture settings, feature-detected with `GetInputKindList`; the game-profile dialog's capture method in use (spec 11.3). Raises `ObsError` when OBS is unreachable. `ObsProvisioner` reads only `GetInputKindList`, switches nothing, and returns `""` when no capture kind is available |
