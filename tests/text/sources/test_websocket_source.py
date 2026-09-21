@@ -12,6 +12,14 @@ from anki_miner_game.models.messages import SourceStatus
 from anki_miner_game.text.sources import websocket_source
 from anki_miner_game.text.sources.websocket_source import WebsocketSource, parse_frame
 from tests.fakes.fake_hooker import FakeHookerServer
+from tests.test_contracts import _assert_conforms
+
+
+def test_conforms_to_the_text_source_protocol():
+    from anki_miner_game.interfaces.text_source import TextSource
+
+    _assert_conforms(TextSource, WebsocketSource)
+
 
 # --- frame parsing ---------------------------------------------------------------------------------
 

@@ -21,6 +21,11 @@ class TextSource(Protocol):
     sink is called on the source's own thread (the I/O loop for websocket
     sources, the Qt main thread for the clipboard), so the composition passes
     one that only posts ``LineReceived`` through ``SessionControl.post``.
+
+    ``start``, ``stop`` and ``wait_closed`` are called on the session actor's
+    thread (the I/O loop). A source that lives on another thread moves the
+    call there itself: the clipboard source hands ``start`` and ``stop`` to the
+    Qt main thread.
     """
 
     @property
@@ -32,6 +37,16 @@ class TextSource(Protocol):
     def start(self, sink: LineSink) -> None: ...
 
     def stop(self) -> None: ...
+
+    async def wait_closed(self) -> None:
+        """Return once everything the last ``stop`` began has finished; at once when nothing is closing.
+
+        For OCR that is owocr's whole process tree being dead: on Linux it runs
+        in its own session, so nothing else would end it. The actor awaits this
+        at disarm, and shutdown awaits it for every started source before the
+        I/O loop stops.
+        """
+        ...
 
     def set_status_listener(self, cb: StatusListener) -> None:
         """Have ``cb(source_id, status)`` called on every transition of ``status``.

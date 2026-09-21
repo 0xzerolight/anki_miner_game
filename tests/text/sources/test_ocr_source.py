@@ -19,9 +19,16 @@ from anki_miner_game.models.messages import Banner, BannerCleared, BannerLevel, 
 from anki_miner_game.models.profile import OcrSettings
 from anki_miner_game.text.sources import ocr_source
 from anki_miner_game.text.sources.ocr_source import OcrSource
+from tests.test_contracts import _assert_conforms
 
 FAKES = Path(__file__).parent.parent.parent / "fakes"
 SETTINGS = OcrSettings(rects="100,100,900,260")
+
+
+def test_conforms_to_the_text_source_protocol():
+    from anki_miner_game.interfaces.text_source import TextSource
+
+    _assert_conforms(TextSource, OcrSource)
 
 
 class FakeProc:

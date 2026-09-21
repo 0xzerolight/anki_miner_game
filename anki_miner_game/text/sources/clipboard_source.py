@@ -68,6 +68,9 @@ class ClipboardSource:
         self._sink = None
         self._set_status(SourceStatus.DISCONNECTED)
 
+    async def wait_closed(self) -> None:
+        """Nothing to wait for: ``stop`` leaves no background work."""
+
     def _on_data_changed(self) -> None:
         t_mono = self._now()
         clipboard, sink = self._clipboard, self._sink

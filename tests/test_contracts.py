@@ -109,6 +109,7 @@ PROTOCOL_MEMBERS = {
         "status": PROPERTY,
         "start": sync("sink"),
         "stop": sync(),
+        "wait_closed": coro(),
         "set_status_listener": sync("cb"),
     },
     ("anki_miner_game.interfaces.record_clock", "RecordClock"): {
@@ -228,6 +229,9 @@ class _FakeTextSource:
     def stop(self) -> None:
         self._move(SourceStatus.DISCONNECTED)
 
+    async def wait_closed(self) -> None:
+        pass
+
     def set_status_listener(self, cb: Callable[[str, SourceStatus], None]) -> None:
         self._listener = cb
 
@@ -265,6 +269,14 @@ def test_the_text_source_status_listener_is_documented():
 
     doc = TextSource.set_status_listener.__doc__ or ""
     assert "every" in doc and "SourceStatusChanged" in doc
+
+
+def test_text_sources_are_started_on_the_actors_thread_and_awaited_after_stop():
+    from anki_miner_game.interfaces.text_source import TextSource
+
+    doc = TextSource.__doc__ or ""
+    assert "actor" in doc and "thread" in doc
+    assert "stop" in (TextSource.wait_closed.__doc__ or "")
 
 
 def test_obs_config_failures_are_typed():
