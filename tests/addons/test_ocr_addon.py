@@ -5,6 +5,7 @@ Python, and the install drives a fake ``uv``. The real install is the one ``netw
 """
 
 import asyncio
+import inspect
 import json
 import os
 import sys
@@ -414,6 +415,27 @@ def test_size_and_note_per_platform(tmp_path):
     assert linux.size_bytes > windows.size_bytes > 0
     assert "X11" in (linux.note or "")
     assert windows.note is None
+
+
+@pytest.mark.parametrize("protocol_name", ["AddonService", "OcrAreaPicker"])
+def test_the_ocr_addon_conforms_to_the_addon_protocols(protocol_name):
+    from anki_miner_game.interfaces import addons
+
+    protocol = getattr(addons, protocol_name)
+    members = [attr for attr in vars(protocol) if not attr.startswith("_")]
+    assert members
+    for member in members:
+        expected = inspect.getattr_static(protocol, member)
+        actual = inspect.getattr_static(OcrAddon, member)
+        if isinstance(expected, property):
+            assert isinstance(actual, property), member
+        else:
+            assert inspect.iscoroutinefunction(actual) is inspect.iscoroutinefunction(expected), member
+            assert list(inspect.signature(actual).parameters) == list(inspect.signature(expected).parameters), member
+
+
+def test_pick_raises_the_runtime_error_its_protocol_names():
+    assert issubclass(OcrError, RuntimeError)
 
 
 @pytest.mark.network
