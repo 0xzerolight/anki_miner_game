@@ -1,5 +1,6 @@
 """Provisioning of the app's OBS profile (spec 11.3 profile table; docs/m0/source-findings.md 1, 2)."""
 
+import inspect
 from pathlib import Path
 
 import pytest
@@ -7,6 +8,7 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from anki_miner_game import paths
+from anki_miner_game.interfaces.obs import Provisioner
 from anki_miner_game.models.config import AppConfig, RecordingSettings
 from anki_miner_game.models.constants import OBS_PROFILE_NAME
 from anki_miner_game.models.obs import ObsError, ProvisionResult
@@ -220,3 +222,13 @@ async def test_a_changed_output_root_moves_the_record_directory(tmp_path):
 
     assert obs.mutating() == ["SetRecordDirectory"]
     assert obs.record_dirs[OBS_PROFILE_NAME] == str(tmp_path / "elsewhere" / "_incoming")
+
+
+def test_the_provisioner_conforms_to_the_provisioner_protocol():
+    members = [attr for attr in vars(Provisioner) if not attr.startswith("_")]
+    assert sorted(members) == ["ensure_collection", "ensure_profile", "list_windows"]
+    for member in members:
+        expected = inspect.getattr_static(Provisioner, member)
+        actual = inspect.getattr_static(ObsProvisioner, member)
+        assert inspect.iscoroutinefunction(actual) and inspect.iscoroutinefunction(expected), member
+        assert list(inspect.signature(actual).parameters) == list(inspect.signature(expected).parameters), member
