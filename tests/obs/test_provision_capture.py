@@ -7,12 +7,15 @@ from anki_miner_game.models.profile import AudioMode, AudioSettings, CaptureKind
 from anki_miner_game.obs.provision import ObsProvisioner, plan_collection
 from tests.obs.fake_obs import LINUX_WAYLAND_KINDS, LINUX_X11_KINDS, WINDOWS_KINDS, FakeObs
 
+WIN_WINDOW = "Game:UnityWndClass:game.exe"
+X11_WINDOW = "0x3a00007\r\nGame\r\ngame"
 
-def profile(kind: CaptureKind = CaptureKind.AUTO) -> GameProfile:
+
+def profile(kind: CaptureKind = CaptureKind.AUTO, window: str | None = None) -> GameProfile:
     return GameProfile(
         slug="g",
         title="G",
-        capture=CaptureSettings(kind=kind),
+        capture=CaptureSettings(kind=kind, window=window),
         audio=AudioSettings(mode=AudioMode.DESKTOP),
     )
 
@@ -40,6 +43,21 @@ async def test_follows_the_collection_plan_for_every_capture_kind(kind):
 
     expected = plan_collection(profile(kind), frozenset(WINDOWS_KINDS), "win32").capture
     assert await provisioner.capture_method(profile(kind)) == (expected or "")
+
+
+@pytest.mark.parametrize(
+    ("platform", "kinds", "capture", "expected"),
+    [
+        ("linux", LINUX_X11_KINDS, profile(window=X11_WINDOW), "xcomposite_input"),
+        ("linux", LINUX_X11_KINDS, profile(CaptureKind.PIPEWIRE, X11_WINDOW), "pipewire-screen-capture-source"),
+        ("win32", WINDOWS_KINDS, profile(window=WIN_WINDOW), "game_capture"),
+        ("win32", WINDOWS_KINDS, profile(CaptureKind.WINDOW, WIN_WINDOW), "window_capture"),
+    ],
+)
+async def test_a_pinned_window_names_the_capture_its_row_creates(platform, kinds, capture, expected):
+    provisioner = ObsProvisioner(FakeObs(input_kinds=kinds), platform=platform)
+
+    assert await provisioner.capture_method(capture) == expected
 
 
 async def test_reads_only_the_input_kind_list_and_changes_nothing():
