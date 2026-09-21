@@ -10,7 +10,7 @@ import os
 import sys
 import threading
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import pytest
@@ -456,6 +456,64 @@ def test_a_worker_that_cannot_start_fails_the_pass(model, presenter, session):
     assert vad.state is VadState.FAILED
     assert vad.message.startswith("The VAD worker could not start:")
     assert session.srt() == LIVE_SRT
+
+
+def test_an_unexpected_error_mid_pass_fails_it_with_the_reason(model, session):
+    """Spec 17: the row shows why; the manifest never stays ``vad_running`` with no ``vad_finished``."""
+
+    class BrokenPresenter(RecordingPresenter):
+        def vad_progress(self, manifest_path: Path, done_ms: int, total_ms: int | None) -> None:
+            raise RuntimeError("the progress bar is gone")
+
+    presenter = BrokenPresenter()
+    progress = json.dumps({"t": "progress", "done_ms": 1000, "total_ms": 29200})
+    session.script([progress] + worker_lines(EXAMPLE_REGIONS))
+    trimmer = VadTrimmer(FakeAddon(model), presenter, AppConfig, worker_script=FAKE_WORKER)
+    try:
+        trimmer.queue(session.manifest)
+        run_jobs(trimmer)
+    finally:
+        trimmer.close()
+
+    manifest = session.load()
+    assert manifest.state is ManifestState.READY
+    assert manifest.vad == VadRecord(
+        state=VadState.FAILED, model="silero_vad_v6", message="The VAD pass failed: the progress bar is gone"
+    )
+    assert session.srt() == LIVE_SRT
+    assert presenter.finished == [(session.manifest, VadState.FAILED)]
+
+
+def test_live_cues_the_writer_refuses_fail_the_job(make_trimmer, presenter, session):
+    """A hand-edited manifest: ``format_timestamp`` raises ``ValueError`` on a negative time."""
+    edited = replace(session.load(), live_cues=(replace(LIVE_CUES[0], start_ms=-5),))
+    write_manifest_atomic(session.manifest, edited)
+    trimmer = make_trimmer()
+
+    trimmer.restore(session.manifest)
+    run_jobs(trimmer)
+
+    vad = session.load().vad
+    assert vad.state is VadState.FAILED
+    assert vad.message.startswith("The subtitle could not be written:")
+    assert presenter.finished == [(session.manifest, VadState.FAILED)]
+
+
+def test_a_subtitle_that_cannot_be_written_fails_the_pass(make_trimmer, presenter, session):
+    """On Windows a player holding the ``.srt`` open does this; here the path is a folder."""
+    session.script(worker_lines(EXAMPLE_REGIONS))
+    session.subtitle.unlink()
+    session.subtitle.mkdir()
+    trimmer = make_trimmer()
+
+    trimmer.queue(session.manifest)
+    run_jobs(trimmer)
+
+    manifest = session.load()
+    assert manifest.state is ManifestState.READY
+    assert manifest.vad.state is VadState.FAILED
+    assert manifest.vad.message.startswith("The subtitle could not be written:")
+    assert presenter.finished[-1] == (session.manifest, VadState.FAILED)
 
 
 # --- a manifest that cannot be written ----------------------------------------

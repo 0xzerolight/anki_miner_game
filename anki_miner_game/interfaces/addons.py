@@ -41,8 +41,10 @@ class VadJobs(Protocol):
     """VAD pass jobs keyed by manifest path.
 
     Each call only queues. While a job runs it reports ``Presenter.vad_progress``;
-    when it ends it writes the outcome into the manifest's ``vad`` record, then
-    calls ``Presenter.vad_finished`` with that state.
+    when it ends, however it ends, it writes the outcome into the manifest's
+    ``vad`` record, then calls ``Presenter.vad_finished`` with that state. A job
+    skipped because its manifest is missing, unreadable or not a placed session
+    with a subtitle, and a job dropped at shutdown, get no call.
     """
 
     def queue(self, manifest_path: Path) -> None: ...

@@ -18,7 +18,9 @@ class Presenter(Protocol):
     ``SessionFinalised`` -> ``session_finished``. ``RecordingStarted`` and
     ``RecordingStopped`` have no method here; they serve ``SessionControl``
     subscribers such as auto mode. ``VadJobs`` calls ``vad_progress`` while a
-    pass runs and ``vad_finished`` once per job.
+    pass runs and ``vad_finished`` once per job that starts. A job skipped
+    because its manifest is missing, unreadable or not a placed session with a
+    subtitle, and a job dropped at shutdown, get no call.
     """
 
     def state_changed(self, state: AppState, slug: str | None) -> None:

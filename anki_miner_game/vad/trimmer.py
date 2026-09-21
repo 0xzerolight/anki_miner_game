@@ -10,9 +10,10 @@ is a rewrite from the manifest and no second subtitle file exists (spec 13.3). T
 - ``queue`` / ``rerun``: ``vad`` becomes ``queued`` before the call returns, so a pass still
   pending at exit stays visible as one.
 - The pass starts: ``state`` ``vad_running``. It ends with ``state`` ``ready`` and ``vad``:
-  ``done`` (the trimmed subtitle is written), ``failed`` (the worker failed; the message says how)
-  or ``unavailable`` (the add-on is not ready, so the pass never ran). Anything but ``done``
-  rewrites the subtitle from ``live_cues``: the live subtitle stands (spec 13, 17).
+  ``done`` (the trimmed subtitle is written), ``failed`` (the worker failed, or anything else went
+  wrong during the pass; the message says how) or ``unavailable`` (the add-on is not ready, so the
+  pass never ran). Anything but ``done`` rewrites the subtitle from ``live_cues``: the live
+  subtitle stands (spec 13, 17). A subtitle that cannot be written makes the job ``failed``.
 - ``restore``: the subtitle from ``live_cues``, ``vad`` ``restored``; needs no add-on.
 
 A manifest write that Windows refuses because another handle has the file open is retried after
@@ -29,7 +30,7 @@ region: ``no_speech`` counts the cues the pass found no voice in.
 
 Only sessions in their game folder with a subtitle are touched: ``ready`` (or ``vad_running``,
 left so by a crash) with ``live_cues``. Anything else, or a manifest that cannot be read, is
-skipped with a log line and no ``Presenter`` call.
+skipped with a log line and no ``Presenter`` call; so is a job that ``close`` drops.
 """
 
 import concurrent.futures
@@ -224,6 +225,9 @@ class VadTrimmer:
             return
         try:
             regions = self._run_worker(manifest_path, session.video)
+            live = [cue.to_cue() for cue in session.manifest.live_cues]
+            cues = assign(live, regions, session.manifest.text_mode, self._config().cue)
+            trimmed, no_speech = _speech_counts(cues, regions)
         except _CancelledError:
             log.info("VAD pass for %s stopped; it stays queued", manifest_path)
             try:
@@ -235,9 +239,11 @@ class VadTrimmer:
             log.warning("VAD pass for %s failed: %s", manifest_path, exc)
             self._settle(manifest_path, session, VadRecord(VadState.FAILED, model=MODEL_NAME, message=str(exc)), None)
             return
-        live = [cue.to_cue() for cue in session.manifest.live_cues]
-        cues = assign(live, regions, session.manifest.text_mode, self._config().cue)
-        trimmed, no_speech = _speech_counts(cues, regions)
+        except Exception as exc:  # anything else must still end the job, never leave it vad_running
+            log.exception("VAD pass for %s failed unexpectedly", manifest_path)
+            message = f"The VAD pass failed: {exc}"
+            self._settle(manifest_path, session, VadRecord(VadState.FAILED, model=MODEL_NAME, message=message), None)
+            return
         record = VadRecord(VadState.DONE, model=MODEL_NAME, trimmed=trimmed, no_speech=no_speech)
         self._settle(manifest_path, session, record, cues)
 
@@ -256,7 +262,7 @@ class VadTrimmer:
             write_srt_atomic(
                 session.subtitle, cues if cues is not None else [c.to_cue() for c in session.manifest.live_cues]
             )
-        except OSError as exc:
+        except (OSError, ValueError) as exc:  # ValueError: live cues the writer refuses (a hand-edited manifest)
             log.warning("VAD job for %s could not write %s: %s", manifest_path, session.subtitle, exc)
             record = VadRecord(VadState.FAILED, model=record.model, message=f"The subtitle could not be written: {exc}")
         try:
