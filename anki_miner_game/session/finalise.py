@@ -19,6 +19,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Final
 
 from anki_miner_game.models.config import AppConfig
 from anki_miner_game.models.constants import START_SHIFT_MS
@@ -37,6 +38,10 @@ from anki_miner_game.session.manifest import (
 from anki_miner_game.session.naming import session_stem
 from anki_miner_game.session.srt_writer import write_srt_atomic
 from anki_miner_game.store import StoreError
+
+RENAME_BACKOFF_S: Final = (0.1, 0.2, 0.5, 1.0, 2.0, 2.0, 2.0, 2.0)
+"""Waits between attempts to move a locked video: 9.8 s in all, inside spec 10.3's 10 s. On Windows
+OBS can hold the file briefly after ``STOPPED``."""
 
 
 class FinaliseError(Exception):
@@ -61,7 +66,9 @@ class FinaliseResult:
 def finalise(manifest_path: Path, cfg: AppConfig, *, sleep: Callable[[float], None] = time.sleep) -> FinaliseResult:
     """Finalise the session whose manifest is ``manifest_path``; see the module docstring.
 
-    Blocking file I/O: call it off the I/O loop. Anything that stops it raises ``FinaliseError``.
+    Blocking file I/O plus up to ``sum(RENAME_BACKOFF_S)`` of waiting: call it off the I/O loop. A
+    video still locked after the waits leaves the session ``finalise_pending`` in ``_incoming/``,
+    which is returned, not raised. Anything else that stops it raises ``FinaliseError``.
 
     Counts: ``accepted`` becomes the number of cues and ``skip`` the journalled lines the skip rule
     dropped; the other counters are kept as the manifest holds them (the actor's pipeline counts).
@@ -74,7 +81,7 @@ def finalise(manifest_path: Path, cfg: AppConfig, *, sleep: Callable[[float], No
         if manifest.state is ManifestState.RECORDING:
             manifest = _build(manifest_path, manifest, files, cfg)
         files.journal.unlink(missing_ok=True)
-        return _place(manifest_path, manifest, files, cfg)
+        return _place(manifest_path, manifest, files, cfg, sleep)
     except (StoreError, OSError, ValueError) as exc:  # ValueError: a hand-edited index or offset
         raise FinaliseError(manifest_path, str(exc)) from exc
 
@@ -124,13 +131,20 @@ def _utc_stamp(timestamp: float) -> str:
     return datetime.fromtimestamp(timestamp, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _place(manifest_path: Path, manifest: SessionManifest, files: IncomingFiles, cfg: AppConfig) -> FinaliseResult:
+def _place(
+    manifest_path: Path,
+    manifest: SessionManifest,
+    files: IncomingFiles,
+    cfg: AppConfig,
+    sleep: Callable[[float], None],
+) -> FinaliseResult:
     """Steps 4-5: video, subtitle and manifest to ``<Game>/<Game> - NN.*``; ``_incoming/`` emptied."""
     folder = game_folder(manifest_path.parent, manifest.game.title)
     video, subtitle, placed = _targets(folder, manifest.game.title, manifest.index, files.video.suffix)
     if files.video.exists():
         folder.mkdir(parents=True, exist_ok=True)
-        os.replace(files.video, video)
+        if not _move(files.video, video, sleep):
+            return FinaliseResult(manifest_path, manifest, queue_vad=False)
     elif not video.exists():
         raise FinaliseError(manifest_path, f"the video {files.video} is gone")
     if manifest.live_cues:
@@ -150,3 +164,18 @@ def _targets(folder: Path, title: str, index: int, video_suffix: str) -> tuple[P
     """The final video, subtitle and manifest paths for session ``index``."""
     stem = session_stem(title, index)
     return folder / f"{stem}{video_suffix}", folder / f"{stem}{SUBTITLE_SUFFIX}", folder / f"{stem}{MANIFEST_SUFFIX}"
+
+
+def _move(src: Path, dst: Path, sleep: Callable[[float], None]) -> bool:
+    """``os.replace(src, dst)``, retried after each ``RENAME_BACKOFF_S`` wait while the file is locked
+    (Windows reports a sharing violation as ``PermissionError``). False when it stays locked."""
+    waits = iter(RENAME_BACKOFF_S)
+    while True:
+        try:
+            os.replace(src, dst)
+            return True
+        except PermissionError:
+            wait = next(waits, None)
+            if wait is None:
+                return False
+            sleep(wait)

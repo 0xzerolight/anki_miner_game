@@ -1,5 +1,7 @@
 """Finalise (spec 10.3; 18.1 row ``session/journal.py`` + finalise; 17 rows zero cues and rename)."""
 
+import errno
+import math
 import os
 from dataclasses import replace
 from pathlib import Path
@@ -18,7 +20,7 @@ from anki_miner_game.models.manifest import (
     SessionManifest,
 )
 from anki_miner_game.models.profile import TextMode
-from anki_miner_game.session.finalise import FinaliseError, finalise
+from anki_miner_game.session.finalise import RENAME_BACKOFF_S, FinaliseError, finalise
 from anki_miner_game.session.journal import (
     Journal,
     JournalRecord,
@@ -278,3 +280,76 @@ def test_a_crash_between_any_two_steps_is_repaired_by_running_again(tmp_path, mo
         result = finalise(path, CFG)
         assert _tree(root) == expected, f"crash before file operation {crash_at}"
         assert result.manifest.state is ManifestState.READY
+
+
+class _Lock:
+    """``os.replace`` of ``path`` fails with ``PermissionError`` ``times`` times, as a Windows file OBS
+    still holds does; set ``times = 0`` to release it."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, path: Path, times: float) -> None:
+        self.path = path
+        self.times = times
+        real = os.replace
+
+        def locked_replace(src, dst, *args, **kwargs):
+            if Path(src) == self.path and self.times > 0:
+                self.times -= 1
+                raise PermissionError(13, "The process cannot access the file", str(src))
+            return real(src, dst, *args, **kwargs)
+
+        monkeypatch.setattr(os, "replace", locked_replace)
+
+
+def test_a_locked_video_is_retried_with_backoff_until_it_moves(tmp_path, monkeypatch):
+    path = _session(tmp_path, RECORDS)
+    _Lock(monkeypatch, tmp_path / "_incoming" / f"{OBS_STEM}.mkv", times=3)
+    waits: list[float] = []
+    result = finalise(path, CFG, sleep=waits.append)
+    assert waits == list(RENAME_BACKOFF_S[:3])
+    assert result.manifest.state is ManifestState.READY
+    assert (tmp_path / TITLE / "Steins;Gate - 03.mkv").read_bytes() == VIDEO_BYTES
+
+
+def test_a_video_locked_past_the_retries_leaves_the_session_pending_until_the_next_run(tmp_path, monkeypatch):
+    path = _session(tmp_path, RECORDS)
+    lock = _Lock(monkeypatch, tmp_path / "_incoming" / f"{OBS_STEM}.mkv", times=math.inf)
+    waits: list[float] = []
+
+    result = finalise(path, CFG, sleep=waits.append)
+
+    assert waits == list(RENAME_BACKOFF_S)
+    assert sum(waits) <= 10
+    assert result.manifest_path == path
+    assert result.manifest.state is ManifestState.FINALISE_PENDING
+    assert load_manifest(path) == result.manifest
+    assert not result.queue_vad
+    # The same-stem pair stays usable in _incoming/, and nothing reached the game folder.
+    assert sorted(_tree(tmp_path)) == [
+        f"_incoming/{OBS_STEM}.mkv",
+        f"_incoming/{OBS_STEM}.session.json",
+        f"_incoming/{OBS_STEM}.srt",
+    ]
+
+    lock.times = 0  # the next launch
+    again = finalise(path, CFG, sleep=waits.append)
+    assert again.manifest.state is ManifestState.READY
+    assert again.manifest.live_cues == LIVE_CUES
+    assert again.queue_vad
+
+
+def test_a_video_that_cannot_move_for_another_reason_is_reported_at_once(tmp_path, monkeypatch):
+    path = _session(tmp_path, RECORDS)
+    video = tmp_path / "_incoming" / f"{OBS_STEM}.mkv"
+    real = os.replace
+
+    def cross_device(src, dst, *args, **kwargs):
+        if Path(src) == video:
+            raise OSError(errno.EXDEV, "Invalid cross-device link", str(src))
+        return real(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(os, "replace", cross_device)
+    waits: list[float] = []
+    with pytest.raises(FinaliseError):
+        finalise(path, CFG, sleep=waits.append)
+    assert waits == []  # only a lock is worth waiting for
+    assert load_manifest(path).state is ManifestState.FINALISE_PENDING
