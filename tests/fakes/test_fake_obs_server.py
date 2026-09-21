@@ -16,7 +16,16 @@ from tests.fakes.fake_obs_server import (
     RecordedRequest,
     Reply,
     auth_string,
+    load_transcript,
     version_data,
+)
+from tests.fakes.obs_transcript_sample import (
+    RECORDING_PATH,
+    REPEATED_ID,
+    SAMPLE_RECORDS,
+    SAMPLE_VERSION,
+    write_sample_transcript,
+    write_transcript,
 )
 
 PASSWORD = "fake-server-pw"
@@ -190,3 +199,82 @@ async def test_drop_clients_closes_every_connection(server, code, reason):
         None if code is None else (code, reason)
     )
     assert server.client_count == 0
+
+
+# --- transcripts ----------------------------------------------------------------------------------
+
+
+def test_the_loader_pairs_connections_and_drops_other_clients_and_get_version(tmp_path):
+    transcript = load_transcript(write_sample_transcript(tmp_path))
+
+    assert transcript.generations == ((1, 2), (4, 5))
+    assert {step.conn for step in transcript.steps} == {1, 2, 4, 5}
+    assert transcript.version == SAMPLE_VERSION
+    assert not any(step.d.get("requestType") == "GetVersion" for step in transcript.steps)
+    assert [(e.generation, e.request_type, e.response["requestStatus"]["code"]) for e in transcript.exchanges()] == [
+        (0, "GetRecordStatus", 100),
+        (0, "StartRecord", 100),
+        (0, "SetCurrentSceneCollection", 100),
+        (0, "GetReplayBufferStatus", 604),
+        (0, "CreateSceneCollection", 601),
+        (1, "GetRecordStatus", 100),
+    ]
+    assert transcript.expected_events(64, "C", "L") == [
+        ("C", {}),
+        (
+            "RecordStateChanged",
+            {"outputActive": False, "outputPath": None, "outputState": "OBS_WEBSOCKET_OUTPUT_STARTING"},
+        ),
+        (
+            "RecordStateChanged",
+            {"outputActive": True, "outputPath": RECORDING_PATH, "outputState": "OBS_WEBSOCKET_OUTPUT_STARTED"},
+        ),
+        ("L", {}),
+        ("C", {}),
+        ("L", {}),
+    ]
+
+
+def test_the_loader_pairs_answers_by_order_on_each_connection_never_by_request_id(tmp_path):
+    """obsws-python's request ids are random and repeat (switch_streaming, switch_not_ready)."""
+    ids = [r["msg"]["d"]["requestId"] for r in SAMPLE_RECORDS if r.get("msg", {}).get("op") == 6]
+    assert ids.count(REPEATED_ID) == 2 and len(set(ids)) < len(ids) - 1  # the sample repeats ids on purpose
+
+    exchanges = load_transcript(write_sample_transcript(tmp_path)).exchanges()
+
+    assert [e.request_type for e in exchanges] == [e.response["requestType"] for e in exchanges]
+    assert [
+        (e.request_type, e.response["requestStatus"].get("comment"))
+        for e in exchanges
+        if e.response["requestId"] == REPEATED_ID
+    ] == [("GetReplayBufferStatus", "Replay buffer is not available."), ("CreateSceneCollection", None)]
+
+
+def test_the_loader_refuses_overlapping_connections(tmp_path):
+    records = [r for r in SAMPLE_RECORDS if not (r.get("event") == "close" and r["conn"] in (1, 2))]
+
+    with pytest.raises(ValueError, match="overlap"):
+        load_transcript(write_transcript(tmp_path / "overlap.jsonl", records))
+
+
+def test_the_loader_refuses_a_request_of_the_recorded_client_obs_never_answered(tmp_path):
+    """OBS exiting while the recorded client waits for an answer: a shape the replay does not take yet."""
+    records = [r for r in SAMPLE_RECORDS if not (r["conn"] == 4 and r.get("msg", {}).get("op") == 7)]
+
+    with pytest.raises(ValueError, match="never answered"):
+        load_transcript(write_transcript(tmp_path / "unanswered.jsonl", records))
+
+
+async def test_replay_binds_clients_by_role_and_plays_the_recording(tmp_path):
+    async with FakeObsServer(transcript=load_transcript(write_sample_transcript(tmp_path))) as server:
+        events = await identified(server, subs=67, password=None)  # the event client may come first
+        requests = await identified(server, subs=0, password=None)
+
+        assert (await ask(requests, "GetVersion"))["responseData"] == SAMPLE_VERSION
+        profile = json.loads(await events.recv())["d"]
+        status = await ask(requests, "GetRecordStatus")
+
+        assert profile["eventType"] == "CurrentProfileChanged"
+        assert status["responseData"] == {"outputActive": False, "outputDuration": 0, "outputPaused": False}
+        assert (await ask(requests, "GetStreamStatus"))["requestStatus"]["code"] == 100  # not StartRecord
+        assert server.unscripted and "StartRecord" in server.unscripted[0]
