@@ -291,8 +291,11 @@ class ObsSetup:
         return active
 
     async def _provision(self, cfg: AppConfig, info: ObsInfo, report: Callable[[str], None]) -> ObsCheck:
-        for switch in (_PROFILE, _COLLECTION):
-            current = await self._current(switch)
+        try:
+            names = {switch: await self._current(switch) for switch in (_PROFILE, _COLLECTION)}
+        except ObsError as exc:
+            return ObsCheck(ObsStatus.FAILED, f"Cannot read OBS's current profile and scene collection: {exc}")
+        for switch, current in names.items():
             if current is not None and current != _APP_NAMES[switch]:
                 self._home[switch] = current
         report("Setting up the app's profile and scene collection in OBS…")

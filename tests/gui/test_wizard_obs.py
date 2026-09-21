@@ -444,3 +444,13 @@ async def test_a_failure_before_any_switch_sends_no_switch_back():
     check = await setup.run(AppConfig())
     assert check.status is ObsStatus.FAILED and check.notes == ()
     assert "SetCurrentProfile" not in obs.names() and "SetCurrentSceneCollection" not in obs.names()
+
+
+async def test_names_that_cannot_be_read_stop_before_anything_changes():
+    obs = WizardObs()
+    obs.fail["GetSceneCollectionList"] = ObsRequestError("GetSceneCollectionList", 500, "odd")
+    setup, _ = make_setup(obs)
+    check = await setup.run(AppConfig())
+    assert check.status is ObsStatus.FAILED
+    assert "odd" in check.text
+    assert obs.mutating() == []
