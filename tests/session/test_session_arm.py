@@ -154,6 +154,16 @@ async def test_a_switch_that_times_out_is_undone(h: Harness, monkeypatch):
     assert h.provisioner.profiles == []
 
 
+async def test_a_switch_whose_answer_comes_first_waits_for_its_event(h: Harness):
+    h.obs.late_switch_events = True  # R2 item 5: the step completes on ...Changed, not on the answer
+    h.actor.post(UserCommand(CommandKind.ARM, slug=SLUG))
+    async with asyncio.timeout(5):
+        while h.actor.state is not AppState.ARMED:
+            await asyncio.sleep(0.005)
+    assert (h.obs.profile, h.obs.collection) == (OBS_PROFILE_NAME, OBS_COLLECTION_NAME)
+    assert BannerKey.ARM not in h.banners()
+
+
 async def test_obs_asking_to_restart_fails_the_arm_and_restores_at_the_retry(h: Harness, monkeypatch):
     monkeypatch.setattr(session_mod, "RESTART_QUESTION_S", 0.05)
     h.obs.restart_question = asyncio.Event()  # nobody answers it

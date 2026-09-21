@@ -86,6 +86,8 @@ class FakeObs:
     websocket: str = "5.7.4"
     lost_switch_events: int = 0
     """How many of the next ``...Changed`` events after a ``SetCurrent...`` never arrive (the switch times out)."""
+    late_switch_events: bool = False
+    """``...Changed`` arrives after the ``SetCurrent...`` answer instead of before it (R2 item 5 saw both)."""
     restart_question: asyncio.Event | None = None
     """Set: ``SetCurrentProfile`` switches and sends its event, then answers only once this is set
     (OBS's modal restart question, R2 item 3)."""
@@ -223,6 +225,8 @@ class FakeGateway:
     def _switched(self, event: str, data: dict[str, Any]) -> None:
         if self.obs.lost_switch_events:
             self.obs.lost_switch_events -= 1
+        elif self.obs.late_switch_events:
+            asyncio.get_running_loop().call_later(0.01, self.emit, event, data)
         else:
             self.emit(event, data)
 
