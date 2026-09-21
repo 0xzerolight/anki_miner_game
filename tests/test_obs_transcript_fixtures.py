@@ -1,6 +1,7 @@
-"""Pins the obs-websocket transcripts recorded from a real OBS by the R2 spike (docs/m0/obs-behaviour.md).
+"""Pins the obs-websocket transcripts recorded from a real OBS by the R2 spike (docs/m0/obs-behaviour.md)
+and by E1 (docs/m0/m1-exit-linux.md).
 
-T12's FakeObsServer replays these files, T14 replays the provisioning one and T25 runs one scripted
+T12's FakeObsServer replays these files, T14 replays the provisioning ones and T25 runs one scripted
 session per transcript. This module keeps the set honest: the files are exactly the ones the README
 documents, every line is a record of ``tools/obs_transcript_recorder.py``, nothing secret or
 host-identifying is left in them, requests pair with their responses, synthetic records are
@@ -28,6 +29,7 @@ USER_DIR = "/home/user/Videos/"
 APP = "Anki Miner Game"
 
 EXPECTED = (
+    "app_provision.jsonl",
     "arm_disarm.jsonl",
     "missed_pause.jsonl",
     "normal.jsonl",
@@ -387,6 +389,33 @@ def test_a_new_xcomposite_input_lists_its_placeholder_disabled_first():
     first = _responses(records, "GetInputPropertiesListPropertyItems")[0]["responseData"]["propertyItems"]
     assert first[0]["itemEnabled"] is False and first[0]["itemValue"].endswith("\r\nplaceholder")
     assert any(i["itemEnabled"] and i["itemName"] == first[0]["itemName"] for i in first[1:])
+
+
+def test_the_apps_first_arm_copies_the_audio_rate_and_switches_away_and_back_unasked():
+    """E1: the order R2 item 3 proposed from source; no restart question held an answer back."""
+    records = _records("app_provision.jsonl")
+    rates = [q["requestData"] for q in _requests(records, "SetProfileParameter")]
+    assert rates[0] == {"parameterCategory": "Audio", "parameterName": "SampleRate", "parameterValue": "44100"}
+    targets = [q["requestData"]["profileName"] for q in _requests(records, "SetCurrentProfile")]
+    assert targets[:2] == ["Untitled", APP]
+    assert all(code == 100 for code in _codes(records, "SetCurrentProfile"))
+
+
+def test_a_removed_input_keeps_its_name_until_obs_destroys_it():
+    """E1: the app's second arm finds the removed name still taken at its first check, free at the next."""
+    records = _records("app_provision.jsonl")
+    ((t_removed, removed),) = _timed(records, TO_OBS, 6, "RemoveInput")
+    ((t_created, created),) = [(t, d) for t, d in _timed(records, TO_OBS, 6, "CreateInput") if t > t_removed]
+    name = removed["requestData"]["inputName"]
+    checks = [
+        answer["requestStatus"]["code"]
+        for (t, request), answer in zip(
+            _timed(records, TO_OBS, 6, "GetInputSettings"), _responses(records, "GetInputSettings"), strict=True
+        )
+        if t_removed < t < t_created and request["requestData"] == {"inputName": name}
+    ]
+    assert checks == [100, 600]
+    assert created["requestData"]["inputName"] == name
 
 
 def test_settings_apply_reactivates_the_profile_between_two_recordings():
