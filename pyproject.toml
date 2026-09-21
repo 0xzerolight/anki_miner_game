@@ -1,0 +1,143 @@
+[build-system]
+requires = ["setuptools>=77.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "anki-miner-game"
+dynamic = ["version"]
+description = "Records a video-game session through OBS and writes an Anki Miner video/subtitle pair"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "GPL-3.0-only"
+license-files = ["LICENSE"]
+authors = [
+    {name = "Anki Miner Game Contributors"}
+]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: End Users/Desktop",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Games/Entertainment",
+]
+
+# Frozen runtime deps: nothing else ships in the packaged app (spec 4.3, global
+# constraints). The VAD and OCR add-ons bring their own environments and are
+# never declared here.
+dependencies = [
+    "PyQt6>=6.11.0",
+    "obsws-python>=1.8.0",
+    "websockets>=17.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-qt>=4.5.0",
+    "pytest-asyncio>=1.4.0",
+    "pytest-xdist>=3.8.0",
+    "hypothesis>=6.168.0",
+    "pysubs2>=1.9.0",
+    "black>=26.5.1",
+    "ruff>=0.16.8",
+    "mypy>=2.3.1",
+]
+
+[project.scripts]
+anki_miner_game = "anki_miner_game.launch:main"
+
+[project.urls]
+Homepage = "https://github.com/0xzerolight/anki_miner_game"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.dynamic]
+version = {attr = "anki_miner_game.__version__"}
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["anki_miner_game*"]
+exclude = ["tests*", "scripts*", "docs*", "tools*", "packaging*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+asyncio_mode = "auto"
+qt_api = "pyqt6"
+# --max-worker-restart=0: a pytest-qt teardown segfault kills an xdist worker;
+# the default is to restart it and limp on, then hang to the CI kill with no
+# diagnostics. =0 surfaces the crashing worker immediately instead.
+# --dist loadfile keeps each test file on one worker, avoiding a reshuffled,
+# order-dependent segfault (Anki Miner's own gate carries the same rule).
+addopts = "-n auto --dist loadfile --max-worker-restart=0 -m \"not vad and not obs_live and not network and not windows_only\""
+markers = [
+    "vad: needs the VAD add-on environment (onnxruntime, numpy, av)",
+    "obs_live: needs a real, reachable OBS instance",
+    "network: genuinely needs real network beyond loopback",
+    "windows_only: exercises Windows-only behaviour (hotkey registration, job objects)",
+    "e2e: real-service end-to-end test, excluded by default",
+]
+
+[tool.black]
+line-length = 120
+target-version = ["py312"]
+include = '\.pyi?$'
+extend-exclude = '''
+/(
+  | \.git
+  | \.venv
+  | \.venv-vad
+  | \.worktrees
+  | build
+  | dist
+)/
+'''
+
+[tool.mypy]
+python_version = "3.12"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+check_untyped_defs = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+strict_equality = true
+
+# Parallel-safe test rule (master plan section 2): these modules are only ever
+# importable inside .venv-vad, never the main dev venv, so mypy must not choke
+# on missing stubs for them.
+[[tool.mypy.overrides]]
+module = ["numpy.*", "onnxruntime.*", "av.*"]
+ignore_missing_imports = true
+
+# vad_worker.py itself imports the above and runs under .venv-vad's
+# interpreter, not this project's; mypy in this venv cannot type-check it.
+[[tool.mypy.overrides]]
+module = ["anki_miner_game.vad.worker.*"]
+ignore_errors = true
+
+[[tool.mypy.overrides]]
+module = ["obsws_python.*"]
+ignore_missing_imports = true
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "A", "C4", "SIM", "G", "LOG"]
+ignore = [
+    "E501",   # Line length handled by black
+    "N802",   # PyQt method overrides use camelCase (closeEvent, keyPressEvent, etc.)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"]
