@@ -27,6 +27,10 @@ logger = logging.getLogger(__name__)
 BACKOFF_S: Final = (1.0, 2.0, 5.0, 10.0)
 """Waits before successive reconnect attempts; the last one repeats. A connection resets it."""
 
+CLOSE_TIMEOUT_S: Final = 1.0
+"""How long ``stop`` waits for the hooker to answer the close frame; hookers never answer it, and
+websockets' default of 10 s would hold every shutdown and reconfiguration that long."""
+
 LUNA_PATH: Final = "/api/ws/text/origin"
 """Where LunaTranslator serves its text; tried once when the handshake on the plain URI is refused."""
 
@@ -132,7 +136,7 @@ class WebsocketSource:
         """Connect to the URI, or to the LunaTranslator path once when the handshake is refused."""
         for url in self._urls:
             try:
-                ws = await connect(url, ping_interval=None, proxy=None)
+                ws = await connect(url, ping_interval=None, close_timeout=CLOSE_TIMEOUT_S, proxy=None)
             except InvalidHandshake as exc:
                 logger.debug("%s: handshake with %s refused: %s", self._id, url, exc)
                 continue

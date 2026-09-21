@@ -218,7 +218,9 @@ async def test_backoff_restarts_after_a_connection(make_source):
         assert sleep.delays == [1.0, 2.0, 1.0]
 
 
-async def test_connects_without_keepalive_pings(make_source, monkeypatch):
+async def test_connects_without_keepalive_pings_and_with_a_short_close_timeout(make_source, monkeypatch):
+    # Hookers answer neither pings nor close frames: websockets' default 10 s close timeout would
+    # make every stop() + wait_closed() take 10 s.
     calls = []
     real_connect = websocket_source.connect
 
@@ -232,6 +234,7 @@ async def test_connects_without_keepalive_pings(make_source, monkeypatch):
         await hooker.wait_for_clients(1)
     assert calls
     assert all(kwargs["ping_interval"] is None for kwargs in calls)
+    assert all(kwargs["close_timeout"] == websocket_source.CLOSE_TIMEOUT_S <= 1.0 for kwargs in calls)
 
 
 async def test_ignores_proxy_settings_in_the_environment(make_source, monkeypatch):
