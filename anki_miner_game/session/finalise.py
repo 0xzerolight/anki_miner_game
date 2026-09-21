@@ -94,7 +94,7 @@ def _build(manifest_path: Path, manifest: SessionManifest, files: IncomingFiles,
         raise FinaliseError(manifest_path, f"the video {files.video} is gone") from None
     stopped_at = manifest.stopped_at or _utc_stamp(video_mtime)  # the video's last write
     try:
-        records = read_journal(files.journal)
+        records = _up_to_first_stop(read_journal(files.journal))
     except FileNotFoundError:  # stopped before the actor created the journal
         records = []
     lines = timed_lines(records)
@@ -113,12 +113,21 @@ def _build(manifest_path: Path, manifest: SessionManifest, files: IncomingFiles,
     return built
 
 
-def _stop_ms(records: Sequence[JournalRecord], max_cue_seconds: int) -> int:
-    """The first stop record's offset; without one (a crash), the last offset in the journal + the cap.
+def _up_to_first_stop(records: list[JournalRecord]) -> list[JournalRecord]:
+    """The records up to and including the first stop record.
 
     Several stop records mean OBS split the recording: the session is finalised against the first
-    file (spec 7), and lines after that stop fall outside it.
+    file (spec 7), and every record after that stop falls outside it. Its lines are neither cues nor
+    skips, and a replace record there rewrites nothing.
     """
+    for i, record in enumerate(records):
+        if isinstance(record, StopRecord):
+            return records[: i + 1]
+    return records
+
+
+def _stop_ms(records: Sequence[JournalRecord], max_cue_seconds: int) -> int:
+    """The first stop record's offset; without one (a crash), the last offset in the journal + the cap."""
     stops = [record.offset_ms for record in records if isinstance(record, StopRecord)]
     if stops:
         return stops[0]

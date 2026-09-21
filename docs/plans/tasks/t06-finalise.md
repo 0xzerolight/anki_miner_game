@@ -136,8 +136,8 @@ Answered from the card, the spec and the code; nobody else rules on these.
    the only true stop time. A value the actor wrote is kept.
 9. **Stop offset without a `stop` record = the last record that carries an offset + the cap** (spec
    10.3 step 1 "the last record's offset"): `line`, `pause` and `resume` carry one, `replace` does
-   not. With several `stop` records (never written by T15, but possible in a hand-edited file) the
-   last wins.
+   not. With several `stop` records (T15 writes one at a split and keeps journalling) the first
+   wins: every record after it is ignored, so later lines are neither cues nor `skip`.
 10. **Journal records are module-local frozen dataclasses** (`LineRecord`, `ReplaceRecord`,
     `PauseRecord`, `ResumeRecord`, `StopRecord`) with a `TAG` class variable, not models: section 4
     names only `Journal(path)` and `read_journal(path)`, and nothing outside `session/` reads a
@@ -1222,7 +1222,7 @@ def _build(manifest_path: Path, manifest: SessionManifest, files: IncomingFiles,
     """Steps 1-3: journal -> cues -> ``<obs stem>.srt`` beside the video, manifest ``finalise_pending``."""
     stopped_at = manifest.stopped_at or _utc_stamp(files.video.stat().st_mtime)  # the video's last write
     try:
-        records = read_journal(files.journal)
+        records = _up_to_first_stop(read_journal(files.journal))
     except FileNotFoundError:  # stopped before the actor created the journal
         records = []
     lines = timed_lines(records)
@@ -1241,11 +1241,19 @@ def _build(manifest_path: Path, manifest: SessionManifest, files: IncomingFiles,
     return built
 
 
+def _up_to_first_stop(records: list[JournalRecord]) -> list[JournalRecord]:
+    """The records up to and including the first stop record: a split ends the session there."""
+    for i, record in enumerate(records):
+        if isinstance(record, StopRecord):
+            return records[: i + 1]
+    return records
+
+
 def _stop_ms(records: Sequence[JournalRecord], max_cue_seconds: int) -> int:
-    """The stop record's offset; without one (a crash), the last offset in the journal + the cap."""
+    """The first stop record's offset; without one (a crash), the last offset in the journal + the cap."""
     stops = [record.offset_ms for record in records if isinstance(record, StopRecord)]
     if stops:
-        return stops[-1]
+        return stops[0]
     offsets = [record.offset_ms for record in records if not isinstance(record, ReplaceRecord)]
     return (offsets[-1] if offsets else 0) + max_cue_seconds * 1000
 

@@ -24,7 +24,8 @@ def build_cues(lines: Sequence[TimedLine], stop_ms: int, shift_ms: int, cfg: Cue
        immediately following line, kept or not, so a burst of click-through
        lines goes as a whole. For the last line ``D`` is measured to the stop;
        so is it for a line whose next line lies past the stop, which is the
-       last line inside the recording.
+       last line inside the recording (a guard: finalise passes no line
+       journalled after the stop).
     3. ``end = min(start + cap, max(next.start - end_gap_ms, min(next.start,
        start + MIN_CUE_MS)))``, with ``next`` the next *kept* line (the stop for
        the last one), so a dropped line never shortens its neighbour.

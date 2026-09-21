@@ -159,16 +159,18 @@ def test_without_a_stop_record_the_stop_is_the_last_offset_plus_the_cap(tmp_path
 
 
 def test_a_session_with_several_stop_records_ends_at_the_first(tmp_path):
-    # Spec 7: a split recording is finalised against the first file; lines after that stop are not in it.
+    # Spec 7: a split recording is finalised against the first file. Every record after that stop is
+    # outside the session: its lines are not cues, not skips, and a replace there rewrites nothing.
     records: list[JournalRecord] = [
         LineRecord(1_000, "あ", "agent"),
         StopRecord(5_000),
+        ReplaceRecord("あいう"),
         LineRecord(6_000, "い", "agent"),
         StopRecord(20_000),
     ]
     result = finalise(_session(tmp_path, records), CFG)
     assert result.manifest.live_cues == (LiveCue(i=1, start_ms=1_000, end_ms=4_650, text="あ", source="agent"),)
-    assert (result.manifest.counts.accepted, result.manifest.counts.skip) == (1, 1)
+    assert (result.manifest.counts.accepted, result.manifest.counts.skip) == (1, 0)
 
 
 @pytest.mark.parametrize(("records", "skip"), [(NO_CUE_RECORDS, 2), ([], 0), (None, 0)])
