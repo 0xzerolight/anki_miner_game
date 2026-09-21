@@ -3,8 +3,9 @@
 Every write goes to a temporary file in the same folder and is moved into place
 with ``os.replace``. A file that does not describe its model raises
 ``CorruptFileError``; one written by a newer app raises ``FutureSchemaError``;
-one that cannot be read at all raises ``StoreError``. Callers turn all three into
-banners.
+one that cannot be read at all raises ``StoreError``; a save that cannot be
+written raises ``StoreWriteError``. All are ``StoreError``s, which callers turn
+into banners.
 """
 
 import contextlib
@@ -40,6 +41,10 @@ class FutureSchemaError(StoreError):
         self.found = found
 
 
+class StoreWriteError(StoreError):
+    """The file could not be written (folder not writable, disk full, ...); the old file is kept."""
+
+
 class InvalidProfileError(ValueError):
     """``save_profile`` refused a profile that ``validate`` rejects."""
 
@@ -65,8 +70,9 @@ def load_config() -> AppConfig:
 
 
 def save_config(cfg: AppConfig) -> Path:
+    """Write ``<home>/config.json``; raises ``StoreWriteError`` when it cannot be written."""
     path = paths.config_path()
-    write_text_atomic(path, dump_document(cfg))
+    _write(path, dump_document(cfg))
     return path
 
 
@@ -95,12 +101,16 @@ def load_profiles() -> LoadedProfiles:
 
 
 def save_profile(profile: GameProfile) -> Path:
-    """Write ``<home>/games/<slug>.json``; raises ``InvalidProfileError`` when ``validate`` finds problems."""
+    """Write ``<home>/games/<slug>.json``.
+
+    Raises ``InvalidProfileError`` when ``validate`` finds problems and
+    ``StoreWriteError`` when the file cannot be written.
+    """
     problems = validate(profile)
     if problems:
         raise InvalidProfileError(problems)
     path = paths.profile_path(profile.slug)
-    write_text_atomic(path, dump_document(profile))
+    _write(path, dump_document(profile))
     return path
 
 
@@ -123,6 +133,13 @@ def write_text_atomic(path: Path, text: str) -> None:
         with contextlib.suppress(FileNotFoundError):
             os.unlink(tmp_name)
         raise
+
+
+def _write(path: Path, text: str) -> None:
+    try:
+        write_text_atomic(path, text)
+    except OSError as exc:
+        raise StoreWriteError(path, f"cannot be written ({exc.strerror or exc})") from exc
 
 
 def _read[T](cls: type[T], path: Path) -> T:

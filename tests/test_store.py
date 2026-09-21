@@ -1,5 +1,7 @@
 import dataclasses
 import json
+import os
+import sys
 
 import pytest
 
@@ -51,8 +53,10 @@ def test_failed_replace_keeps_the_old_file_and_removes_the_temporary(monkeypatch
         raise OSError("disk gone")
 
     monkeypatch.setattr(store.os, "replace", fail_replace)
-    with pytest.raises(OSError, match="disk gone"):
+    with pytest.raises(store.StoreWriteError, match="disk gone") as info:
         store.save_config(AppConfig(last_game="new"))
+    assert info.value.path == paths.config_path()
+    assert isinstance(info.value.__cause__, OSError)
     assert paths.config_path().read_bytes() == before
     assert [p.name for p in paths.home().iterdir()] == ["config.json"]
 
@@ -175,3 +179,28 @@ def test_write_text_atomic_creates_the_folder_and_keeps_lf(tmp_path):
     store.write_text_atomic(target, "1\n00:00:00,000 --> 00:00:01,000\nはい\n")
     assert target.read_bytes() == "1\n00:00:00,000 --> 00:00:01,000\nはい\n".encode()
     assert [p.name for p in target.parent.iterdir()] == ["x.srt"]
+
+
+posix_non_root = pytest.mark.skipif(
+    sys.platform == "win32" or os.geteuid() == 0, reason="needs POSIX permissions that bind the user"
+)
+
+
+@posix_non_root
+def test_saving_into_an_unwritable_folder_is_a_store_error():
+    games = paths.games_dir()
+    games.mkdir(parents=True)
+    paths.home().chmod(0o500)
+    games.chmod(0o500)
+    try:
+        with pytest.raises(store.StoreWriteError) as config_info:
+            store.save_config(AppConfig())
+        with pytest.raises(store.StoreWriteError) as profile_info:
+            store.save_profile(_profile())
+    finally:
+        games.chmod(0o700)
+        paths.home().chmod(0o700)
+    assert config_info.value.path == paths.config_path()
+    assert profile_info.value.path == paths.profile_path("steins-gate")
+    assert isinstance(profile_info.value, store.StoreError)
+    assert "cannot be written" in str(profile_info.value)
