@@ -1337,7 +1337,7 @@ leave `screenshot_offset` at 1.0 s; keep sentence de-duplication on, since games
 | `websockets` stance on one-port HTTP | upstream FAQ, `docs/faq/server.rst` |
 | faster-whisper VAD symbols and model file | installed package in Anki Miner's environment |
 | OBS facts in sections 3.3, 6, 7, 11 (M0 S1) | read in obs-studio 32.2.2 (`ba2f32bd`), obs-websocket 5.7.4 (`1ef34bf4`), obsws-python 1.8.0, bouf v0.6.5; cites machine-checked; `docs/m0/source-findings.md` |
-| Zero event, `capture_latency_ms`, pause, fallback lag, disk rate (M0 R1) | flash probe against real OBS 32.2.2 on Linux, 20 sessions over five encoder configurations; `docs/m0/clock.md` |
+| Zero event, `capture_latency_ms`, pause, fallback lag, disk rate (M0 R1) | flash probe against real OBS 32.2.2 on Linux, 20 sessions over NVENC and x264, overload included; `docs/m0/clock.md` |
 | Profile keys, restart rows, switches, events, reconnect, exit, window list (M0 R2) | real OBS 32.2.2 on Linux through a logging proxy, `ffprobe` on the files; transcripts in `tests/fixtures/obs_transcripts/`; `docs/m0/obs-behaviour.md` |
 | owocr log lines, process tree, install, config file (M0 R3) | owocr 1.26.8 installed with uv and run on Linux X11; fixtures in `tests/fixtures/owocr/`; `docs/m0/owocr.md` |
 | Sanitiser in section 10.1 (amended) | contract test against the vendored extractor at `ea4a30ce`, 2000 adversarial examples a run; offline campaign of 2 million titles; `docs/m0/sanitiser.md` |
