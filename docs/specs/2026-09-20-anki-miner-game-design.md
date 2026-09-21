@@ -510,9 +510,11 @@ class TextSource(Protocol):
 
 - `WebsocketSource`: `websockets` asyncio client. Connect to `ws://<uri>`; on handshake failure try
   `ws://<uri>/api/ws/text/origin` once (LunaTranslator). Reconnect with backoff 1, 2, 5, 10 s, then
-  every 10 s. `ping_interval=None`, as GSM does, because hookers do not answer pings. Frame parse:
-  try JSON; if the result is a dict take `sentence` (fall back to the whole frame when absent) and
-  `source`; any other JSON value, or invalid JSON, means the frame is the line. GSM's version calls
+  every 10 s. `ping_interval=None`, as GSM does, because hookers do not answer pings, and
+  `close_timeout=1.0`, because they do not answer close frames either. Frame parse:
+  try JSON; if the result is a dict take `sentence` (fall back to the whole frame when absent);
+  `source` and `time` are ignored: a line belongs to the configured source, and its time is read at
+  receipt. Any other JSON value, or invalid JSON, means the frame is the line. GSM's version calls
   `.get` on whatever `json.loads` returns (`gametext.py:691-700`); the port guards that.
 - `ClipboardSource`: `QClipboard.dataChanged` on the main thread, text only, ignores changes made
   by this app. Works on Windows and X11. On Wayland Qt sees the clipboard only while focused; the
@@ -525,10 +527,12 @@ class TextSource(Protocol):
 Applied in this order to every received line. Each drop increments one counter in the manifest.
 
 1. Unicode NFC.
-2. Remove control characters and zero-width characters (`Cc`, `Cf` categories) except newline.
+2. Remove control characters and zero-width characters (`Cc`, `Cf`) and lone surrogates (`Cs`)
+   except newline. `json.loads` turns an unpaired `\udXXX` escape into a lone surrogate, which the
+   journal, the subtitle and the feed cannot encode.
 3. Newlines to spaces; collapse whitespace; strip.
 4. Speaker strip (when enabled): remove one leading `【…】` group and following whitespace.
-5. Drop if empty.
+5. Drop if empty. Counter `no_letters`: an empty line has no letter either.
 6. Drop if no character is a letter (`str.isalpha`): punctuation-only and digit-only lines. A
    digit-only cue can also be mistaken for an index line by SRT parsers. Counter `no_letters`.
 7. Drop if longer than 300 characters. Counter `junk`.
@@ -538,6 +542,14 @@ Applied in this order to every received line. Each drop increments one counter i
    line's text, arrived within 2 s of it, and is longer, it replaces the previous line's text and
    keeps the previous line's offset. It is opt-in because it would swallow a short real line such
    as え followed by えっと….
+
+"The previous accepted line" in steps 8 and 9 means the previous line journalled in the current
+recording. The session resets the pipeline whenever the line it accepted last will not be
+journalled: after dropping an accepted line as `paused`, at `STARTED` (unless the auto-start line
+held while armed is journalled at offset 0), and after a split stop. A typewriter merge is
+journalled as a `replace` record only when its base line is the journal's last `line` record;
+otherwise it is journalled as a new line at its own offset, or dropped as `paused` when the clock
+reads `None`. A new session's first line is therefore never a duplicate of the last one.
 
 An accepted line is journalled (section 10.2), broadcast to the text feed, and shown in the live list.
 
@@ -573,7 +585,8 @@ Order of evaluation: (1) starts for every line; (2) the drop test, with `D` meas
 **immediately following** line, kept or not, so a burst of click-through lines is dropped as a
 whole; (3) ends, with `next` meaning the next **kept** line, so a dropped line never shortens its
 neighbour. Starts are non-decreasing. Two lines can share a start only when the OCR shift clamps at
-`prev.start`; the earlier of the two then has `D = 0` and is dropped.
+`prev.start`; the earlier of the two then has `D = 0` and is dropped. Finalise passes no line
+recorded after the first `stop` record (section 10.3), so no line starts past `stop_ms`.
 
 SRT output (`session/srt_writer.py`): UTF-8 without BOM, `\n` line ends, index from 1, timestamps
 `HH:MM:SS,mmm` formatted from integer milliseconds (GSM's formatter floors seconds and takes
@@ -587,16 +600,35 @@ cues. Written to a temporary name in the same folder and moved into place with `
 Folder `<output_root>/<sanitised title>/`, stem `<sanitised title> - NN`, NN zero-padded to two
 digits and growing naturally to 9999. Anki Miner's extractor reads at most four digits.
 
-Sanitiser, in order:
+Sanitiser, in order (amended at M0, `docs/m0/sanitiser.md`):
 
 1. Replace `< > : " / \ | ? *` and control characters with a space.
-2. Replace every inner ` - ` with ` ~ `, so the only ` - ` in the stem is the one before NN.
-3. Rewrite any `S<digits>` + optional separators + `E<digits>` token (either case) as
+2. Collapse every whitespace run to one space; trim both ends.
+3. Replace every hyphen that has a space on both sides with `~`, so the only ` - ` in the stem is
+   the one before NN.
+4. Rewrite any `S<digits>` + optional separators + `E<digits>` token (either case) as
    `S<digits>~E<digits>`, because that pattern outranks ` - NN` in Anki Miner.
-4. Collapse whitespace; strip trailing dots and spaces; empty becomes `Game`.
+5. Strip trailing dots and spaces; empty becomes `Game`.
+6. Steps 3 and 4 must also hold for the stem as Anki Miner reads it. Its extractor deletes
+   technical tokens (`1080p`, `1280x720`, `x264`, `10bit`, `[1A2B3C4D]`, `v2`) before matching.
+   Where that deletion would leave a hyphen between whitespace, the hyphen becomes `~`. Where it
+   would join an `S<digits>` to an `E<digits>`, a `~` goes in directly before the `E`. Repeat until
+   neither applies.
 
-Verified against Anki Miner's real `EpisodeNumberExtractor` on 2026-09-20; each extracts the session
-number with no season:
+Step 6 only replaces a hyphen or inserts a `~`, so no letter or digit the user typed is lost; a
+title with no hazard passes through unchanged, and the rule is idempotent. `session/naming.py`
+simulates the extractor's token deletion (a port of its six patterns) rather than approximating it.
+All whitespace, U+3000 included, becomes an ASCII space.
+
+The first rule (` - ` to ` ~ ` before collapsing whitespace, on the title as typed) failed three
+ways. A deleted token could join `S1` and `E2` or put spaces around a hyphen (`S1 1080p E2` was
+read as season 1, episode 2); U+3000 and U+00A0 around a hyphen are not control characters but
+match the extractor's `\s` (`A　-　5` was read as episode 5); two hyphens sharing a space defeated a
+plain replace (`A - - 5` was read as episode 5). With the amended rule they give `S1 1080p ~E2 - 03`,
+`A ~ 5 - 01` and `A ~ ~ 5 - 01`. `docs/m0/sanitiser.md` lists all seventeen counterexamples.
+
+Verified against Anki Miner's real `EpisodeNumberExtractor` (at `ea4a30ce` for the amended rule);
+each extracts the session number with no season:
 
 | Title | Stem |
 |---|---|
@@ -611,8 +643,13 @@ number with no season:
 | `Ep 5 Simulator` | `Ep 5 Simulator - 04` |
 | `NieR:Automata 1.1a` | `NieR Automata 1.1a - 9999` |
 
-Without step 2, `Zero - 3 - 01` extracts 3. Without step 3, `S01E05 The Game - 02` extracts season 1
+Without step 3, `Zero - 3 - 01` extracts 3. Without step 4, `S01E05 The Game - 02` extracts season 1
 episode 5. The contract test (section 18) keeps this honest.
+
+Known limits in v1, outside the extractor contract: a title that is a Windows device name (`CON`,
+`NUL`, `COM1`) makes an invalid folder name on Windows (the stem `CON - 01` is fine); there is no
+length cap, so a long CJK title can pass the 255-byte file-name limit on Linux or `MAX_PATH` on
+Windows; a leading dot is kept, so `.hack` makes a hidden folder on Linux.
 
 ### 10.2 While recording
 
@@ -649,7 +686,8 @@ late, which needs special handling for the last line and loses it on a crash.
 One routine, idempotent, used by normal stop, by reconcile and at launch:
 
 1. Read the journal. If there is no `stop` record, stop offset = the last record's offset +
-   `max_cue_seconds`.
+   `max_cue_seconds`. With several `stop` records the first wins and every record after it is
+   ignored: its lines are neither cues nor `skip`, and a `replace` record there rewrites nothing.
 2. `build_cues`. No cues: keep the video, write no subtitle, flag `no_cues`.
 3. Write `<obs stem>.srt` atomically; write `live_cues` and counts into the manifest.
 4. Rename video, subtitle and manifest to `<Game>/<Game> - NN.*`. Same volume, so the renames are
@@ -660,7 +698,9 @@ One routine, idempotent, used by normal stop, by reconcile and at launch:
 
 Each step checks whether it has already happened, so a crash between any two steps is repaired by
 running the routine again. At launch the app runs it for every manifest in `_incoming/` whose
-recording is not active.
+recording is not active. Finalise calls under one output root run on one worker, one at a time,
+never on a shared pool: the NN bump is check-then-act, and two sessions of one game bumped to the
+same NN would both move onto one video.
 
 ## 11. OBS
 
@@ -956,12 +996,14 @@ The hand-off text shown after each session (Appendix C) tells the user what to d
 | `vad/assign.py` | the worked example; region in progress at window start; OCR start snap claiming a region from the previous chain; no regions; end clamp against a snapped next start |
 | Reconcile | every row of the table in section 6.3 |
 
-**Naming contract test.** The repository vendors Anki Miner's episode patterns (`PATTERNS`,
-`BARE_NUMBER`, `YEAR_LIKE`, `_strip_technical_tokens` from `anki_miner/utils/episode_matcher.py`)
-into `tests/contract/`, with the source commit in the file header. The test is property-based: for
-arbitrary Unicode titles and NN in 1-9999, the vendored extractor must return exactly NN and no
-season for `stem(title, NN)`. A dev script diffs the vendored copy against an Anki Miner checkout
-when one is given by path; it is not part of CI, because CI has no such checkout.
+**Naming contract test.** The repository vendors `EpisodeInfo`, `_strip_technical_tokens` and the
+whole `EpisodeNumberExtractor` class from Anki Miner's `anki_miner/utils/episode_matcher.py` into
+`tests/contract/anki_miner_episode_matcher.py`, with the source commit in the file header. The test
+is property-based: for arbitrary Unicode titles and NN in 1-9999, the vendored extractor must return
+exactly NN and no season for `stem(title, NN)`. An adversarial generator mixes the tokens the
+extractor deletes with S/E fragments, spaced hyphens and Unicode whitespace; the port of the
+deletion must equal the vendored one. `scripts/diff_vendored_matcher.py <anki_miner checkout>`
+diffs the vendored copy against a checkout; it is not part of CI, because CI has no such checkout.
 
 ### 18.2 Fakes and integration
 
