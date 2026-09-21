@@ -139,6 +139,7 @@ PROTOCOL_MEMBERS = {
         "ensure_profile": coro("cfg"),
         "ensure_collection": coro("profile"),
         "list_windows": coro(),
+        "capture_method": coro("profile"),
     },
     ("anki_miner_game.interfaces.obs", "Recorder"): {"start": coro(), "stop": coro()},
     ("anki_miner_game.interfaces.presenter", "Presenter"): {

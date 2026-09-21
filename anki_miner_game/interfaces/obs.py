@@ -164,6 +164,12 @@ class Provisioner(Protocol):
         """
         ...
 
+    async def capture_method(self, profile: GameProfile) -> str:
+        """The OBS input kind provisioning would create for this profile's capture settings on the
+        connected OBS (feature-detected with ``GetInputKindList``); shown by the game-profile dialog
+        as the capture method in use (spec 11.3). Raises ``ObsError`` when OBS is unreachable."""
+        ...
+
 
 class Recorder(Protocol):
     """``StartRecord`` / ``StopRecord``; changes no state itself (spec 11.4)."""
