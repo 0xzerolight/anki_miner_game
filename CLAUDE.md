@@ -139,6 +139,8 @@ that needs a change there does not make it: it writes a
 under `.orchestration/status/<slug>.json` and returns without touching those
 packages. The orchestrator rules on it; a single dedicated agent edits
 `models/`/`interfaces/`, and dependent tasks rebase onto the result.
+Accepted additions beyond master plan section 4 are listed in
+[`docs/contracts.md`](docs/contracts.md); read it with section 4.
 
 ## Release notes
 
