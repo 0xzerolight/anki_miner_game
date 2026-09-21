@@ -1,0 +1,4 @@
+.worktrees/
+.orchestration/
+.venv/
+.venv-vad/
