@@ -279,6 +279,15 @@ def test_text_sources_are_started_on_the_actors_thread_and_awaited_after_stop():
     assert "stop" in (TextSource.wait_closed.__doc__ or "")
 
 
+def test_list_windows_names_the_input_it_reads():
+    """Amendment 10: ``window_capture`` drops minimized windows, so Windows reads ``game_capture``."""
+    from anki_miner_game.interfaces.obs import Provisioner
+
+    doc = Provisioner.list_windows.__doc__ or ""
+    for word in ("game_capture", "capture_window", "xcomposite_input", "``[]``", "ObsError"):
+        assert word in doc, word
+
+
 def test_obs_config_failures_are_typed():
     """``credentials`` and ``read_ws_config`` name the error an unusable OBS websocket config raises."""
     from anki_miner_game.interfaces.obs import ObsDiscovery

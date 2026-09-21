@@ -108,7 +108,16 @@ class Provisioner(Protocol):
 
     async def ensure_collection(self, profile: GameProfile) -> ProvisionResult: ...
 
-    async def list_windows(self) -> list[WindowItem]: ...
+    async def list_windows(self) -> list[WindowItem]:
+        """The window list of the app's scene, for the window picker and auto mode's window-closed check.
+
+        ``GetInputPropertiesListPropertyItems`` on one input: Windows reads the
+        ``game_capture`` input's ``window`` property, never the ``window_capture``
+        fallback, whose list drops minimized windows; X11 reads the
+        ``xcomposite_input`` input's ``capture_window``. ``[]`` when the scene has
+        no such input (PipeWire capture). Raises only ``ObsError``.
+        """
+        ...
 
 
 class Recorder(Protocol):

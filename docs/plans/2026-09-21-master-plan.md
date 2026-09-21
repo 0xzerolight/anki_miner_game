@@ -540,7 +540,12 @@ case in that row of the spec's unit-test table.
   collection and scene `Game`, per-platform inputs feature-detected with `GetInputKindList`, mic muted,
   window list; idempotent diff; `ProvisionResult.needs_restart` from the M0 restart rows.
   `list_windows` keeps each item's `itemEnabled` (`WindowItem.enabled`, contract change request)
-  and reads `capture_window` on `xcomposite_input`, `window` on the Windows kinds (S1 summary 12).
+  and reads `capture_window` on `xcomposite_input`, and on Windows `window` on the `game_capture`
+  input only, never the `window_capture` fallback, whose list drops minimized windows (S1 summary
+  12, amendment 10): a minimized game would otherwise auto-stop the recording. `[]` when the scene
+  has no window-list input (PipeWire); raises only `ObsError` (`Provisioner.list_windows`
+  docstring). Decode `#3A`/`#22` with `lifecycle/auto.py`'s decoder (`_decode`, `_class_exe`), moved
+  to one place both import, instead of porting GSM's `parse_obs_window_target` decoding a second time.
 - Tests: scaling math; second run sends no mutating request; each platform row with a fake gateway;
   provisioning transcript replay.
 
