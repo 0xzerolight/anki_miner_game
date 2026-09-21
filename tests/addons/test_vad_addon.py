@@ -8,6 +8,7 @@ Every test but the ``network`` + ``vad`` one drives ``VadAddon`` with a fake ``e
 import asyncio
 import contextlib
 import hashlib
+import inspect
 import platform
 import subprocess
 import sys
@@ -179,6 +180,22 @@ def test_size_counts_uv_the_environment_and_the_model(tmp_path):
 
     assert size > MODEL.size + (uv_pin.size if uv_pin else 0) + 50_000_000
     assert size < 250_000_000
+
+
+def test_the_vad_addon_has_no_platform_note(tmp_path):
+    assert make_addon(tmp_path).note is None
+
+
+def test_the_vad_addon_conforms_to_addon_service():
+    from anki_miner_game.interfaces.addons import AddonService
+
+    for member in (attr for attr in vars(AddonService) if not attr.startswith("_")):
+        expected = inspect.getattr_static(AddonService, member)
+        actual = inspect.getattr_static(VadAddon, member)
+        if isinstance(expected, property):
+            assert isinstance(actual, property), member
+        else:
+            assert inspect.iscoroutinefunction(actual) is inspect.iscoroutinefunction(expected), member
 
 
 # --- status -----------------------------------------------------------------
