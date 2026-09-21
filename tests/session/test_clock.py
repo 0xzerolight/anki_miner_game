@@ -166,11 +166,27 @@ def test_reading_defaults_to_now() -> None:
     assert clock.reading_ms() == 3500
 
 
-def test_reading_shares_the_clamp_with_offsets() -> None:
+def test_reading_does_not_move_the_offset_clamp() -> None:
+    """Spec 7: a drift sample is a check, never input; a line queued behind a reading keeps its offset."""
     clock = EventClock()
     clock.start(100.0)
     assert clock.reading_ms(105.0) == 5000
-    assert clock.offset_ms(104.0) == 5000
+    assert clock.offset_ms(104.0) == 4000
+
+
+def test_drift_sample_does_not_move_the_offset_clamp() -> None:
+    clock = EventClock(now=FakeNow(100.05))
+    clock.start(100.0)
+    assert clock.drift_sample(40) == DriftSample(at_ms=50, output_duration_ms=40)
+    assert clock.offset_ms(100.02) == 20
+
+
+def test_reading_never_falls_below_an_offset() -> None:
+    """A stop reading is never before a journalled line (``build_cues`` relies on it)."""
+    clock = EventClock()
+    clock.start(100.0)
+    assert clock.offset_ms(105.0) == 5000
+    assert clock.reading_ms(104.0) == 5000
 
 
 def test_drift_sample_pairs_the_reading_with_output_duration() -> None:
@@ -353,12 +369,12 @@ _op = st.one_of(
 
 @pytest.mark.parametrize("make", [EventClock, OutputDurationClock])
 @given(ops=st.lists(_op, max_size=40))
-def test_readings_are_non_negative_and_non_decreasing_under_any_call_order(
+def test_offsets_never_decrease_and_readings_never_fall_below_them_under_any_call_order(
     make: type[EventClock] | type[OutputDurationClock], ops: list[tuple[str, float, int]]
 ) -> None:
     clock = make()
     clock.start(0.0)
-    last = 0
+    last_offset = 0
     for kind, t, duration in ops:
         if kind == "pause":
             clock.pause(t)
@@ -367,8 +383,10 @@ def test_readings_are_non_negative_and_non_decreasing_under_any_call_order(
         elif kind == "anchor":
             if isinstance(clock, OutputDurationClock):
                 clock.anchor(t, duration)
+        elif kind == "reading":
+            assert clock.reading_ms(t) >= last_offset >= 0
         else:
-            got = clock.offset_ms(t) if kind == "line" else clock.reading_ms(t)
+            got = clock.offset_ms(t)
             if got is not None:
-                assert got >= last
-                last = got
+                assert got >= last_offset
+                last_offset = got

@@ -11,9 +11,11 @@ edge is the same float, and a line stamped inside a past pause is still
 dropped after the resume.
 
 Edges (start, pause, resume, anchor) are expected in time order; one older
-than the latest breakpoint is taken at that breakpoint. Every reading is
-clamped to be non-negative and non-decreasing across calls. Neither clock does
-I/O or schedules anything: the session actor feeds the events and samples.
+than the latest breakpoint is taken at that breakpoint. Line offsets are clamped
+to be non-negative and non-decreasing across calls; a reading (stop, drift
+sample) is never below the latest offset but does not move that clamp.
+Neither clock does I/O or schedules anything: the session actor feeds the
+events and samples.
 """
 
 import time
@@ -65,15 +67,20 @@ class _PiecewiseClock:
         A line stamped exactly on a pause or resume edge gets the edge's offset.
         """
         value_ms, inside_pause = self._locate(t_mono)
-        return None if inside_pause else self._clamp(value_ms)
+        if inside_pause:
+            return None
+        self._last_ms = max(self._last_ms, round(value_ms))
+        return self._last_ms
 
     def reading_ms(self, t_mono: float | None = None) -> int:
         """The recording position at ``t_mono`` (default ``now()``); while paused, where the pause froze it.
 
-        For stop offsets and drift samples, which need a position even while paused.
+        For stop offsets and drift samples, which need a position even while paused. Never below the
+        latest line offset, so a stop is never before a journalled line; unlike ``offset_ms`` it does
+        not raise that floor, since a reading is a check, never input (spec 7).
         """
         value_ms, _ = self._locate(self._now() if t_mono is None else t_mono)
-        return self._clamp(value_ms)
+        return max(self._last_ms, round(value_ms))
 
     def drift_sample(self, output_duration_ms: int, t_mono: float | None = None) -> DriftSample:
         """Pair ``GetRecordStatus.outputDuration`` with this clock's reading at ``t_mono`` (default ``now()``).
@@ -98,10 +105,6 @@ class _PiecewiseClock:
         if point.running or i < 0:
             return point.value_ms + (t_mono - point.mono) * 1000, False
         return point.value_ms, t_mono != point.mono
-
-    def _clamp(self, value_ms: float) -> int:
-        self._last_ms = max(self._last_ms, round(value_ms))
-        return self._last_ms
 
 
 class EventClock(_PiecewiseClock):
