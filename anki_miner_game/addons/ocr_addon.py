@@ -646,17 +646,12 @@ class OcrAddon:
 
     def _verified(self) -> bool:
         receipt = self._root / "tools" / "owocr" / "uv-receipt.toml"
+        wanted = {"name": "owocr", "extras": [owocr_extra(self._platform)], "specifier": f"=={OWOCR_VERSION}"}
         try:
             requirements = tomllib.loads(receipt.read_text(encoding="utf-8"))["tool"]["requirements"]
-        except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError, KeyError, TypeError):
+            pinned = any(wanted.items() <= req.items() for req in requirements)  # uv may add keys
+        except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError, KeyError, TypeError, AttributeError):
             return False
-        pinned = any(
-            isinstance(req, dict)
-            and req.get("name") == "owocr"
-            and req.get("specifier") == f"=={OWOCR_VERSION}"
-            and req.get("extras") == [owocr_extra(self._platform)]
-            for req in requirements
-        )
         return pinned and self.executable.is_file()
 
     def _remove_install(self) -> None:

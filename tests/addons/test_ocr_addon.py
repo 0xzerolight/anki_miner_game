@@ -354,6 +354,14 @@ async def test_an_install_that_does_not_verify_fails_and_leaves_nothing_behind(t
     assert addon.status() is AddonStatus.MISSING
 
 
+def test_a_receipt_with_keys_uv_added_still_verifies(tmp_path):
+    _install_fake(tmp_path, "linux")
+    receipt = _root(tmp_path) / "tools" / "owocr" / "uv-receipt.toml"
+    receipt.write_text(receipt.read_text(encoding="utf-8").replace(" }]", ", marker = \"python_version >= '3'\" }]"))
+    assert "marker" in receipt.read_text(encoding="utf-8")
+    assert OcrAddon(tmp_path, platform="linux", environ={}).status() is AddonStatus.READY
+
+
 @posix_only
 async def test_a_missing_entry_point_or_receipt_is_broken(tmp_path):
     home = tmp_path / "home"
