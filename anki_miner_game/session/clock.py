@@ -11,7 +11,8 @@ edge is the same float, and a line stamped inside a past pause is still
 dropped after the resume.
 
 Edges (start, pause, resume, anchor) are expected in time order; one older
-than the latest breakpoint is taken at that breakpoint. Line offsets are clamped
+than the latest breakpoint is taken at that breakpoint (an anchor carried
+forward by the time the recording ran in between). Line offsets are clamped
 to be non-negative and non-decreasing across calls; a reading (stop, drift
 sample) is never below the latest offset but does not move that clamp.
 Neither clock does I/O or schedules anything: the session actor feeds the
@@ -21,6 +22,7 @@ events and samples.
 import time
 from bisect import bisect_right
 from collections.abc import Callable
+from itertools import pairwise
 from typing import ClassVar, NamedTuple
 
 from anki_miner_game.models.manifest import ClockKind, DriftSample
@@ -106,6 +108,18 @@ class _PiecewiseClock:
             return point.value_ms + (t_mono - point.mono) * 1000, False
         return point.value_ms, t_mono != point.mono
 
+    def _running_ms_since(self, t_mono: float) -> float:
+        """How long the recording ran between ``t_mono`` and the latest breakpoint.
+
+        Before the first breakpoint it counts as running, as ``_locate`` extrapolates it.
+        """
+        first = self._points[0]
+        total = max(0.0, first.mono - t_mono)
+        for point, following in pairwise(self._points):
+            if point.running:
+                total += max(0.0, following.mono - max(point.mono, t_mono))
+        return total * 1000
+
 
 class EventClock(_PiecewiseClock):
     """Primary clock: ``offset = (t_mono - zero_mono - paused_total) * 1000 + capture_latency_ms``.
@@ -153,10 +167,13 @@ class OutputDurationClock(_PiecewiseClock):
 
         Readings at or after ``mono_mid`` follow the new anchor; an earlier
         ``t_mono`` still reads from the previous one. While paused the new
-        position stays frozen until ``resume``.
+        position stays frozen until ``resume``. A ``mono_mid`` older than the
+        latest breakpoint (a pause event that arrived during the round trip)
+        is carried forward to it by the time the recording ran in between.
         """
         if not self._points:
             self._points.append(_Breakpoint(mono_mid, float(output_duration_ms), running=True))
             return
         last = self._points[-1]
-        self._points.append(_Breakpoint(max(mono_mid, last.mono), float(output_duration_ms), last.running))
+        value_ms = output_duration_ms + (self._running_ms_since(mono_mid) if mono_mid < last.mono else 0.0)
+        self._points.append(_Breakpoint(max(mono_mid, last.mono), value_ms, last.running))

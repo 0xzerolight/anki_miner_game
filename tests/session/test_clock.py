@@ -274,11 +274,22 @@ def test_output_duration_reconcile_into_a_paused_recording() -> None:
     assert clock.offset_ms(104.0) == 43_000
 
 
-def test_output_duration_edge_older_than_the_last_anchor_is_taken_at_the_anchor() -> None:
+def test_output_duration_anchor_older_than_the_last_anchor_is_carried_forward_to_it() -> None:
     clock = OutputDurationClock()
     clock.anchor(100.0, 0)
-    clock.anchor(99.0, 500)
-    assert clock.offset_ms(101.0) == 1500
+    clock.anchor(99.0, 500)  # 500 at 99.0 is 1500 at 100.0, where the new breakpoint goes
+    assert clock.offset_ms(101.0) == 2500
+
+
+def test_output_duration_anchor_older_than_a_pause_edge_adds_the_running_time_before_it() -> None:
+    """The round trip's midpoint can fall before a pause event that arrived during the round trip."""
+    clock = OutputDurationClock()
+    clock.anchor(100.0, 0)
+    clock.pause(110.0)
+    clock.anchor(109.9, 9_950)  # the recording ran 0.1 s more before the pause froze it
+    assert clock.reading_ms(111.0) == 10_050
+    clock.resume(112.0)
+    assert clock.offset_ms(113.0) == 11_050
 
 
 def test_output_duration_before_any_anchor_raises() -> None:
