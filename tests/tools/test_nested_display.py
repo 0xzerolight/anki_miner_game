@@ -509,3 +509,17 @@ def test_cli_guard_saves_and_compares_a_baseline(tmp_path, monkeypatch, capsys):
 
 def test_teardown_signals_are_term_then_kill():
     assert nd.TEARDOWN_SIGNALS == (signal.SIGTERM, signal.SIGKILL)
+
+
+def test_cli_refuses_a_protected_setenv_before_starting_anything(monkeypatch, capsys):
+    monkeypatch.setattr(nd.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(nd, "NestedDisplay", None)  # constructing one would fail the test
+    assert nd.main(["run", "--caller", "r1", "--setenv", "WAYLAND_DISPLAY=wayland-0", "--", "true"]) == 2
+    assert "WAYLAND_DISPLAY" in capsys.readouterr().err
+
+
+def test_a_relative_xdg_root_becomes_absolute(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    guard = nd.OwnerGuard(home=tmp_path, doc_path=Path("/run/user/1000/doc"), run=_Findmnt())
+    display = nd.NestedDisplay(xdg_root=Path("rel/xdg"), guard=guard, owner_env={"PATH": "/usr/bin", "HOME": "/h"})
+    assert display.xdg.root == tmp_path / "rel" / "xdg"

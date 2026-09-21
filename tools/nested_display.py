@@ -578,7 +578,7 @@ class NestedDisplay:
             if caller is None:
                 raise NestedDisplayError("give a caller slug or an xdg root")
             xdg_root = default_xdg_root(caller)
-        self.xdg = XdgDirs(xdg_root)
+        self.xdg = XdgDirs(Path(os.path.abspath(xdg_root)))  # env values must be absolute
         self.data_base = data_base if data_base is not None else main_checkout() / ORCH_DATA
         self.width, self.height, self.rootful, self.timeout_s = width, height, rootful, timeout_s
         self.token = f"{caller or 'nested'}-{os.getpid()}-{secrets.token_hex(4)}"
@@ -822,6 +822,11 @@ def _display_verb(args: argparse.Namespace) -> int:
     if missing:
         print(f"nested_display.py: not on PATH: {', '.join(missing)}", file=sys.stderr)
         return 2
+    extra = dict(args.setenv)
+    protected = sorted(PROTECTED_KEYS & extra.keys())
+    if protected:
+        print(f"nested_display.py: --setenv may not set {', '.join(protected)}", file=sys.stderr)
+        return 2
     signal.signal(signal.SIGTERM, _STOP)
     signal.signal(signal.SIGINT, _STOP)
     try:
@@ -833,7 +838,6 @@ def _display_verb(args: argparse.Namespace) -> int:
             rootful=args.rootful,
             timeout_s=args.timeout,
         )
-        extra = dict(args.setenv)
         nested.start()
     except IsolationBreachError as exc:
         _critical(exc)
