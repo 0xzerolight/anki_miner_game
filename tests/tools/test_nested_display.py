@@ -81,13 +81,20 @@ def test_the_caller_slug_is_validated(caller, tmp_path):
         nd.default_xdg_root(caller, tmp_path)
 
 
-def test_an_xdg_root_outside_the_orchestration_data_dir_is_refused(tmp_path):
-    base = tmp_path / "data"
+def test_an_xdg_root_outside_the_orchestration_data_dir_is_refused():
+    # Short made-up paths: check_xdg_root never touches the filesystem, and a pytest tmp_path
+    # under xdist is already too long for the socket-path check.
+    base = Path("/amg/data")
     nd.check_xdg_root(base / "r1" / "xdg", base)
     with pytest.raises(nd.NestedDisplayError, match="outside"):
-        nd.check_xdg_root(tmp_path / "elsewhere" / "xdg", base)
+        nd.check_xdg_root(Path("/amg/elsewhere/xdg"), base)
     with pytest.raises(nd.NestedDisplayError, match="outside"):
         nd.check_xdg_root(base / ".." / "escape" / "xdg", base)
+
+
+def test_the_real_default_root_fits_the_socket_path_limit():
+    main = Path("/home/light/Projects/anki_miner_game")
+    nd.check_xdg_root(nd.default_xdg_root("e1-m1-exit-linux", main), main / ".orchestration" / "m0" / "data")
 
 
 def test_an_xdg_root_with_whitespace_is_refused(tmp_path):

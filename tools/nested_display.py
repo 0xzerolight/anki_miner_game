@@ -157,7 +157,7 @@ class XdgDirs:
 
     @property
     def runtime(self) -> Path:
-        return self.root / "runtime"
+        return self.root / "run"  # short: sun_path holds 107 bytes
 
     @property
     def bus_socket(self) -> Path:
