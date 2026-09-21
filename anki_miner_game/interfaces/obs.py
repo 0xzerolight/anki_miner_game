@@ -26,14 +26,18 @@ class ObsGateway(Protocol):
         """``GetVersion`` plus the required-request check.
 
         Raises ``ObsConnectError``, ``ObsAuthError`` or ``ObsUnsupportedError``.
+        Retries 207 ``NotReady`` until a timeout, then raises ``ObsRequestError``.
         """
         ...
 
     async def request(self, name: str, **fields: Any) -> dict[str, Any]:
         """Send one request and return its ``responseData`` (``{}`` when there is none).
 
-        Waits while ``collection_changing`` is true. Raises ``ObsRequestError``
-        when OBS reports failure and ``ObsConnectError`` when not connected.
+        Waits while ``collection_changing`` is true, and retries 207 ``NotReady``
+        (OBS loading, or a collection change whose ``...Changing`` event has not
+        arrived) until a timeout, then raises ``ObsRequestError``. Raises
+        ``ObsRequestError`` when OBS reports failure and ``ObsConnectError``
+        when not connected.
         """
         ...
 
@@ -79,7 +83,10 @@ class ObsDiscovery(Protocol):
         ...
 
     async def wait_ready(self, timeout_s: float = 30.0) -> bool:
-        """``True`` once the websocket accepts connections; ``False`` after ``timeout_s``."""
+        """``True`` once ``GetVersion`` succeeds; ``False`` after ``timeout_s``.
+
+        OBS answers every request with 207 ``NotReady`` until it has loaded.
+        """
         ...
 
     def credentials(self, cfg: AppConfig) -> ObsCredentials:

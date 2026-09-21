@@ -104,6 +104,11 @@ class WindowItem:
     """Shown to the user."""
     value: str
     """Stored verbatim in ``capture.window``."""
+    enabled: bool
+    """``itemEnabled`` from ``GetInputPropertiesListPropertyItems``.
+
+    ``False`` on the configured value OBS keeps listing when no live window matches it.
+    """
 
 
 @dataclass(frozen=True)
