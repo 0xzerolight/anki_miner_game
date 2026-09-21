@@ -1,4 +1,19 @@
 .worktrees/
 .orchestration/
-.venv/
-.venv-vad/
+# No trailing slash: each worktree's .venv/.venv-vad is a SYMLINK to the
+# shared venv in the main checkout, and a trailing-slash pattern only matches
+# a real directory, never a symlink to one.
+.venv
+.venv-vad
+
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+gate.log
