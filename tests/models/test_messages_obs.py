@@ -89,6 +89,7 @@ def test_line_accepted_defaults_to_a_new_line():
     line = GameLine(text="a", raw="a", t_mono=1.0, source_id="agent")
     assert LineAccepted(line=line, offset_ms=5).replaces_previous is False
     assert UserCommand(kind=CommandKind.STOP).slug is None
+    assert UserCommand(kind=CommandKind.START).line is None
 
 
 def test_required_requests_are_the_26_of_spec_3_3():

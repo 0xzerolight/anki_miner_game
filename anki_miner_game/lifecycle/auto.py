@@ -5,9 +5,9 @@
 the armed game's ``auto.enabled``. The profile is read at every state
 change, so an edit made while armed applies from the next state.
 
-- Auto-start: the first ``LineAccepted`` while ``armed`` posts ``start``,
-  once per armed period (the actor holds that line and journals it at
-  offset 0 on ``STARTED``).
+- Auto-start: the first ``LineAccepted`` while ``armed`` posts ``start``
+  carrying that line (``UserCommand.line``), once per armed period; the
+  actor holds the line and journals it at offset 0 on ``STARTED``.
 - Auto-stop, idle: while ``recording``, no accepted line for
   ``auto.stop_idle_minutes`` (counted from the recording start when no line
   came yet) posts ``stop``.
@@ -131,7 +131,7 @@ class AutoMode:
             self._last_activity = self._now()
             if self._state is AppState.ARMED and not self._start_sent and self._start_on_first_line():
                 self._start_sent = True
-                self._control.post(UserCommand(CommandKind.START))
+                self._control.post(UserCommand(CommandKind.START, line=event.line))
 
     async def check(self) -> None:
         """One idle check and one window poll; ``run`` calls it every ``POLL_S``."""

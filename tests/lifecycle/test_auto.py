@@ -140,6 +140,16 @@ def test_first_line_while_armed_sends_start_once() -> None:
     assert rig.control.commands() == [CommandKind.START]
 
 
+def test_the_start_carries_the_line_that_triggered_it() -> None:
+    """The actor journals that line at offset 0 on ``STARTED`` (spec 12); a manual START carries none."""
+    rig = Rig(make_profile())
+    rig.state(AppState.ARMED)
+    first = GameLine("始まり", "始まり", rig.clock.t, "hook")
+    rig.control.emit(LineAccepted(first, None))
+    rig.line()
+    assert rig.control.posted == [UserCommand(CommandKind.START, line=first)]
+
+
 def test_lines_while_idle_or_recording_send_nothing() -> None:
     rig = Rig(make_profile())
     rig.line()

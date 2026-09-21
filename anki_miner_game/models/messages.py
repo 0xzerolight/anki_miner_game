@@ -74,6 +74,12 @@ class UserCommand:
     kind: CommandKind
     slug: str | None = None
     """The game to arm; used only with ``CommandKind.ARM``."""
+    line: GameLine | None = None
+    """``START`` from auto mode only: the accepted line that triggered it (spec 12).
+
+    The actor holds it and journals it at offset 0 on ``STARTED``. A ``START``
+    without a line (button, tray, hotkey, CLI) holds nothing.
+    """
 
 
 @dataclass(frozen=True)
