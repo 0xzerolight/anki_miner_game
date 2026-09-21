@@ -16,8 +16,8 @@ items of `source-findings.md` section 13.
 | # | Spec | Finding | Proposed amendment |
 |---|---|---|---|
 | 1 | 3.3, 11.3 | Keys confirmed in a real `basic.ini` written by the provisioning requests: `[SimpleOutput] RecFormat2=mkv`, `[AdvOut] RecFormat2=mkv`, `[AdvOut] RecSplitFile=false`, `[Video] AutoRemux=false`; `SetRecordDirectory` wrote `[SimpleOutput] FilePath` and `[AdvOut] RecFilePath`; the file holds `[Video] OutputCX`, `OutputCY`, `FPSType=2`, `FPSNum`, `FPSDen` (720p at 30/1 was already OBS's default for this 1080p base) | Drop "unverified" from both 11.3 rows |
-| 2 | 11.3 restart question | Record folder, output size, frame rate and split apply at the next `StartRecord` without a restart (after `SetVideoSettings` 854x480 at 24/1 the next file was 852x480 at 24/1, item 16). The container does not: the first recording after provisioning is MP4 data in a `.mkv` file; after switching to another profile and back, the next one is Matroska | Provisioning re-activates the app's profile (switch away and back) after it changes `RecFormat2`; no OBS restart |
-| 3 | 6.2 step 3, 11.3 | A profile switch between profiles whose `[Audio] SampleRate` or `ChannelSetup` differ opens OBS's modal "Restart" question. `CurrentProfileChanging` and `CurrentProfileChanged` arrive, the `SetCurrentProfile` answer does not (20 s, nobody answers). OBS writes both keys into every profile it saves, so a user at 44.1 kHz meets it on the first arm. With equal values nothing is asked | The app's profile carries the user profile's `SampleRate` and `ChannelSetup` (read with `GetProfileParameter` before `CreateProfile`, written with `SetProfileParameter` once the new profile is active; not exercised here: the matched run seeded the file before launch). Arming that sees `...Changed` but no answer within a few seconds shows a banner: "OBS is asking to restart" |
+| 2 | 11.3 restart question | Record folder, output size, frame rate and split apply at the next `StartRecord` without a restart (after `SetVideoSettings` 854x480 at 24/1 the next file was 852x480 at 24/1, item 16). The container does not: the first recording after provisioning is MP4 data in a `.mkv` file; after switching to another profile and back, the next one is Matroska | Provisioning re-activates the app's profile (switch away and back) after it changes `RecFormat2`, and after item 3's audio copy; no OBS restart |
+| 3 | 6.2 step 3, 11.3 | A profile switch between profiles whose `[Audio] SampleRate` or `ChannelSetup` differ opens OBS's modal "Restart" question. `CurrentProfileChanging` and `CurrentProfileChanged` arrive, the `SetCurrentProfile` answer does not (20 s, nobody answers). With equal values nothing is asked. `CreateProfile` itself never asks (source): OBS compares against the new, empty `basic.ini`, which has neither key. The new profile then runs at OBS's defaults (48000, `Stereo`), so on a fresh install a 44.1 kHz user meets the question at the first switch from it back to their own profile: item 2's switch-away, or else the first disarm. After that, every arm and disarm asks while the values differ (measured on an arm) | Provisioning reads the user profile's `SampleRate` and `ChannelSetup` with `GetProfileParameter` before `CreateProfile`, and writes them with `SetProfileParameter` right after it, **before** item 2's switch-away (source: both requests use the running profile's config, the one OBS compares; not run). Arming that sees `...Changed` but no answer within a few seconds shows a banner: "OBS is asking to restart" |
 | 4 | 6.2 step 3 | Switching to the profile or collection that is already current answers 100 and sends **no** event | Step 3 skips a switch whose target is already current (the names from step 2); otherwise it waits for `...Changed` |
 | 5 | 6.2 step 3, 11.2 | Usual order is `...Changing`, `...Changed`, then the answer, but the answer came first twice (by 0.2 and 14 ms). The first event on a newly identified event connection arrives about 40 ms after `Identified`, whatever caused it | A step completes on its `...Changed` event, never on the answer (except item 4). Nothing depends on response-versus-event order |
 | 6 | 6.2 step 1, 17 | OBS switches profile and collection under an active recording, stream or replay buffer and keeps them running; a recording started on the user's profile keeps writing into the user's folder. `GetReplayBufferStatus` and `GetVirtualCamStatus` answer 604 when that output is not configured or not installed | Step 1 stays the only guard (as S1 found). 604 from either status request means "not active" |
@@ -76,7 +76,8 @@ root after each step, run `provision-183652`):
 
 - Profile folder: `Anki Miner Game` becomes `Anki_Miner_Game`, as S1 read.
 - A profile is saved each time OBS leaves it (`frontend/widgets/OBSBasic_Profiles.cpp:690`), which
-  is why the user's `basic.ini` grows on the first arm. No value changes meaning.
+  is why the user's `basic.ini` grows when `CreateProfile` switches away from it. No value changes
+  meaning.
 - `ConfigOnNewProfile`: the websocket's `CreateProfile` runs `CreateNewProfile`
   (`frontend/OBSStudioAPI.cpp:209-212`), which calls `SetupNewProfile(name)` with `useWizard`
   defaulting to false (`frontend/widgets/OBSBasic_Profiles.cpp:196-199`,
@@ -171,13 +172,34 @@ profile at OBS's 48000. `CurrentProfileChanging` and `CurrentProfileChanged` arr
 the `SetCurrentProfile` answer never came in the 20 s the client waited, and the display showed a
 window titled "Restart". OBS asks after emitting `PROFILE_CHANGED`
 (`frontend/widgets/OBSBasic_Profiles.cpp:719-733`), comparing the running profile's `ChannelSetup`
-and `SampleRate` with the target file's (`frontend/widgets/OBSBasic_Profiles.cpp:762-785`); OBS
-writes both keys into every profile it saves (section 1), so the comparison always has two values.
-The comparison is symmetric, so disarming from a 48 kHz app profile back to a 44.1 kHz user profile
-asks too (source; not run).
+and `SampleRate` with the target file's, and skips a key that either side lacks
+(`frontend/widgets/OBSBasic_Profiles.cpp:762-785`). The comparison is symmetric, so disarming from a
+48 kHz app profile back to a 44.1 kHz user profile asks too (source; not run).
 `switch_restart_prompt_matched.jsonl`: both profiles at 44100, four switches in both directions,
 each answered in 24-44 ms. obsws-python's `ReqClient` sends one request at a time, so the unanswered
-switch also blocks every later request on that client until its timeout.
+switch also blocks every later request on that client until its timeout. Both runs switched to an
+app profile that already existed; the first provisioning was not run with unequal rates.
+
+From source, `CreateProfile` never asks. It ends in `ActivateProfile`, which opens the new
+profile's `basic.ini` (no file yet, so empty apart from `[General] Name`) and compares it before OBS
+sets its defaults (`frontend/widgets/OBSBasic_Profiles.cpp:70-76, 663-700`: the comparison at 688,
+`InitBasicConfigDefaults` at 700). The target has neither key, so nothing is compared. The defaults
+are then 48000 and `Stereo` (`frontend/widgets/OBSBasic.cpp:871-872`). libobs stores a default as a
+value when the file has none (`libobs/util/config-file.c:544-550`), which is why every profile OBS
+has left carries both keys (section 1). On a fresh install with the user at 44.1 kHz, the first
+question therefore comes when OBS leaves the new profile for the user's: item 2's switch-away during
+provisioning, or else the first disarm. Every later arm and disarm asks while the values differ, as
+`switch_restart_prompt.jsonl` shows for an arm.
+
+Order for provisioning: `GetProfileParameter Audio/SampleRate` and `Audio/ChannelSetup` while the
+user's profile is active, `CreateProfile`, `SetProfileParameter` of both values, and only then
+item 2's switch-away and back. `SetProfileParameter` writes `obs_frontend_get_profile_config()`
+(obs-websocket `src/requesthandler/RequestHandler_Config.cpp:392-420`), which is OBS's
+`activeConfiguration` (`frontend/OBSStudioAPI.cpp:424-427`), the running-profile side of the
+comparison; OBS saves it to the file as it leaves the profile
+(`frontend/widgets/OBSBasic_Profiles.cpp:690`). So neither the switch-away nor the switch back
+asks. This order was not run here: the matched run gave the app profile the user's rate in its file
+before launch.
 
 ## 4. Recording, pause and stop (spec 7, 10.2)
 
