@@ -1,0 +1,18 @@
+librivox_autumn_excerpt.ogg - public domain
+
+Source: LibriVox recording of "Autumn" by Alexander Lawrence Posey (1873-1908), read by Winston
+Tharp, track 3 of "Short Poetry Collection 232" (LibriVox, September 2022).
+  Catalogue: https://librivox.org/short-poetry-collection-232-by-various/
+  File:      https://archive.org/download/spc232_2210_librivox/spc232_autumn_wt_64kb.mp3
+             sha256 19eb6421c3f92ecb99537fabe92426bc7baf75c043a0f7c3217c22867232dfa6
+
+Status: LibriVox dedicates every recording to the public domain ("all our recordings are public
+domain", https://librivox.org/pages/public-domain/). The poem's author died in 1908, so the text is
+in the public domain as well.
+
+Excerpt: seconds 11.70 to 14.95 of that file (one line of the poem), with one second of digital
+silence added before and after, as mono 16 kHz Opus:
+
+  ffmpeg -ss 11.70 -to 14.95 -i spc232_autumn_wt_64kb.mp3 \
+    -af "adelay=1000:all=1,apad=pad_dur=1" -ac 1 -ar 16000 -c:a libopus -b:a 32k \
+    -map_metadata -1 -fflags +bitexact -flags:a +bitexact librivox_autumn_excerpt.ogg
