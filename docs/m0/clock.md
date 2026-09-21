@@ -52,7 +52,8 @@ All numbers are Linux. The Windows zero event and latency stay provisional until
   Per session: `StartRecord` 4 s before the first flash; `PauseRecord` midway between flashes 7
   and 8 (0-based) and `ResumeRecord` midway between flashes 10 and 11, so flashes 8 to 10 fall in
   the pause; `StopRecord` 2.5 s after the last flash. Three sessions per OBS launch; OBS was quit
-  with SIGINT after each campaign.
+  with SIGINT after each campaign, except after the `placebo` probe, which needed SIGTERM (side
+  finding 3).
 - **Analysis.** `tools/sync_probe/analyse.py --raw`: for each candidate zero event, the error of a
   flash is its first white frame in the file (ms from the container start, `format.start_time`,
   which is -21 ms in every probe recording because the audio starts first) minus
@@ -223,11 +224,23 @@ bitrate only.
    (`src/websocketserver/WebSocketServer.cpp:352`), and the exception ends the process. Creating the
    input with any non-empty placeholder value avoids it (every later run). T14 (window list) and the
    game profile dialog must never list windows of an input whose `capture_window` is empty.
-3. **Quitting OBS while a recording is still stopping hangs a headless OBS.** SIGINT while an
-   overloaded x264 was still draining after `StopRecord` opened the "Active Outputs" question
-   (`frontend/widgets/OBSBasic.cpp:1960`), which nobody can answer in the nested display; OBS kept
-   running. SIGTERM then saved and quit. Anything that stops OBS (R2, E1, the app's restart after
-   provisioning) should wait for `outputActive: false` first.
+3. **Quitting OBS while a recording is still stopping hangs a headless OBS.** Seen once, in the
+   `placebo` probe (run `campaign-adv-x264-overload-probe-placebo-175040`). No `STOPPED` came
+   within 30 s of `StopRecord`, the driver sent SIGINT while x264 was still draining, and OBS was
+   still running 60 s later (`.orchestration/m0/data/r1-clock-sync/run_all-3.log`:
+   `RuntimeError: OBS did not exit`). In the run's `obs-stdout.log` the recording stops only after
+   the driver's websocket clients disconnect, which is just before its SIGINT. After that, by hand:
+   `GetRecordStatus` returned `outputActive: false`, a second SIGINT left OBS running for 20 s, the
+   nested display's window list showed an OBS window titled "Active Outputs" (`ConfirmExit.Title`,
+   `frontend/data/locale/en-US.ini:407`), and SIGTERM ended OBS within 2 s with a normal shutdown
+   in `obs-stdout.log`. Those manual steps were not logged at the time; their commands and outputs
+   are copied from the session transcript into `quit-sequence.txt` in the run directory. The
+   source explains the sequence: SIGINT saves and calls `close()` (`frontend/OBSApp.cpp:1871-1893`),
+   which asks for confirmation while an output is active (`frontend/widgets/OBSBasic.cpp:1739-1750`,
+   `1944-1952`; `ConfirmOnExit` defaults to on, `OBSApp.cpp:352`) and ignores later closes while
+   the question is open (`OBSBasic.cpp:1716`); SIGTERM saves and quits without asking
+   (`OBSApp.cpp:1895-1915`). Anything that stops OBS (R2, E1, the app's restart after provisioning)
+   should wait for `outputActive: false` first.
 4. **OBS's default encoder here is NVENC with lookahead.** Simple output picks NVENC when it is
    available (`frontend/widgets/OBSBasic.cpp:884-889`), and NVENC's lookahead default follows the
    GPU's capability (`plugins/obs-nvenc/nvenc-properties.c:56`), on here (8 frames).
