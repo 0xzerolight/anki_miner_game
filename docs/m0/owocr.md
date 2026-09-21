@@ -12,7 +12,7 @@ on both platforms; exact install floor.*
 | Coordinate log line | `Selected coordinates:` captured from real runs (one and two rectangles). `Selected window coordinates:` cannot be produced on Linux; fixtures are synthetic and labelled |
 | Process tree dies | Linux: yes, `os.killpg` on a process group started with `start_new_session=True` removes every process, including the picker's grandchildren. Killing only the parent leaves two orphans. Windows: H5 |
 | Install floor | Python >= 3.11. `uv tool install "owocr[meikiocr]==1.26.8"` **fails on Linux** without cairo (and GObject introspection) dev packages; succeeds with `pygobject` overridden out, which only works for X11 capture. Windows: H5 |
-| OCR through the websocket | Three lines from a synthetic window, recognised 49-65 ms after the text changed |
+| OCR through the websocket | Three lines from a synthetic window. A changed line reached the websocket 54-65 ms after the change (two changes); meikiocr's own recognition took 49-62 ms per frame |
 | `~/.config/owocr_config.ini` | owocr **creates it** on first run (downloaded from GitHub) and reads it on every later run. Redirecting `HOME` contained it; the real file did not exist before or after the spike |
 | Owner desktop | **Touched.** No window opened on it, but the nested kwin shared the owner's config dir and session D-Bus and rewrote eight owner config files (section "Owner-environment incident") |
 
@@ -209,9 +209,16 @@ defaults:
 | text change -> frame, line 2 | 65 ms |
 | text change -> frame, line 3 | 54 ms |
 
+The change -> frame rows compare the window's `SHOW` time (`out-ocr/window-show.log`) with the
+driver's receive time (`out-ocr/ocr-events.jsonl`); both are `time.monotonic()` on one host. Line 1
+was already on screen when owocr started, so it has no change -> frame figure.
+
+A separate quantity is owocr's own recognition time, from its log (`Text recognized in <s>s`,
+`out-ocr/ocr-run.log`): 62, 60 and 49 ms for lines 1-3. It is part of the change -> frame time, not
+a measure of it.
+
 Frames are the recognised text only, one websocket text message per line. The lines were instant
-swaps; how stabilisation delays typewriter-style text is T32's (H4) question. meikiocr recognition
-took 48-66 ms per frame.
+swaps; how stabilisation delays typewriter-style text is T32's (H4) question.
 
 ## Proposed spec amendments (for the M0 gate)
 
