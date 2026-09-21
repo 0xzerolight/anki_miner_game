@@ -222,8 +222,9 @@ def reconnect(args: Any) -> list[Step]:
 
 def obs_exit(args: Any) -> list[Step]:
     start, _ = _record()
-    # ``flatpak kill`` would SIGKILL the sandbox, and OBS would never send ExitStarted.
-    quit_obs = "Quit OBS now (File -> Exit, or: pkill -TERM -x obs); waiting for ExitStarted"
+    # SIGINT closes the main window, whose closeWindow() emits the frontend event behind
+    # ExitStarted; SIGTERM only saves and quits, and ``flatpak kill`` sends neither (README).
+    quit_obs = "Quit OBS now (pkill -INT -x obs); waiting for ExitStarted"
     return [*start, Sleep(args.hold), Operator(quit_obs, event="ExitStarted")]
 
 
