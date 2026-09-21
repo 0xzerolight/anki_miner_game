@@ -15,6 +15,7 @@ marked provisional; they come from source reading (``docs/m0/source-findings.md`
 import asyncio
 import logging
 import sys
+import threading
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Final
@@ -23,7 +24,8 @@ from anki_miner_game import paths
 from anki_miner_game.interfaces.obs import ObsGateway
 from anki_miner_game.models.config import AppConfig
 from anki_miner_game.models.constants import OBS_COLLECTION_NAME, OBS_PROFILE_NAME, OBS_SCENE_NAME
-from anki_miner_game.models.obs import ObsError, ObsRequestError, ProvisionResult, WindowItem
+from anki_miner_game.models.messages import ObsEvent
+from anki_miner_game.models.obs import ObsError, ObsEventName, ObsRequestError, ProvisionResult, WindowItem
 from anki_miner_game.models.profile import AudioMode, CaptureKind, GameProfile
 
 log = logging.getLogger(__name__)
@@ -101,8 +103,9 @@ profiles where they differ stops at OBS's modal "Restart" question, and the swit
 comes (``docs/m0/obs-behaviour.md`` item 3). They are copied before anything leaves the app's
 profile, since ``SetProfileParameter`` writes the running profile, the side OBS compares."""
 
-PROFILE_SWITCH_TIMEOUT_S: Final = 15.0
-"""How long to wait for OBS to switch to a profile ``CreateProfile`` made (spec 6.2's switch timeout)."""
+SWITCH_TIMEOUT_S: Final = 15.0
+"""How long a profile or scene collection switch may take, answer and ``...Changed`` event (spec 6.2's
+switch timeout)."""
 
 INPUT_RELEASE_TIMEOUT_S: Final = 5.0
 """How long to wait for OBS to free the name of an input ``RemoveInput`` removed before creating it again.
@@ -175,6 +178,22 @@ aborts when the windows of an ``xcomposite_input`` with an empty ``capture_windo
 SPECIAL_AUDIO_SLOTS: Final = ("desktop1", "desktop2", "mic1", "mic2", "mic3", "mic4")
 """``GetSpecialInputs`` fields; every one present in the app's collection is muted: the microphones by
 spec 11.3, the desktop ones because the app's own inputs carry the game audio."""
+
+
+@dataclass(eq=False)
+class _Switch:
+    """A switch waiting for its ``...Changed`` event: ``event`` whose ``data[field]`` is ``name``."""
+
+    event: str
+    field: str
+    name: str
+    loop: asyncio.AbstractEventLoop
+    changed: asyncio.Future[None]
+
+
+def _resolve(future: asyncio.Future[None]) -> None:
+    if not future.done():
+        future.set_result(None)
 
 
 @dataclass(frozen=True)
@@ -280,10 +299,13 @@ class ObsProvisioner:
         platform: str | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
-        """``platform`` defaults to ``sys.platform``, read at call time."""
+        """``platform`` defaults to ``sys.platform``, read at call time. Subscribes to ``gateway``'s events."""
         self._gateway = gateway
         self._platform = platform
         self._sleep = sleep
+        self._switches: list[_Switch] = []
+        self._switches_lock = threading.Lock()
+        gateway.subscribe(self._on_event)
 
     async def ensure_profile(self, cfg: AppConfig) -> ProvisionResult:
         """Make the app's profile current (creating it when missing) and apply spec 11.3's profile rows.
@@ -321,9 +343,8 @@ class ObsProvisioner:
                 log.info("OBS applies the app profile's new recording settings at its next activation")
                 needs_restart = True
             else:
-                # Both answers come once the switch is done (source findings 8).
-                await self._request("SetCurrentProfile", profileName=home)
-                await self._request("SetCurrentProfile", profileName=OBS_PROFILE_NAME)
+                await self._switch_profile("SetCurrentProfile", home)
+                await self._switch_profile("SetCurrentProfile", OBS_PROFILE_NAME)
         return ProvisionResult(changed=changed or bool(written), needs_restart=needs_restart)
 
     async def ensure_collection(self, profile: GameProfile) -> ProvisionResult:
@@ -403,12 +424,51 @@ class ObsProvisioner:
         listing = await self._request("GetSceneCollectionList")
         if listing.get("currentSceneCollectionName") == OBS_COLLECTION_NAME:
             return False
-        # Both requests block until the switch is done (source findings 8).
-        if OBS_COLLECTION_NAME in (listing.get("sceneCollections") or []):
-            await self._request("SetCurrentSceneCollection", sceneCollectionName=OBS_COLLECTION_NAME)
-        else:
-            await self._request("CreateSceneCollection", sceneCollectionName=OBS_COLLECTION_NAME)
+        exists = OBS_COLLECTION_NAME in (listing.get("sceneCollections") or [])
+        await self._switch(
+            "SetCurrentSceneCollection" if exists else "CreateSceneCollection",
+            ObsEventName.CURRENT_SCENE_COLLECTION_CHANGED,
+            "sceneCollectionName",
+            OBS_COLLECTION_NAME,
+        )
         return True
+
+    async def _switch_profile(self, request: str, name: str) -> None:
+        await self._switch(request, ObsEventName.CURRENT_PROFILE_CHANGED, "profileName", name)
+
+    async def _switch(self, request: str, event: str, field: str, name: str) -> None:
+        """Send ``request`` for ``name`` and wait for its answer and for OBS's ``event`` naming ``name``.
+
+        A switch is done on its ``...Changed`` event, never on the answer alone: the answer can come
+        first (``docs/m0/obs-behaviour.md`` item 5), and ``CreateProfile`` answers before OBS has even
+        begun to switch. The waiter is in place before the request goes out. Never sent for the
+        profile or collection already current, which OBS answers without an event (item 4). Raises
+        ``ObsError`` after ``SWITCH_TIMEOUT_S``; an answer that does not come usually means OBS is
+        asking whether to restart (item 3).
+        """
+        loop = asyncio.get_running_loop()
+        switch = _Switch(event, field, name, loop, loop.create_future())
+        with self._switches_lock:
+            self._switches.append(switch)
+        try:
+            async with asyncio.timeout(SWITCH_TIMEOUT_S):
+                await self._request(request, **{field: name})
+                await switch.changed
+        except TimeoutError:
+            raise ObsError(
+                f"OBS did not finish switching to {name!r} within {SWITCH_TIMEOUT_S:g} s; "
+                "an OBS dialog may be waiting for an answer"
+            ) from None
+        finally:
+            with self._switches_lock:
+                self._switches.remove(switch)
+
+    def _on_event(self, event: ObsEvent) -> None:
+        """The gateway's event handler (obsws-python's thread or the loop): wakes the switch it completes."""
+        with self._switches_lock:
+            done = [s for s in self._switches if s.event == event.name and event.data.get(s.field) == s.name]
+        for switch in done:
+            switch.loop.call_soon_threadsafe(_resolve, switch.changed)
 
     async def _use_scene(self) -> bool:
         listing = await self._request("GetSceneList")
@@ -516,18 +576,10 @@ class ObsProvisioner:
         """Make the app's profile current; ``listing`` is ``GetProfileList``'s answer from just before."""
         if listing.get("currentProfileName") == OBS_PROFILE_NAME:
             return False
-        if OBS_PROFILE_NAME in (listing.get("profiles") or []):
-            await self._request("SetCurrentProfile", profileName=OBS_PROFILE_NAME)
-            return True
+        exists = OBS_PROFILE_NAME in (listing.get("profiles") or [])
         # CreateProfile answers before the profile exists; OBS then switches to it (source findings 8).
-        await self._request("CreateProfile", profileName=OBS_PROFILE_NAME)
-
-        async def switched() -> bool:
-            return (await self._request("GetProfileList")).get("currentProfileName") == OBS_PROFILE_NAME
-
-        if await self._poll(switched, PROFILE_SWITCH_TIMEOUT_S):
-            return True
-        raise ObsError(f"OBS did not switch to the profile {OBS_PROFILE_NAME!r} within {PROFILE_SWITCH_TIMEOUT_S:g} s")
+        await self._switch_profile("SetCurrentProfile" if exists else "CreateProfile", OBS_PROFILE_NAME)
+        return True
 
     async def _ensure_record_directory(self, cfg: AppConfig) -> bool:
         wanted = str(paths.incoming_dir(cfg))

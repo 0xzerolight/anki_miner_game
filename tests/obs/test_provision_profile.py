@@ -1,5 +1,6 @@
 """Provisioning of the app's OBS profile (spec 11.3 profile table; docs/m0/source-findings.md 1, 2)."""
 
+import asyncio
 import inspect
 from pathlib import Path
 
@@ -12,10 +13,10 @@ from anki_miner_game.interfaces.obs import Provisioner
 from anki_miner_game.models.config import AppConfig, RecordingSettings
 from anki_miner_game.models.constants import OBS_PROFILE_NAME
 from anki_miner_game.models.obs import ObsError, ProvisionResult
+from anki_miner_game.obs import provision
 from anki_miner_game.obs.provision import (
     AUDIO_KEYS,
     CONTAINER_KEYS,
-    PROFILE_SWITCH_TIMEOUT_S,
     REACTIVATE_KEYS,
     ObsProvisioner,
     scaled_output_size,
@@ -42,6 +43,13 @@ def switches(obs: FakeObs) -> list[str]:
 
 def user_audio(obs: FakeObs, sample_rate: str = "44100", channels: str = "Mono") -> None:
     obs.profiles["Untitled"].update({("Audio", "SampleRate"): sample_rate, ("Audio", "ChannelSetup"): channels})
+
+
+def add_app_profile(obs: FakeObs) -> None:
+    """The app's profile exists, never provisioned; the user's profile is current."""
+    obs.profiles[OBS_PROFILE_NAME] = {}
+    obs.record_dirs[OBS_PROFILE_NAME] = "/somewhere"
+    obs.video[OBS_PROFILE_NAME] = obs._default_video(1920, 1080)
 
 
 # Scaling math ---------------------------------------------------------------------------------
@@ -89,7 +97,7 @@ def test_output_size_is_capped_aligned_and_keeps_the_aspect(base_w, base_h, max_
 
 
 async def test_first_run_creates_the_profile_and_applies_every_row(tmp_path):
-    obs = FakeObs(input_kinds=LINUX_X11_KINDS, base_size=(2560, 1440), create_profile_delay=3)
+    obs = FakeObs(input_kinds=LINUX_X11_KINDS, base_size=(2560, 1440))
     provisioner, sleeps = make(obs)
     cfg = make_cfg(tmp_path)
 
@@ -107,10 +115,7 @@ async def test_first_run_creates_the_profile_and_applies_every_row(tmp_path):
     # Split and auto-remux are off by default, so a fresh profile needs no write for them.
     assert param(obs, "AdvOut", "RecSplitFile") is None
     assert param(obs, "Video", "AutoRemux") is None
-    # CreateProfile answers before the switch; provisioning polls until OBS is on the new profile.
-    create = obs.names().index("CreateProfile")
-    assert obs.names()[create + 1 : create + 4] == ["GetProfileList"] * 3
-    assert len(sleeps.waits) == 2
+    assert sleeps.waits == []
 
 
 async def test_second_run_sends_no_mutating_request(tmp_path):
@@ -128,9 +133,7 @@ async def test_second_run_sends_no_mutating_request(tmp_path):
 
 async def test_an_existing_profile_is_made_current_before_its_settings_are_read(tmp_path):
     obs = FakeObs(input_kinds=LINUX_X11_KINDS)
-    obs.profiles[OBS_PROFILE_NAME] = {}
-    obs.record_dirs[OBS_PROFILE_NAME] = "/somewhere"
-    obs.video[OBS_PROFILE_NAME] = obs._default_video(1920, 1080)
+    add_app_profile(obs)
     provisioner, _ = make(obs)
 
     await provisioner.ensure_profile(make_cfg(tmp_path))
@@ -161,10 +164,11 @@ async def test_a_run_from_the_users_profile_sends_only_the_switch(tmp_path):
 
 async def test_the_fake_asks_to_restart_between_profiles_whose_audio_differs():
     """The fake follows OBS's rule, so the tests below can show that provisioning never meets it."""
-    obs = FakeObs(input_kinds=LINUX_X11_KINDS, create_profile_delay=0)
+    obs = FakeObs(input_kinds=LINUX_X11_KINDS)
     user_audio(obs)
     await obs.request("CreateProfile", profileName="Other")
-    await obs.request("GetProfileList")
+    await asyncio.sleep(0)  # OBS switches to it after the answer
+    assert obs.current_profile == "Other"
     assert obs.restart_questions == []  # the new profile's file has neither key
 
     await obs.request("SetCurrentProfile", profileName="Untitled")
@@ -225,15 +229,60 @@ async def test_a_run_from_a_profile_whose_audio_changed_heals_it_after_one_quest
     assert param(obs, "Audio", "SampleRate") == "44100"
 
 
-async def test_a_profile_obs_never_switches_to_raises_after_the_switch_timeout(tmp_path):
-    obs = FakeObs(input_kinds=LINUX_X11_KINDS, create_profile_delay=10**9)
+# Switches complete on their ...Changed event (docs/m0/obs-behaviour.md items 4 and 5) -----------
+
+
+async def test_first_run_uses_the_new_profile_only_once_obs_announces_the_switch(tmp_path):
+    """``CreateProfile`` answers before OBS switches; ``CurrentProfileChanged`` came 36 ms later (R2)."""
+    obs = FakeObs(input_kinds=LINUX_X11_KINDS, create_profile_delay=0.05)
     provisioner, sleeps = make(obs)
+    cfg = make_cfg(tmp_path)
+
+    await provisioner.ensure_profile(cfg)
+
+    create = obs.names().index("CreateProfile")
+    # No request between the answer and the event, and none polls for the switch.
+    assert (create + 1, "CurrentProfileChanged", {"profileName": OBS_PROFILE_NAME}) in obs.events
+    assert sleeps.waits == []
+    assert obs.record_dirs[OBS_PROFILE_NAME] == str(paths.incoming_dir(cfg))
+    assert obs.record_dirs["Untitled"] == "/home/user/Videos"
+
+
+async def test_a_profile_switch_answered_before_its_event_waits_for_the_event(tmp_path):
+    """R2 item 5: the answer came before ``...Changed`` twice; the switch is done on the event."""
+    obs = FakeObs(input_kinds=LINUX_X11_KINDS, events_after_answer=True)
+    add_app_profile(obs)
+    provisioner, _ = make(obs)
+
+    await provisioner.ensure_profile(make_cfg(tmp_path))
+
+    assert switches(obs) == [OBS_PROFILE_NAME, "Untitled", OBS_PROFILE_NAME]
+    for i, (name, fields) in enumerate(obs.calls):
+        if name == "SetCurrentProfile":
+            assert (i + 1, "CurrentProfileChanged", fields) in obs.events, i
+
+
+async def test_a_new_profile_obs_never_switches_to_raises_after_the_switch_timeout(tmp_path, monkeypatch):
+    monkeypatch.setattr(provision, "SWITCH_TIMEOUT_S", 0.05)
+    obs = FakeObs(input_kinds=LINUX_X11_KINDS, create_profile_delay=None)
+    provisioner, _ = make(obs)
 
     with pytest.raises(ObsError, match=OBS_PROFILE_NAME):
         await provisioner.ensure_profile(make_cfg(tmp_path))
 
-    assert sum(sleeps.waits) == pytest.approx(PROFILE_SWITCH_TIMEOUT_S)
-    assert "SetRecordDirectory" not in obs.names()
+    assert obs.mutating() == ["CreateProfile"]
+
+
+async def test_a_profile_switch_whose_event_never_comes_raises_after_the_switch_timeout(tmp_path, monkeypatch):
+    monkeypatch.setattr(provision, "SWITCH_TIMEOUT_S", 0.05)
+    obs = FakeObs(input_kinds=LINUX_X11_KINDS, lost_events=["CurrentProfileChanged"])
+    add_app_profile(obs)
+    provisioner, _ = make(obs)
+
+    with pytest.raises(ObsError, match=OBS_PROFILE_NAME):
+        await provisioner.ensure_profile(make_cfg(tmp_path))
+
+    assert obs.mutating() == ["SetCurrentProfile"]
 
 
 def test_the_keys_obs_reads_only_when_it_builds_its_outputs_trigger_a_reactivation():

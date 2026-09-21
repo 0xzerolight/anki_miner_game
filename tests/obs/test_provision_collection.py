@@ -7,6 +7,7 @@ import pytest
 from anki_miner_game.models.constants import OBS_COLLECTION_NAME, OBS_SCENE_NAME
 from anki_miner_game.models.obs import ObsError, ProvisionResult
 from anki_miner_game.models.profile import AudioMode, AudioSettings, CaptureKind, CaptureSettings, GameProfile
+from anki_miner_game.obs import provision
 from anki_miner_game.obs.provision import (
     APP_AUDIO_INPUT,
     DESKTOP_AUDIO_INPUT,
@@ -20,7 +21,7 @@ from anki_miner_game.obs.provision import (
     ObsProvisioner,
     plan_collection,
 )
-from tests.obs.fake_obs import LINUX_WAYLAND_KINDS, LINUX_X11_KINDS, WINDOWS_KINDS, FakeObs, Sleeps
+from tests.obs.fake_obs import LINUX_WAYLAND_KINDS, LINUX_X11_KINDS, WINDOWS_KINDS, FakeCollection, FakeObs, Sleeps
 
 WIN_WINDOW = "Steins#3AGate:UnityWndClass:SteinsGate.exe"
 X11_WINDOW = "0x3a00007\r\nSteins;Gate\r\nsteinsgate"
@@ -101,6 +102,38 @@ async def test_a_program_scene_the_user_moved_away_from_game_is_moved_back():
     await provisioner.ensure_collection(profile())
 
     assert obs.mutating() == ["SetCurrentProgramScene"]
+
+
+async def test_a_collection_switch_answered_before_its_event_waits_for_the_event():
+    """R2 item 5: the answer came before ``...Changed`` once; the switch is done on the event."""
+    obs = FakeObs(input_kinds=WINDOWS_KINDS, events_after_answer=True)
+    provisioner = ObsProvisioner(obs, platform="win32", sleep=Sleeps())
+    await provisioner.ensure_collection(profile())
+    await obs.request("SetCurrentSceneCollection", sceneCollectionName="Untitled")  # a disarm
+    await provisioner.ensure_collection(profile())
+
+    switched = [i for i, (name, _) in enumerate(obs.calls) if name.endswith("SceneCollection")]
+    assert [obs.calls[i][0] for i in switched] == [
+        "CreateSceneCollection",
+        "SetCurrentSceneCollection",
+        "SetCurrentSceneCollection",
+    ]
+    for i in switched[0], switched[2]:
+        assert (i + 1, "CurrentSceneCollectionChanged", obs.calls[i][1]) in obs.events, i
+
+
+@pytest.mark.parametrize("exists", [False, True])
+async def test_a_collection_switch_whose_event_never_comes_raises_after_the_switch_timeout(monkeypatch, exists):
+    monkeypatch.setattr(provision, "SWITCH_TIMEOUT_S", 0.05)
+    obs = FakeObs(input_kinds=WINDOWS_KINDS, lost_events=["CurrentSceneCollectionChanged"])
+    if exists:
+        obs.collections[OBS_COLLECTION_NAME] = FakeCollection()
+    provisioner = ObsProvisioner(obs, platform="win32", sleep=Sleeps())
+
+    with pytest.raises(ObsError, match=OBS_COLLECTION_NAME):
+        await provisioner.ensure_collection(profile())
+
+    assert obs.mutating() == ["SetCurrentSceneCollection" if exists else "CreateSceneCollection"]
 
 
 # Platform rows --------------------------------------------------------------------------------

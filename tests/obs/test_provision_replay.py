@@ -18,7 +18,9 @@ for every field provisioning reads, OBS's value. ``InputCreated`` and ``InputSet
 the settings serialised the way ``GetInputSettings`` serialises them (``obs-websocket@1ef34bf4
 src/eventhandler/EventHandler_Inputs.cpp:44,53,123,128``,
 ``src/requesthandler/RequestHandler_Inputs.cpp:322-325``), so at each such event the fake's
-``GetInputSettings`` must match it too.
+``GetInputSettings`` must match it too. The switch events the fake sends (``SWITCH_EVENTS``) must be
+OBS's, in OBS's order; at each recorded event the replay yields once, so a switch OBS makes after its
+answer (``CreateProfile``) has landed in the fake before the next request, as it had in OBS.
 
 Follow-up E1-PROVISION-REPLAY (master plan E1 card): no real frame covers ``RemoveInput`` and how
 long OBS then holds the name (``INPUT_RELEASE_TIMEOUT_S``), ``GetInputMute`` and ``SetInputMute``,
@@ -28,6 +30,7 @@ written equal to its default, the audio copy or the profile re-activation. E1 re
 transcript is replayed request by request against the provisioner.
 """
 
+import asyncio
 import json
 from pathlib import Path
 from typing import Any
@@ -43,6 +46,13 @@ READ_PARAMETERS = frozenset(CONTAINER_KEYS + OFF_KEYS)
 """The ``basic.ini`` keys provisioning reads; the fake models no other key's default."""
 
 SETTINGS_EVENTS = ("InputCreated", "InputSettingsChanged")
+
+SWITCH_EVENTS = (
+    "CurrentProfileChanging",
+    "CurrentProfileChanged",
+    "CurrentSceneCollectionChanging",
+    "CurrentSceneCollectionChanged",
+)
 
 
 def load(name: str) -> list[dict[str, Any]]:
@@ -91,6 +101,8 @@ async def replay(obs: FakeObs, frames: list[dict[str, Any]]) -> tuple[list[str],
     for frame in frames:
         msg = frame.get("msg", {})
         data = msg.get("d", {})
+        if msg.get("op") == 5:
+            await asyncio.sleep(0)
         if msg.get("op") == 5 and data["eventType"] in SETTINGS_EVENTS:
             event = data["eventData"]
             got = await obs.request("GetInputSettings", inputName=event["inputName"])
@@ -119,6 +131,10 @@ async def replay(obs: FakeObs, frames: list[dict[str, Any]]) -> tuple[list[str],
             mismatches.append(f"{request_type} {fields}: fake code {code}, OBS {want_code}")
         elif code == 100 and view(request_type, answer) != view(request_type, response.get("responseData")):
             mismatches.append(f"{request_type} {fields}: fake {answer}, OBS {response.get('responseData')}")
+    want_events = [(d["eventType"], d["eventData"]) for d in payloads(frames, 5) if d["eventType"] in SWITCH_EVENTS]
+    got_events = [(name, data) for _, name, data in obs.events if name in SWITCH_EVENTS]
+    if got_events != want_events:
+        mismatches.append(f"switch events: fake {got_events}, OBS {want_events}")
     return checked, mismatches
 
 
@@ -156,6 +172,11 @@ async def test_fake_obs_answers_the_r2_provisioning_run_as_obs_did():
         "InputSettingsChanged",
     }
     assert checked.count("GetProfileParameter") == len(READ_PARAMETERS)
+    assert [name for _, name, _ in obs.events if name in SWITCH_EVENTS] == [
+        "CurrentProfileChanged",
+        "CurrentSceneCollectionChanging",
+        "CurrentSceneCollectionChanged",
+    ]
 
 
 async def test_fake_obs_answers_the_r1_capture_setup_as_obs_did():
