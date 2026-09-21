@@ -27,6 +27,7 @@ from anki_miner_game.models.messages import (
 from anki_miner_game.models.obs import (
     REQUIRED_REQUESTS,
     ObsAuthError,
+    ObsConfigError,
     ObsConnectError,
     ObsCredentials,
     ObsError,
@@ -123,6 +124,7 @@ def test_small_records():
 
 def test_obs_error_hierarchy_and_messages():
     assert issubclass(ObsAuthError, ObsConnectError)
+    assert issubclass(ObsConfigError, ObsConnectError)
     assert issubclass(ObsConnectError, ObsError)
     err = ObsRequestError("StartRecord", 500, "Output is already active")
     assert (err.request, err.code, err.comment) == ("StartRecord", 500, "Output is already active")

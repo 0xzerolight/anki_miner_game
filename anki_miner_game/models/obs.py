@@ -125,6 +125,10 @@ class ObsAuthError(ObsConnectError):
     """Authentication failed after re-reading OBS's config once (spec 17)."""
 
 
+class ObsConfigError(ObsConnectError):
+    """OBS's websocket ``config.json`` is missing or unreadable, so the port to connect to is unknown."""
+
+
 class ObsRequestError(ObsError):
     """OBS answered a request with a failure status."""
 

@@ -189,6 +189,14 @@ def test_protocols_declare_exactly_their_members(key, members):
             assert tuple(inspect.signature(attr).parameters)[1:] == params, member
 
 
+def test_obs_config_failures_are_typed():
+    """``credentials`` and ``read_ws_config`` name the error an unusable OBS websocket config raises."""
+    from anki_miner_game.interfaces.obs import ObsDiscovery
+
+    for method in (ObsDiscovery.credentials, ObsDiscovery.read_ws_config):
+        assert "ObsConfigError" in (method.__doc__ or ""), method.__name__
+
+
 def test_wait_ready_defaults_to_30_seconds():
     from anki_miner_game.interfaces.obs import ObsDiscovery
 
