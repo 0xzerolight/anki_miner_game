@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from anki_miner_game.models.addons import AddonStatus
 from anki_miner_game.models.lines import GameLine
 from anki_miner_game.models.messages import (
@@ -118,8 +120,15 @@ def test_passwords_never_appear_in_repr():
 def test_small_records():
     install = ObsInstall(argv=("flatpak", "run", "com.obsproject.Studio"), cwd=None, flatpak=True)
     assert install.flatpak is True
-    assert WindowItem(name="Game", value="Game:UnityWndClass:game.exe").value.endswith(".exe")
+    assert WindowItem(name="Game", value="Game:UnityWndClass:game.exe", enabled=True).value.endswith(".exe")
     assert ProvisionResult(changed=True, needs_restart=False).changed is True
+
+
+def test_window_item_enabled_is_required_after_value():
+    stale = WindowItem("[game.exe]: Game", "Game:UnityWndClass:game.exe", False)
+    assert stale.enabled is False
+    with pytest.raises(TypeError):
+        WindowItem(name="Game", value="Game:UnityWndClass:game.exe")  # type: ignore[call-arg]
 
 
 def test_obs_error_hierarchy_and_messages():

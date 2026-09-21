@@ -33,7 +33,12 @@ class Presenter(Protocol):
 
     def session_finished(self, manifest_path: Path) -> None: ...
 
-    def vad_progress(self, manifest_path: Path, done_ms: int, total_ms: int) -> None: ...
+    def vad_progress(self, manifest_path: Path, done_ms: int, total_ms: int | None) -> None:
+        """``total_ms`` is ``None`` for indeterminate progress.
+
+        The file states no duration, e.g. a crash-truncated ``.mkv`` (spec 6.4).
+        """
+        ...
 
     def vad_finished(self, manifest_path: Path, state: VadState) -> None:
         """A VAD job ended (done, failed, unavailable or restored); the manifest already holds the outcome.
