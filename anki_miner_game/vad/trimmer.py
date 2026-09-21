@@ -53,6 +53,7 @@ from anki_miner_game.models.addons import AddonStatus
 from anki_miner_game.models.config import AppConfig
 from anki_miner_game.models.cue import Cue, Region
 from anki_miner_game.models.manifest import ManifestState, SessionManifest, VadRecord, VadState
+from anki_miner_game.runtime.child_env import child_environ
 from anki_miner_game.session.manifest import load_manifest, write_manifest_atomic
 from anki_miner_game.session.srt_writer import write_srt_atomic
 from anki_miner_game.store import StoreError, StoreWriteError
@@ -334,7 +335,12 @@ class VadTrimmer:
         with tempfile.TemporaryFile() as stderr:
             try:
                 process = subprocess.Popen(
-                    cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=stderr, creationflags=_NO_WINDOW
+                    cmd,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=stderr,
+                    creationflags=_NO_WINDOW,
+                    env=child_environ(),
                 )
             except OSError as exc:
                 raise _PassFailedError(f"The VAD worker could not start: {exc}") from exc
