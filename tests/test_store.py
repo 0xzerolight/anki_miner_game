@@ -1,0 +1,177 @@
+import dataclasses
+import json
+
+import pytest
+
+from anki_miner_game import paths, store
+from anki_miner_game.models.codec import dump_document
+from anki_miner_game.models.config import AppConfig, CueSettings, ObsSettings
+from anki_miner_game.models.profile import AudioMode, AudioSettings, GameProfile, TextMode
+
+
+def _profile(slug: str = "steins-gate") -> GameProfile:
+    return GameProfile(slug=slug, title="Steins;Gate", audio=AudioSettings(mode=AudioMode.DESKTOP))
+
+
+def _write_config(text: str) -> None:
+    paths.home().mkdir(parents=True, exist_ok=True)
+    paths.config_path().write_text(text, encoding="utf-8")
+
+
+def test_load_config_without_a_file_returns_defaults():
+    assert store.load_config() == AppConfig()
+
+
+def test_save_config_round_trips_with_schema():
+    cfg = AppConfig(last_game="steins-gate", cue=CueSettings(max_cue_seconds=20))
+    path = store.save_config(cfg)
+    assert path == paths.home() / "config.json"
+    assert json.loads(path.read_text(encoding="utf-8"))["schema"] == 1
+    assert store.load_config() == cfg
+
+
+def test_store_follows_the_home_env_var_at_call_time(tmp_path, monkeypatch):
+    monkeypatch.setenv("ANKI_MINER_GAME_HOME", str(tmp_path / "elsewhere"))
+    path = store.save_config(AppConfig(last_game="x"))
+    assert path == tmp_path / "elsewhere" / "config.json"
+    assert store.load_config().last_game == "x"
+
+
+def test_save_leaves_no_temporary_file():
+    store.save_config(AppConfig())
+    store.save_config(AppConfig(last_game="again"))
+    assert [p.name for p in paths.home().iterdir()] == ["config.json"]
+
+
+def test_failed_replace_keeps_the_old_file_and_removes_the_temporary(monkeypatch):
+    store.save_config(AppConfig(last_game="old"))
+    before = paths.config_path().read_bytes()
+
+    def fail_replace(src, dst):
+        raise OSError("disk gone")
+
+    monkeypatch.setattr(store.os, "replace", fail_replace)
+    with pytest.raises(OSError, match="disk gone"):
+        store.save_config(AppConfig(last_game="new"))
+    assert paths.config_path().read_bytes() == before
+    assert [p.name for p in paths.home().iterdir()] == ["config.json"]
+
+
+def test_saved_text_is_utf8_with_lf_line_ends():
+    store.save_config(AppConfig(output_root="~/ビデオ"))
+    raw = paths.config_path().read_bytes()
+    assert b"\r\n" not in raw
+    assert "ビデオ".encode() in raw
+
+
+def test_password_override_is_stored_only_when_set():
+    store.save_config(AppConfig())
+    assert json.loads(paths.config_path().read_text(encoding="utf-8"))["obs"]["password_override"] is None
+    store.save_config(AppConfig(obs=ObsSettings(password_override="typed")))
+    assert store.load_config().obs.password_override == "typed"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "{not json",
+        "[]",
+        '{"last_game": null}',
+        '{"schema": "1"}',
+        '{"schema": 1, "last_game": 5}',
+        '{"schema": 1, "cue": {"max_cue_seconds": 99}}',
+    ],
+)
+def test_corrupt_config_raises_corrupt_file_error(text):
+    _write_config(text)
+    with pytest.raises(store.CorruptFileError) as info:
+        store.load_config()
+    assert info.value.path == paths.config_path()
+
+
+def test_non_utf8_config_is_corrupt():
+    paths.home().mkdir(parents=True, exist_ok=True)
+    paths.config_path().write_bytes(b'{"schema": 1, "last_game": "\xff"}')
+    with pytest.raises(store.CorruptFileError, match="not UTF-8"):
+        store.load_config()
+
+
+def test_future_schema_config_raises_future_schema_error():
+    _write_config('{"schema": 2, "brand_new": true}')
+    with pytest.raises(store.FutureSchemaError) as info:
+        store.load_config()
+    assert info.value.found == 2
+    assert info.value.path == paths.config_path()
+    assert isinstance(info.value, store.StoreError)
+
+
+def test_save_profile_writes_slug_json_with_schema():
+    path = store.save_profile(_profile())
+    assert path == paths.home() / "games" / "steins-gate.json"
+    assert json.loads(path.read_text(encoding="utf-8"))["schema"] == 1
+
+
+def test_profiles_round_trip_and_bad_files_are_reported():
+    first = _profile("a")
+    second = dataclasses.replace(_profile("b"), text_mode=TextMode.OCR)
+    store.save_profile(first)
+    store.save_profile(second)
+    (paths.games_dir() / "broken.json").write_text("{", encoding="utf-8")
+    (paths.games_dir() / "future.json").write_text('{"schema": 2}', encoding="utf-8")
+    loaded = store.load_profiles()
+    assert loaded.profiles == {"a": first, "b": second}
+    assert sorted((type(e).__name__, e.path.name) for e in loaded.errors) == [
+        ("CorruptFileError", "broken.json"),
+        ("FutureSchemaError", "future.json"),
+    ]
+
+
+def test_load_profiles_without_a_games_folder_is_empty():
+    loaded = store.load_profiles()
+    assert dict(loaded.profiles) == {}
+    assert loaded.errors == ()
+
+
+def test_save_profile_refuses_an_invalid_profile():
+    bad = dataclasses.replace(_profile(), text_mode=TextMode.OCR, clipboard=True)
+    with pytest.raises(store.InvalidProfileError) as info:
+        store.save_profile(bad)
+    assert info.value.problems == ("OCR mode cannot use the clipboard",)
+    assert not paths.games_dir().exists()
+
+
+def test_unreadable_config_is_a_store_error():
+    paths.config_path().mkdir(parents=True)
+    with pytest.raises(store.StoreError) as info:
+        store.load_config()
+    assert info.value.path == paths.config_path()
+
+
+def test_load_profiles_reports_an_unreadable_file():
+    store.save_profile(_profile("a"))
+    (paths.games_dir() / "folder.json").mkdir()
+    loaded = store.load_profiles()
+    assert list(loaded.profiles) == ["a"]
+    assert [(type(e).__name__, e.path.name) for e in loaded.errors] == [("StoreError", "folder.json")]
+
+
+def test_load_profiles_rejects_a_slug_that_differs_from_the_file_name():
+    first = _profile("a")
+    store.save_profile(first)
+    (paths.games_dir() / "zz.json").write_text(dump_document(_profile("a")), encoding="utf-8")
+    evil = dataclasses.replace(_profile("x"), slug="../evil")
+    (paths.games_dir() / "evil.json").write_text(dump_document(evil), encoding="utf-8")
+    loaded = store.load_profiles()
+    assert loaded.profiles == {"a": first}
+    assert sorted((type(e).__name__, e.path.name) for e in loaded.errors) == [
+        ("CorruptFileError", "evil.json"),
+        ("CorruptFileError", "zz.json"),
+    ]
+    assert all("does not match the file name" in str(e) for e in loaded.errors)
+
+
+def test_write_text_atomic_creates_the_folder_and_keeps_lf(tmp_path):
+    target = tmp_path / "new" / "x.srt"
+    store.write_text_atomic(target, "1\n00:00:00,000 --> 00:00:01,000\nはい\n")
+    assert target.read_bytes() == "1\n00:00:00,000 --> 00:00:01,000\nはい\n".encode()
+    assert [p.name for p in target.parent.iterdir()] == ["x.srt"]

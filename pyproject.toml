@@ -128,6 +128,21 @@ ignore_errors = true
 module = ["obsws_python.*"]
 ignore_missing_imports = true
 
+# T01 acceptance: the contracts type-check strictly. Per-module `strict = true`
+# leaks to every module in mypy 2.3, so the strict flags are listed one by one
+# (warn_redundant_casts / warn_unused_ignores / strict_equality are already global).
+[[tool.mypy.overrides]]
+module = ["anki_miner_game.models.*", "anki_miner_game.interfaces.*"]
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+disallow_untyped_calls = true
+disallow_untyped_decorators = true
+disallow_any_generics = true
+disallow_subclassing_any = true
+warn_return_any = true
+no_implicit_reexport = true
+extra_checks = true
+
 [tool.ruff]
 line-length = 120
 target-version = "py312"
