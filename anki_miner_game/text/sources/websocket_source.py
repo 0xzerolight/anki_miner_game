@@ -111,7 +111,10 @@ class WebsocketSource:
             return
         self._status = status
         if self._listener is not None:
-            self._listener(self._id, status)
+            try:
+                self._listener(self._id, status)
+            except Exception:
+                logger.exception("%s: the status listener failed", self._id)
 
     async def _run(self, sink: LineSink) -> None:
         attempt = 0

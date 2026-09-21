@@ -354,6 +354,39 @@ async def test_a_failing_sink_keeps_the_connection(make_source):
         assert hooker.requested_paths == ["/"]
 
 
+async def test_a_failing_status_listener_keeps_the_source_running(make_source, caplog):
+    sink = Sink()
+    sleep = FakeSleep()
+    seen: list[SourceStatus] = []
+
+    def listener(source_id: str, status: SourceStatus) -> None:
+        seen.append(status)
+        raise RuntimeError("listener bug")
+
+    async with FakeHookerServer() as hooker:
+        source = make_source(hooker.uri, sleep=sleep)
+        source.set_status_listener(listener)
+        source.start(sink)
+        await hooker.wait_for_clients(1)
+        await hooker.broadcast("一")
+        await hooker.broadcast("二")
+        assert [(await sink.next())[0] for _ in range(2)] == ["一", "二"]
+        assert source.status is SourceStatus.RECEIVING
+        await hooker.drop_clients()
+        await sleep.wait_calls(1)
+        sleep.release()
+        await hooker.wait_for_clients(1)
+        await hooker.broadcast("三")
+        assert (await sink.next())[0] == "三"
+        source.stop()
+        await source.wait_closed()
+        await _wait_no_clients(hooker)
+        assert hooker.requested_paths == ["/", "/"]
+    connection = [SourceStatus.CONNECTING, SourceStatus.CONNECTED, SourceStatus.RECEIVING, SourceStatus.DISCONNECTED]
+    assert seen == connection * 2
+    assert caplog.text.count("status listener failed") == len(seen)
+
+
 async def test_the_source_and_a_texthooker_page_both_receive_every_frame(make_source):
     """Hookers broadcast, so this app listens beside a texthooker page without stealing lines (spec 3.2)."""
     sink = Sink()
