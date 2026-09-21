@@ -235,9 +235,15 @@ class Probe:
         )
 
     def on_flash(self, index: int, t_mono: float) -> None:
+        # Runs in a Qt slot, where an escaping exception aborts the process: log it instead,
+        # so the flashes (and their timestamps) go on.
         text = line_text(index)
-        clients = self._server.broadcast(text)
-        self._write({"kind": "flash", "index": index, "t_mono": t_mono, "text": text, "clients": clients})
+        record: dict[str, Any] = {"kind": "flash", "index": index, "t_mono": t_mono, "text": text}
+        try:
+            record["clients"] = self._server.broadcast(text)
+        except Exception as exc:
+            record |= {"clients": None, "error": f"{type(exc).__name__}: {exc}"}
+        self._write(record)
 
     def log_end(self) -> None:
         self._write({"kind": "end", "t_mono": self._now()})

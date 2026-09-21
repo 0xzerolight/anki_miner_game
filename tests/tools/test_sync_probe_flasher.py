@@ -137,3 +137,18 @@ def test_cli_rejects_a_malformed_size():
     with pytest.raises(SystemExit) as exc:
         fl.main(["--log", "x.jsonl", "--size", "640by360"])
     assert exc.value.code == 2
+
+
+def test_a_failed_send_is_logged_and_the_probe_goes_on(tmp_path):
+    class DeadServer:
+        port = 0
+
+        def broadcast(self, text):
+            raise TimeoutError("loop gone")
+
+    log_path = tmp_path / "flasher.jsonl"
+    with open(log_path, "w", encoding="utf-8") as log:
+        fl.Probe(DeadServer(), log).on_flash(0, 12.5)
+    record = json.loads(log_path.read_text(encoding="utf-8"))
+    assert (record["index"], record["t_mono"], record["clients"]) == (0, 12.5, None)
+    assert "loop gone" in record["error"]
