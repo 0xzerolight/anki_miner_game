@@ -70,6 +70,8 @@ def add_app_profile(obs: FakeObs) -> None:
         ((1366, 768), 1080, (1364, 768)),
         ((1280, 721), 1080, (1280, 720)),
         ((1921, 1081), 1080, (1916, 1080)),
+        # R2 item 16's example: 1706.7 wide, which OBS runs as 1704.
+        ((2560, 1080), 720, (1704, 720)),
         # Never below SetVideoSettings' minimum of 8.
         ((32, 4096), 720, (8, 720)),
     ],
@@ -460,6 +462,22 @@ async def test_only_the_video_pair_that_differs_is_sent(tmp_path):
     assert [c for c in obs.calls if c[0] == "SetVideoSettings"] == [
         ("SetVideoSettings", {"fpsNumerator": 60, "fpsDenominator": 1})
     ]
+
+
+async def test_the_output_size_is_sent_aligned_so_the_next_run_sends_nothing(tmp_path):
+    """R2 item 16: OBS runs an unaligned size aligned; comparing the unaligned one re-sent it at every arm."""
+    obs = FakeObs(input_kinds=LINUX_X11_KINDS, base_size=(2560, 1080))
+    provisioner, _ = make(obs)
+    cfg = make_cfg(tmp_path, max_height=720)
+
+    await provisioner.ensure_profile(cfg)
+    await obs.request("SetCurrentProfile", profileName="Untitled")
+    obs.reset_calls()
+    await provisioner.ensure_profile(cfg)
+
+    assert "SetVideoSettings" not in obs.names()
+    video = obs.video[OBS_PROFILE_NAME]
+    assert (video["outputWidth"], video["outputHeight"]) == (1704, 720)
 
 
 async def test_a_changed_output_root_moves_the_record_directory(tmp_path):

@@ -8,8 +8,9 @@ the priority table. Changed: the parts are decoded the way OBS escapes them (``#
 GSM's ``rsplit`` and ``strip``, since OBS never writes a raw colon inside a part; the result is a
 frozen dataclass instead of a dict.
 
-Values from M0 that R2 (the OBS behaviour spike) may still change are named constants below,
-marked provisional; they come from source reading (``docs/m0/source-findings.md``) and R1.
+Values from M0 are named constants below: source reading (``docs/m0/source-findings.md``), R1
+(``docs/m0/clock.md``) and R2 (``docs/m0/obs-behaviour.md``), which confirmed them on a real OBS.
+``INPUT_RELEASE_TIMEOUT_S`` stays provisional until E1 measures it.
 """
 
 import asyncio
@@ -79,12 +80,12 @@ CONTAINER: Final = "mkv"
 """An ``.mkv`` survives an OBS crash (spec 6.4)."""
 
 CONTAINER_KEYS: Final = (("SimpleOutput", "RecFormat2"), ("AdvOut", "RecFormat2"))
-"""Provisional until R2 reads a real ``basic.ini``: source-confirmed (source findings 1)."""
+"""Read from source (source findings 1) and confirmed in a real ``basic.ini`` (``docs/m0/obs-behaviour.md`` item 1)."""
 
 OFF_KEYS: Final = (("AdvOut", "RecSplitFile"), ("Video", "AutoRemux"))
 """Bool keys provisioning turns off: file splitting (Advanced mode only; Simple mode never splits)
 and auto-remux, which would race finalise's rename with a second video (source findings 1 and 7,
-summary item 15). Provisional until R2 reads a real ``basic.ini``."""
+summary item 15), both confirmed in a real ``basic.ini`` (``docs/m0/obs-behaviour.md`` item 1)."""
 
 REACTIVATE_KEYS: Final = frozenset(
     {*CONTAINER_KEYS, ("Output", "Mode"), ("SimpleOutput", "RecQuality"), ("AdvOut", "RecEncoder")}
@@ -136,9 +137,11 @@ RESOURCE_NOT_FOUND: Final = 600
 def scaled_output_size(base_width: int, base_height: int, max_height: int) -> tuple[int, int]:
     """Output size for a base (canvas) size: height capped at ``max_height``, aspect kept.
 
-    Aligned the way libobs aligns the output at video reset (width to 4, height to 2,
-    ``obs-studio@ba2f32bd libobs/obs.c:1541-1543``), so ``GetVideoSettings`` reports back exactly
-    this size; never below ``SetVideoSettings``' minimum of 8.
+    Rounded down the way libobs aligns the output at video reset (width to a multiple of 4, height
+    to a multiple of 2, ``obs-studio@ba2f32bd libobs/obs.c:1541-1543``), before it is compared or
+    sent, so ``GetVideoSettings`` reports back exactly this size and the next arm sends nothing: R2
+    set 854x480 and OBS ran 852x480 (``docs/m0/obs-behaviour.md`` item 16). Never below
+    ``SetVideoSettings``' minimum of 8.
     """
     height = min(base_height, max_height)
     width = base_width if height == base_height else (base_width * height + base_height // 2) // base_height
@@ -184,7 +187,8 @@ LINUX_INPUTS: Final = (XCOMPOSITE_INPUT, PIPEWIRE_INPUT, DESKTOP_AUDIO_INPUT)
 XCOMPOSITE_PLACEHOLDER: Final = "0\r\nno window pinned\r\nanki-miner-game"
 """``capture_window`` of the X11 input while no window is pinned: it captures nothing, and OBS 32.2.2
 aborts when the windows of an ``xcomposite_input`` with an empty ``capture_window`` are listed
-(R1 side finding 2, ``docs/m0/clock.md``). Provisional until R2."""
+(R1 side finding 2, ``docs/m0/clock.md``). R2 created it so: OBS lists the placeholder as a disabled item 0
+and the live windows after it (``docs/m0/obs-behaviour.md`` section 1)."""
 
 SPECIAL_AUDIO_SLOTS: Final = ("desktop1", "desktop2", "mic1", "mic2", "mic3", "mic4")
 """``GetSpecialInputs`` fields; every one present in the app's collection is muted: the microphones by
@@ -368,8 +372,13 @@ class ObsProvisioner:
         """Make the app's scene collection current (creating it when missing), make ``Game`` its
         program scene, and set the scene's inputs and mutes for ``profile`` (spec 11.3).
 
-        Only the app's own inputs (``WINDOWS_INPUTS`` / ``LINUX_INPUTS``) are created, changed or
-        removed; any other input in the collection is left as it is.
+        ``Game`` is made the program scene because a new collection keeps OBS's own ``Scene`` as
+        program scene (``docs/m0/obs-behaviour.md`` item 13). Only the app's own inputs
+        (``WINDOWS_INPUTS`` / ``LINUX_INPUTS``) are created, changed or removed; any other input in
+        the collection is left as it is.
+
+        It switches OBS to the app's collection and never back: the caller restores the user's
+        collection, the session actor at disarm (T15) and the wizard right after provisioning (T21).
         """
         changed = await self._use_collection()
         changed |= await self._use_scene()
