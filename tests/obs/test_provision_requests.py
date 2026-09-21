@@ -10,12 +10,6 @@ from anki_miner_game.models.profile import AudioMode, AudioSettings, CaptureSett
 from anki_miner_game.obs.provision import ObsProvisioner
 from tests.obs.fake_obs import LINUX_X11_KINDS, WINDOWS_KINDS, FakeObs
 
-PENDING_CONTRACT_REQUESTS = frozenset(
-    {"GetSceneList", "SetCurrentProgramScene", "GetInputSettings", "GetInputMute", "RemoveInput"}
-)
-"""Requests provisioning needs beyond spec 3.3's 26, all obs-websocket 5.0.0 (the OBS 30.0 floor holds).
-Filed as T14's contract change request for ``REQUIRED_REQUESTS``; empty this set once it lands."""
-
 
 @pytest.mark.parametrize(
     ("platform", "kinds", "window", "other"),
@@ -36,6 +30,4 @@ async def test_provisioning_sends_only_checked_requests(tmp_path: Path, platform
     await provisioner.ensure_collection(second)
     await provisioner.list_windows()
 
-    sent = set(obs.names())
-    assert sent - set(REQUIRED_REQUESTS) - PENDING_CONTRACT_REQUESTS == set()
-    assert PENDING_CONTRACT_REQUESTS - set(REQUIRED_REQUESTS) <= sent
+    assert set(obs.names()) - set(REQUIRED_REQUESTS) == set()
