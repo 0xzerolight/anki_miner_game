@@ -9,6 +9,7 @@ window lists are the ones a real OBS answered in R2's ``window_retitle.jsonl``.
 
 import asyncio
 from dataclasses import replace
+from typing import Any
 
 import pytest
 
@@ -57,6 +58,39 @@ def x11_obs(window_list: list[dict[str, object]] = RETITLED, **kwargs: object) -
 
 def items(raw: list[dict[str, object]]) -> list[WindowItem]:
     return [WindowItem(str(i["itemName"]), str(i["itemValue"]), i["itemEnabled"] is True) for i in raw]
+
+
+class WireObs(ListingObs):
+    """``ListingObs`` whose ``held`` request stays on the wire until ``release`` is set.
+
+    Cancelling it there drops the link, as T12's gateway does (OBS's late answer would be read as the
+    next request's): every later request raises ``ObsConnectError``.
+    """
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.held: str | None = None
+        self.on_the_wire = asyncio.Event()
+        self.release = asyncio.Event()
+        self.dropped = False
+
+    async def request(self, name: str, **fields: Any) -> dict[str, Any]:
+        if self.dropped:
+            raise ObsConnectError("not connected to OBS")
+        if name == self.held and not self.release.is_set():
+            self.on_the_wire.set()
+            try:
+                await self.release.wait()
+            except asyncio.CancelledError:
+                self.dropped = True
+                raise
+        return await super().request(name, **fields)
+
+
+async def _until(done: Any) -> None:
+    async with asyncio.timeout(2):
+        while not done():
+            await asyncio.sleep(0.01)
 
 
 async def test_idle_listing_provisions_the_app_collection_lists_it_and_switches_back() -> None:
@@ -242,28 +276,49 @@ async def test_a_failed_listing_whose_switch_back_fails_says_both() -> None:
     assert "boom" in str(caught.value) and "Untitled" in str(caught.value)
 
 
-async def test_a_cancelled_listing_still_switches_back() -> None:
-    obs = x11_obs()
+async def test_a_cancelled_listing_runs_to_its_end_and_switches_back() -> None:
+    """Closing the dialog cancels its call; the request on the wire is not, so the link stays up."""
+    obs = WireObs(input_kinds=LINUX_X11_KINDS, window_lists={"xcomposite_input": RETITLED})
+    obs.held = "GetInputPropertiesListPropertyItems"
     picker, _ = make(obs)
-    entered = asyncio.Event()
-    provisioner = picker._provisioner
-    real_list = provisioner.list_windows
-
-    async def stuck() -> list[WindowItem]:
-        entered.set()
-        await asyncio.sleep(60)
-        return await real_list()
-
-    provisioner.list_windows = stuck  # type: ignore[method-assign]
     task = asyncio.create_task(picker.list_windows(X11_PROFILE))
-    await entered.wait()
+    await obs.on_the_wire.wait()
     assert obs.current_collection == OBS_COLLECTION_NAME
 
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
+    assert not obs.dropped
+    obs.release.set()
 
-    assert obs.current_collection == "Untitled"
+    await _until(lambda: obs.current_collection == "Untitled")
+    assert obs.listed_in == [OBS_COLLECTION_NAME]
+    assert not obs.dropped
+
+
+@pytest.mark.parametrize(
+    ("call", "held"),
+    [("capture_method", "GetInputKindList"), ("list_windows", "GetInputPropertiesListPropertyItems")],
+)
+async def test_a_cancelled_call_while_recording_keeps_the_actors_link(call: str, held: str) -> None:
+    obs = WireObs(input_kinds=LINUX_X11_KINDS, window_lists={"xcomposite_input": BEFORE})
+    armed, _ = make(obs)
+    await armed._provisioner.ensure_collection(X11_PROFILE)  # what arming did
+    obs.reset_calls()
+    obs.held = held
+    picker, _ = make(obs, AppState.RECORDING)
+    task = asyncio.create_task(getattr(picker, call)(X11_PROFILE))
+    await obs.on_the_wire.wait()
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert not obs.dropped
+    obs.release.set()
+
+    await _until(lambda: held in obs.names())
+    assert not obs.dropped
+    assert obs.current_collection == OBS_COLLECTION_NAME
 
 
 async def test_no_switch_back_once_the_app_armed_meanwhile() -> None:

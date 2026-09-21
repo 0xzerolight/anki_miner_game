@@ -444,24 +444,28 @@ def test_an_empty_window_list_says_why(io_loop, qtbot) -> None:
     assert "PipeWire" in dialog.windows_message.text()
 
 
-def test_closing_the_dialog_cancels_a_listing_and_obs_switches_back(rig: Rig) -> None:
+def test_closing_the_dialog_lets_a_listing_finish_and_obs_switches_back(rig: Rig) -> None:
+    """Cancelling a request already sent drops the link (T12), so the dialog's OBS calls run to their end."""
     entered = threading.Event()
+    release = threading.Event()
     real_list = rig.provisioner.list_windows
 
-    async def stuck() -> list[WindowItem]:
+    async def slow() -> list[WindowItem]:
         entered.set()
-        await asyncio.sleep(60)
+        await asyncio.get_running_loop().run_in_executor(None, release.wait, 5)
         return await real_list()
 
-    rig.provisioner.list_windows = stuck  # type: ignore[method-assign]
+    rig.provisioner.list_windows = slow  # type: ignore[method-assign]
     dialog = rig.open(FULL_HOOK)
     dialog.list_windows_button.click()
     assert entered.wait(5)
     assert rig.obs.current_collection == OBS_COLLECTION_NAME
 
     dialog.reject()
+    release.set()
 
     rig.qtbot.waitUntil(lambda: rig.obs.current_collection == "Untitled", timeout=5000)
+    assert rig.obs.listed_in == [OBS_COLLECTION_NAME]
 
 
 def test_select_ocr_area_stores_the_rectangles_verbatim(win_rig: Rig) -> None:

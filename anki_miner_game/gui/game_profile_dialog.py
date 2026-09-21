@@ -20,8 +20,10 @@ window is that disabled item plus an enabled one under its new name (R2 item 15)
 ``CapturePicker`` runs on the I/O loop, the session actor's thread (``SessionControl``). The dialog
 lives on the Qt main thread and hands its coroutines to the loop through ``AsyncRunner`` (in the app
 ``asyncio.run_coroutine_threadsafe`` on the I/O loop); results come back through a queued signal,
-and every call still running when the dialog closes is cancelled. The dialog saves nothing: it
-emits ``profile_saved`` with a profile ``validate`` accepts, and the caller stores it.
+and every call still running when the dialog closes is cancelled. ``CapturePicker``'s OBS calls
+still run to their end on the loop, where their results are dropped: cancelling a request already
+sent drops the OBS connection (T12). The dialog saves nothing: it emits ``profile_saved`` with a
+profile ``validate`` accepts, and the caller stores it.
 """
 
 import asyncio
@@ -127,14 +129,39 @@ class CapturePicker:
         self._session = session
         self._switch_timeout_s = switch_timeout_s
         self._waiting: tuple[asyncio.AbstractEventLoop, asyncio.Future[None], str] | None = None
+        self._running: set[asyncio.Task[Any]] = set()
+        """The calls still running; the reference keeps one whose caller was cancelled alive."""
         gateway.subscribe(self._on_event)
 
     async def capture_method(self, profile: GameProfile) -> str:
-        """The OBS input kind that would capture this profile's game; ``""`` when none is available."""
-        return await self._provisioner.capture_method(profile)
+        """The OBS input kind that would capture this profile's game; ``""`` when none is available.
+
+        Runs to its end even when the caller is cancelled (``_to_the_end``).
+        """
+        return await self._to_the_end(self._provisioner.capture_method(profile))
 
     async def list_windows(self, profile: GameProfile) -> WindowListing:
-        """The windows to pin for ``profile``. Raises ``WindowListError`` or ``ObsError``."""
+        """The windows to pin for ``profile``. Raises ``WindowListError`` or ``ObsError``.
+
+        Runs to its end, switch back included, even when the caller is cancelled (``_to_the_end``).
+        """
+        return await self._to_the_end(self._list_windows(profile))
+
+    async def _to_the_end[T](self, call: Coroutine[Any, Any, T]) -> T:
+        """Await ``call`` in a task that a cancelled caller leaves running.
+
+        The dialog cancels its calls when it closes, and T12 drops the connection when a request
+        already sent is cancelled, since OBS's answer would be read as the next request's. A
+        cancelled listing would then leave OBS on the app's collection with no link to switch it
+        back, and a cancelled call while armed or recording would drop the actor's link. The caller
+        gets ``CancelledError`` at once; the call finishes on the loop and its result is dropped.
+        """
+        task = asyncio.ensure_future(call)
+        self._running.add(task)
+        task.add_done_callback(self._running.discard)
+        return await asyncio.shield(task)
+
+    async def _list_windows(self, profile: GameProfile) -> WindowListing:
         if self._session.state is not AppState.IDLE:
             return WindowListing(_enabled(await self._provisioner.list_windows()))
         await self._refuse_active_outputs()
@@ -147,9 +174,6 @@ class CapturePicker:
             if warning is None:
                 raise
             raise WindowListError(f"{exc}. {warning}") from exc
-        except BaseException:  # cancelled: the dialog closed
-            await self._switch_back(home)
-            raise
         return WindowListing(_enabled(found), await self._switch_back(home))
 
     async def _refuse_active_outputs(self) -> None:
