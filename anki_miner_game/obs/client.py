@@ -56,8 +56,13 @@ logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
-# Provisional until R2 (docs/m0/obs-behaviour.md): how long OBS takes to load and to switch a scene
-# collection, and how long its slowest blocking request holds the answer.
+# From R2 (docs/m0/obs-behaviour.md sections 3 and 8; Linux, OBS 32.2.2 Flatpak; Windows provisional
+# until H5): GetVersion first succeeded 2.3-5.5 s after launch, the longest scene collection change
+# took 143 ms and the slowest blocking answer 143 ms (SetCurrentSceneCollection, arm_disarm.jsonl).
+# Twice each stays below the 30 s and 20 s floors, which remain. The one answer that never came was
+# held back by OBS's restart question (R2 item 3): REQUEST_TIMEOUT_S stays above the actor's switch
+# timeout (spec 6.2 step 3), so the actor's timeout, not the socket timeout, ends a stalled switch;
+# cancelling the request then drops the connection. R2 recommends no retry interval for 207.
 NOT_READY_TIMEOUT_S: Final = 30.0
 """How long ``connect`` and ``request`` retry 207 ``NotReady`` (and ``request`` waits out a collection change)."""
 NOT_READY_RETRY_S: Final = 0.25
