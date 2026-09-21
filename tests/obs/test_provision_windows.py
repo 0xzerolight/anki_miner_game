@@ -1,7 +1,7 @@
 """``Provisioner.list_windows`` (spec 11.3 window picker, 12 window-closed check; amendments items 10-11).
 
-``r1-xcomposite-window-list.jsonl`` holds two frames copied verbatim from R1's run
-``campaign-simple-default-trial2-173143`` (``transcript.jsonl`` lines 18-19; OBS 32.2.2 Flatpak,
+``r1-trial2-provisioning.jsonl`` holds frames copied verbatim from R1's run
+``campaign-simple-default-trial2-173143`` (``transcript.jsonl`` lines 9-22, the list at 18-19; OBS 32.2.2 Flatpak,
 obs-websocket 5.7.4, ``docs/m0/clock.md``): the window list of an ``xcomposite_input`` created with a
 placeholder ``capture_window``.
 """
@@ -18,7 +18,7 @@ from anki_miner_game.models.profile import AudioMode, AudioSettings, CaptureKind
 from anki_miner_game.obs.provision import GAME_CAPTURE_INPUT, XCOMPOSITE_INPUT, ObsProvisioner
 from tests.obs.fake_obs import LINUX_WAYLAND_KINDS, LINUX_X11_KINDS, WINDOWS_KINDS, FakeObs
 
-FIXTURE = Path(__file__).parents[1] / "fixtures" / "obs_provision" / "r1-xcomposite-window-list.jsonl"
+FIXTURE = Path(__file__).parents[1] / "fixtures" / "obs_provision" / "r1-trial2-provisioning.jsonl"
 
 WIN_WINDOW = "Steins#3AGate:UnityWndClass:SteinsGate.exe"
 X11_WINDOW = "0x3a00007\r\nSteins;Gate\r\nsteinsgate"
@@ -37,9 +37,11 @@ WINDOW_CAPTURE_LIST = [{"itemName": "window capture list", "itemEnabled": True, 
 
 def recorded_items() -> list[dict[str, Any]]:
     frames = [json.loads(line) for line in FIXTURE.read_text(encoding="utf-8").splitlines()]
-    response = next(f["msg"]["d"] for f in frames if f["dir"] == "obs->client")
-    assert response["requestType"] == "GetInputPropertiesListPropertyItems"
-    return response["responseData"]["propertyItems"]
+    return next(
+        f["msg"]["d"]["responseData"]["propertyItems"]
+        for f in frames
+        if f["msg"]["op"] == 7 and f["msg"]["d"]["requestType"] == "GetInputPropertiesListPropertyItems"
+    )
 
 
 def profile(window: str | None = None, kind: CaptureKind = CaptureKind.AUTO) -> GameProfile:

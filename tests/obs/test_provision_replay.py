@@ -1,0 +1,190 @@
+"""FakeObs replayed against real OBS frames (card T14: provisioning transcript replay).
+
+Every provisioning test runs on ``FakeObs``, so "the second run sends no mutating request" holds only
+as far as the fake answers the way OBS does. The fixtures hold frames copied verbatim from runs
+against OBS 32.2.2 (Flatpak) with obs-websocket 5.7.4 on the M0 rig:
+
+- ``r1-trial2-provisioning.jsonl``: R1 run ``campaign-simple-default-trial2-173143``,
+  ``transcript.jsonl`` lines 9-22 (``docs/m0/clock.md``): video settings written and read back, an
+  ``xcomposite_input`` created with a placeholder window, its window list, a window set on it.
+- ``r2-provision.jsonl``: R2 run ``provision-183652``, ``provision.jsonl`` lines 19-100: the app's
+  profile created, its record directory, video and ``basic.ini`` rows written and read back, the
+  app's collection and scene ``Game`` created, an ``xcomposite_input`` and a ``pulse_output_capture``
+  created, the special inputs read.
+
+Each recorded request that provisioning also sends goes to a ``FakeObs`` that knows only the rig
+(screen size, input kinds, the windows on screen). The fake must answer with OBS's status code and,
+for every field provisioning reads, OBS's value. ``InputCreated`` and ``InputSettingsChanged`` carry
+the settings serialised the way ``GetInputSettings`` serialises them (``obs-websocket@1ef34bf4
+src/eventhandler/EventHandler_Inputs.cpp:44,53,123,128``,
+``src/requesthandler/RequestHandler_Inputs.cpp:322-325``), so at each such event the fake's
+``GetInputSettings`` must match it too.
+
+Follow-up E1-PROVISION-REPLAY (E1, or R2 if it records a provisioning run): no real frame covers
+``RemoveInput`` and how long OBS then holds the name (``INPUT_RELEASE_TIMEOUT_S``), ``GetInputMute``
+and ``SetInputMute``, ``SetCurrentProgramScene``, ``GetProfileParameter`` on a fresh profile before any
+write, or a setting written equal to its default. E1 records ``ObsProvisioner``'s own first and second
+run through ``tools/obs_transcript_recorder.py``, and that transcript is replayed request by request
+against the provisioner.
+"""
+
+import json
+from pathlib import Path
+from typing import Any
+
+from anki_miner_game.models.config import AppConfig, RecordingSettings
+from anki_miner_game.models.obs import ObsRequestError, ProvisionResult
+from anki_miner_game.obs.provision import CONTAINER_KEYS, OFF_KEYS, ObsProvisioner
+from tests.obs.fake_obs import FakeObs, Sleeps
+
+FIXTURES = Path(__file__).parents[1] / "fixtures" / "obs_provision"
+
+READ_PARAMETERS = frozenset(CONTAINER_KEYS + OFF_KEYS)
+"""The ``basic.ini`` keys provisioning reads; the fake models no other key's default."""
+
+SETTINGS_EVENTS = ("InputCreated", "InputSettingsChanged")
+
+
+def load(name: str) -> list[dict[str, Any]]:
+    return [json.loads(line) for line in (FIXTURES / name).read_text(encoding="utf-8").splitlines()]
+
+
+def payloads(frames: list[dict[str, Any]], op: int) -> list[dict[str, Any]]:
+    return [f["msg"]["d"] for f in frames if f.get("msg", {}).get("op") == op]
+
+
+def recorded(frames: list[dict[str, Any]], request_type: str) -> dict[str, Any]:
+    """The first response to ``request_type`` in ``frames``."""
+    return next(d for d in payloads(frames, 7) if d["requestType"] == request_type)["responseData"]
+
+
+def rig_kinds() -> list[str]:
+    """Input kinds of the rig's OBS: both fixtures come from the same Flatpak OBS on the same host."""
+    return recorded(load("r2-provision.jsonl"), "GetInputKindList")["inputKinds"]
+
+
+def view(request_type: str, data: dict[str, Any] | None) -> object:
+    """What provisioning reads of a response: names as sets, UUIDs (new every run) masked."""
+    data = data or {}
+    if request_type == "GetProfileList":
+        return data["currentProfileName"], sorted(data["profiles"])
+    if request_type == "GetSceneCollectionList":
+        return data["currentSceneCollectionName"], sorted(data["sceneCollections"])
+    if request_type == "GetSceneList":
+        return data["currentProgramSceneName"], sorted(scene["sceneName"] for scene in data["scenes"])
+    return {key: "<uuid>" if key.endswith("Uuid") else value for key, value in data.items()}
+
+
+def provisioning_sends(request_type: str, fields: dict[str, Any]) -> bool:
+    if not hasattr(FakeObs, "_" + request_type):
+        return False  # Not a request provisioning sends (FakeObs implements exactly those).
+    if request_type == "GetProfileParameter":
+        return (fields["parameterCategory"], fields["parameterName"]) in READ_PARAMETERS
+    return True
+
+
+async def replay(obs: FakeObs, frames: list[dict[str, Any]]) -> tuple[list[str], list[str]]:
+    """Send the provisioning requests of ``frames`` to ``obs`` in order; return (checked, mismatches)."""
+    responses = {d["requestId"]: d for d in payloads(frames, 7)}
+    checked: list[str] = []
+    mismatches: list[str] = []
+    for frame in frames:
+        msg = frame.get("msg", {})
+        data = msg.get("d", {})
+        if msg.get("op") == 5 and data["eventType"] in SETTINGS_EVENTS:
+            event = data["eventData"]
+            got = await obs.request("GetInputSettings", inputName=event["inputName"])
+            want = {"inputKind": event.get("inputKind", got["inputKind"]), "inputSettings": event["inputSettings"]}
+            checked.append(data["eventType"])
+            if got != want:
+                mismatches.append(f"{data['eventType']} {event['inputName']}: fake {got}, OBS {want}")
+        if msg.get("op") != 6:
+            continue
+        request_type, fields = data["requestType"], data.get("requestData") or {}
+        if not provisioning_sends(request_type, fields):
+            continue
+        response = responses[data["requestId"]]
+        if request_type == "GetInputPropertiesListPropertyItems":
+            # The windows on screen belong to the rig, not to OBS's state.
+            kind = obs.collection.inputs[fields["inputName"]].kind
+            obs.window_lists[kind] = response["responseData"]["propertyItems"]
+        try:
+            answer: dict[str, Any] | None = await obs.request(request_type, **fields)
+            code = 100
+        except ObsRequestError as exc:
+            answer, code = None, exc.code
+        checked.append(request_type)
+        want_code = response["requestStatus"]["code"]
+        if code != want_code:
+            mismatches.append(f"{request_type} {fields}: fake code {code}, OBS {want_code}")
+        elif code == 100 and view(request_type, answer) != view(request_type, response.get("responseData")):
+            mismatches.append(f"{request_type} {fields}: fake {answer}, OBS {response.get('responseData')}")
+    return checked, mismatches
+
+
+def r2_rig() -> FakeObs:
+    base = recorded(load("r2-provision.jsonl"), "GetVideoSettings")
+    return FakeObs(input_kinds=rig_kinds(), base_size=(base["baseWidth"], base["baseHeight"]))
+
+
+async def test_fake_obs_answers_the_r2_provisioning_run_as_obs_did():
+    obs = r2_rig()
+
+    checked, mismatches = await replay(obs, load("r2-provision.jsonl"))
+
+    assert mismatches == []
+    assert set(checked) == {
+        "GetProfileList",
+        "GetSceneCollectionList",
+        "CreateProfile",
+        "SetRecordDirectory",
+        "GetRecordDirectory",
+        "GetVideoSettings",
+        "SetVideoSettings",
+        "SetProfileParameter",
+        "GetProfileParameter",
+        "CreateSceneCollection",
+        "CreateScene",
+        "GetSceneList",
+        "GetInputKindList",
+        "CreateInput",
+        "InputCreated",
+        "GetInputPropertiesListPropertyItems",
+        "SetInputSettings",
+        "GetInputSettings",
+        "GetSpecialInputs",
+        "InputSettingsChanged",
+    }
+    assert checked.count("GetProfileParameter") == len(READ_PARAMETERS)
+
+
+async def test_fake_obs_answers_the_r1_capture_setup_as_obs_did():
+    obs = FakeObs(input_kinds=rig_kinds())
+
+    checked, mismatches = await replay(obs, load("r1-trial2-provisioning.jsonl"))
+
+    assert mismatches == []
+    assert checked == [
+        "SetVideoSettings",
+        "GetVideoSettings",
+        "CreateInput",
+        "InputCreated",
+        "GetInputPropertiesListPropertyItems",
+        "SetInputSettings",
+        "InputSettingsChanged",
+    ]
+
+
+async def test_the_profile_r2_wrote_on_a_real_obs_needs_only_the_app_record_directory(tmp_path):
+    # R2 wrote the rows provisioning writes, at the default 720p30; the output root differs.
+    obs = r2_rig()
+    await replay(obs, load("r2-provision.jsonl"))
+    obs.reset_calls()
+    provisioner = ObsProvisioner(obs, platform="linux", sleep=Sleeps())
+
+    result = await provisioner.ensure_profile(
+        AppConfig(output_root=str(tmp_path), recording=RecordingSettings(720, 30))
+    )
+
+    assert result == ProvisionResult(changed=True, needs_restart=False)
+    assert obs.mutating() == ["SetRecordDirectory"]

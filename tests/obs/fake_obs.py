@@ -10,7 +10,9 @@ obs-websocket 5.7.4 uses (``docs/m0/source-findings.md``; ``RequestHandler_Confi
   value, else ``null``; ``RecFormat2`` defaults to ``hybrid_mp4``.
 - ``CreateProfile`` answers before the profile exists; the switch lands ``create_profile_delay``
   ``GetProfileList`` calls later (``CurrentProfileChanged`` has no ordering guarantee).
-- ``SetVideoSettings`` aligns the output size as libobs does (width to 4, height to 2).
+- A profile's default output size is its base scaled down to at most 1280x720 pixels
+  (``obs-studio@ba2f32bd frontend/widgets/OBSBasic.cpp:599, 830-843``); ``SetVideoSettings`` and
+  that default are aligned as libobs aligns them (width to 4, height to 2).
 - A new scene collection holds one scene, ``Scene``, and no inputs or special inputs.
 - ``CreateInput`` appends the scene item on top; names are unique per collection.
 - ``RemoveInput`` takes the input out of its scenes, but OBS frees its name only once the source is
@@ -40,6 +42,10 @@ RESOURCE_ALREADY_EXISTS = 601
 INVALID_INPUT_KIND = 605
 
 PROFILE_DEFAULTS = {("SimpleOutput", "RecFormat2"): "hybrid_mp4", ("AdvOut", "RecFormat2"): "hybrid_mp4"}
+
+DEFAULT_OUTPUT_SCALES = (1.0, 1.25, 1.0 / 0.75, 1.5, 1.0 / 0.6, 1.75, 2.0, 2.25, 2.5, 2.75, 3.0)
+"""OBS's ``scaled_vals``: the first one that brings the base to at most 1280x720 pixels gives the
+default output size of a new profile."""
 
 LIST_PROPERTY = {
     "game_capture": "window",
@@ -166,11 +172,16 @@ class FakeObs:
         self.collection.special[slot] = name
 
     def _default_video(self, base_w: int, base_h: int) -> dict[str, int]:
+        out_w, out_h = base_w, base_h
+        for scale in DEFAULT_OUTPUT_SCALES:
+            if out_w * out_h <= 1280 * 720:
+                break
+            out_w, out_h = int(base_w / scale), int(base_h / scale)
         return {
             "baseWidth": base_w,
             "baseHeight": base_h,
-            "outputWidth": base_w & ~3,
-            "outputHeight": base_h & ~1,
+            "outputWidth": out_w & ~3,
+            "outputHeight": out_h & ~1,
             "fpsNumerator": 30,
             "fpsDenominator": 1,
         }
