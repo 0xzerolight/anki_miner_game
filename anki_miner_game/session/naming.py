@@ -20,13 +20,14 @@ DEFAULT_SLUG: Final = "game"
 
 _FORBIDDEN_CHARS: Final = frozenset('<>:"/\\|?*')
 _SPACED_HYPHEN: Final = re.compile(r"(?<=\s)-(?=\s)")
-_SEASON_EPISODE: Final = re.compile(r"([Ss]\d+)[\s._-]*([Ee]\d+)")
-"""Anki Miner's first pattern, which outranks the `` - NN`` release slot."""
 _INDEX_SUFFIX: Final = re.compile(r" - ([0-9]{1,4})\Z")
 
-# Ported from Anki Miner anki_miner/utils/episode_matcher.py, _strip_technical_tokens, at commit
-# ea4a30ce2be4f57f30379ca3fe1ec438ff7fb8a5: the tokens it deletes from a stem before matching, in
-# its order. tests/contract/test_naming_contract.py checks this copy against the vendored original.
+# Ported from Anki Miner anki_miner/utils/episode_matcher.py at commit
+# ea4a30ce2be4f57f30379ca3fe1ec438ff7fb8a5; tests/contract/test_naming_contract.py checks both
+# against the vendored original.
+_SEASON_EPISODE: Final = re.compile(r"([Ss]\d+)[\s._-]*([Ee]\d+)")
+"""``EpisodeNumberExtractor.PATTERNS[0]`` with the groups moved to keep the letters; it outranks
+the `` - NN`` release slot."""
 _TECHNICAL_TOKENS: Final = (
     re.compile(r"\d{3,4}[xX]\d{3,4}"),
     re.compile(r"(?<![0-9A-Za-z])\d{3,4}[pi](?![0-9A-Za-z])", re.IGNORECASE),
@@ -35,6 +36,7 @@ _TECHNICAL_TOKENS: Final = (
     re.compile(r"[\[(][0-9A-Fa-f]{8}[\])]"),
     re.compile(r"(?<=\d)[\s._-]*[vV]\d{1,2}(?![0-9A-Za-z])"),
 )
+"""``_strip_technical_tokens``: the tokens it deletes from a stem before matching, in its order."""
 _PROBE_SUFFIX: Final = " - 01"
 """Stands in for any NN: no token reaches into `` - NN``, and NN is never part of a hazard."""
 

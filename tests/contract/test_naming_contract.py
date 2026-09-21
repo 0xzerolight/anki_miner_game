@@ -6,6 +6,7 @@ technical tokens Anki Miner deletes before matching with S/E fragments, spaced h
 arbitrary Unicode: that deletion is what defeated the spec's first sanitiser (docs/m0/sanitiser.md).
 """
 
+import re
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,7 @@ from hypothesis import example, given, settings
 from hypothesis import strategies as st
 
 from anki_miner_game.session.naming import (
+    _SEASON_EPISODE,
     DEFAULT_TITLE,
     MAX_INDEX,
     MIN_INDEX,
@@ -123,6 +125,17 @@ def test_the_ported_token_deletion_matches_the_vendored_one(stem):
     assert kept == _strip_technical_tokens(stem)
     assert "".join(stem[i] for i in where) == kept
     assert where == sorted(set(where))
+
+
+@settings(max_examples=1000, deadline=None)
+@given(st.one_of(adversarial_titles, st.text()))
+@example("Show S01E02")
+@example("s1 _-e2 S3.E4")
+def test_the_ported_season_episode_pattern_matches_the_vendored_one(stem):
+    """The sanitiser's copy of ``PATTERNS[0]`` finds the same S/E span as the original."""
+    ours = _SEASON_EPISODE.search(stem)
+    theirs = re.search(EpisodeNumberExtractor.PATTERNS[0][0], stem)
+    assert (ours and ours.span()) == (theirs and theirs.span())
 
 
 @settings(max_examples=1000, deadline=None)
