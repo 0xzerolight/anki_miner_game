@@ -20,12 +20,12 @@ src/eventhandler/EventHandler_Inputs.cpp:44,53,123,128``,
 ``src/requesthandler/RequestHandler_Inputs.cpp:322-325``), so at each such event the fake's
 ``GetInputSettings`` must match it too.
 
-Follow-up E1-PROVISION-REPLAY (E1, or R2 if it records a provisioning run): no real frame covers
-``RemoveInput`` and how long OBS then holds the name (``INPUT_RELEASE_TIMEOUT_S``), ``GetInputMute``
-and ``SetInputMute``, ``SetCurrentProgramScene``, ``GetProfileParameter`` on a fresh profile before any
-write, or a setting written equal to its default. E1 records ``ObsProvisioner``'s own first and second
-run through ``tools/obs_transcript_recorder.py``, and that transcript is replayed request by request
-against the provisioner.
+Follow-up E1-PROVISION-REPLAY (master plan E1 card): no real frame covers ``RemoveInput`` and how
+long OBS then holds the name (``INPUT_RELEASE_TIMEOUT_S``), ``GetInputMute`` and ``SetInputMute``,
+``SetCurrentProgramScene``, ``GetProfileParameter`` on a fresh profile before any write, a setting
+written equal to its default, the audio copy or the profile re-activation. E1 records
+``ObsProvisioner``'s own first and second run through ``tools/obs_transcript_recorder.py``, and that
+transcript is replayed request by request against the provisioner.
 """
 
 import json
