@@ -33,6 +33,12 @@ FAKES = Path(__file__).parent.parent / "fakes"
 
 posix_only = pytest.mark.skipif(sys.platform == "win32", reason="the fake uv runs through a shebang")
 
+WINDOW_MISSING_LINE = (
+    '10:00:00 | "screen_capture_area" must be empty, "screen_N" where N is a screen number starting from 1,'
+    " one or more sets of rectangle coordinates, or a window name"
+)
+"""What owocr logs when no window has the title it was given (``run.py:1991,2005``)."""
+
 # --- command line ----------------------------------------------------------------------------------
 
 BASE = ["-r", "screencapture", "-w", "websocket", "-wp", "5000", "-t", "False"]
@@ -189,9 +195,9 @@ def test_parse_log_line_against_the_r3_fixtures(name):
         pytest.param(
             '10:00:00 | "screen_capture_area" must be empty, "screen_N" where N is a screen number',
             LogEvent(
-                LogKind.CONFIG_ERROR, '"screen_capture_area" must be empty, "screen_N" where N is a screen number'
+                LogKind.WINDOW_MISSING, '"screen_capture_area" must be empty, "screen_N" where N is a screen number'
             ),
-            id="window title not found",
+            id="window title not found is worth a restart",
         ),
         pytest.param(
             "10:00:00 | Couldn't start websocket server. Make sure port 5000 is not already in use",
@@ -610,6 +616,12 @@ async def test_pick_reports_an_exit_before_any_selection(tmp_path):
     addon, _ = _picker(tmp_path, log=["10:00:00 | Launching screen coordinate picker"], exit=1)
     with pytest.raises(OcrError, match="Launching screen coordinate picker"):
         await addon.pick(None)
+
+
+async def test_pick_names_a_window_that_is_not_open(tmp_path):
+    addon, _ = _picker(tmp_path, platform="win32", log=[WINDOW_MISSING_LINE, "10:00:00 | Terminated!"], exit=1)
+    with pytest.raises(OcrError, match='the window "Some Game" is not open'):
+        await addon.pick("Some Game")
 
 
 @posix_only

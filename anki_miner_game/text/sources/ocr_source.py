@@ -6,8 +6,9 @@ owocr's whole process tree. When owocr exits on its own, the tree's leftovers ar
 started again after 1, 2 and 5 s; a fourth exit in a row ends OCR for this arm with a banner, and the
 recording goes on (spec 17). An exit on an error that the same command line would hit again (a bad
 area, no engine; ``LogKind.CONFIG_ERROR``) gets the banner at once, as do an add-on that is not
-installed, a Wayland session and a profile with no OCR area. A run that lasted ``STABLE_RUN_S``
-counts as healthy, so only exits in a row add up.
+installed, a Wayland session and a profile with no OCR area. A game window that is not open
+(``LogKind.WINDOW_MISSING``) is restarted like any other exit, and the banner then names it. A run
+that lasted ``STABLE_RUN_S`` counts as healthy, so only exits in a row add up.
 """
 
 import asyncio
@@ -16,7 +17,7 @@ import time
 from collections.abc import Awaitable, Callable
 from typing import Final, Protocol
 
-from anki_miner_game.addons.ocr_addon import OcrError, OwocrProcess, free_port
+from anki_miner_game.addons.ocr_addon import OcrError, OwocrProcess, free_port, window_missing_text
 from anki_miner_game.interfaces.text_source import LineSink, StatusListener
 from anki_miner_game.models.messages import Banner, BannerCleared, BannerLevel, BannerRaised, SourceStatus
 from anki_miner_game.models.profile import OcrSettings
@@ -132,9 +133,11 @@ class OcrSource:
             exits = 1 if self._now() - started >= STABLE_RUN_S else exits + 1
             logger.warning("owocr exited with code %s (%d in a row): %s", code, exits, proc.last_message)
             if exits > len(BACKOFF_S):
-                self._give_up(
-                    f"OCR stopped: owocr exited {exits} times in a row; its last message: {proc.last_message}"
-                )
+                if proc.window_missing:
+                    why = window_missing_text(self._settings.window_title)
+                else:
+                    why = f"its last message: {proc.last_message}"
+                self._give_up(f"OCR stopped: owocr exited {exits} times in a row; {why}")
                 return
             await self._sleep(BACKOFF_S[exits - 1])
 

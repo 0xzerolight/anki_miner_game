@@ -27,9 +27,12 @@ SETTINGS = OcrSettings(rects="100,100,900,260")
 class FakeProc:
     """An owocr run: exits at once with ``code`` unless ``runs``; ``kill_tree`` ends it."""
 
-    def __init__(self, code: int = 1, *, fatal: str | None = None, runs: bool = False) -> None:
+    def __init__(
+        self, code: int = 1, *, fatal: str | None = None, window_missing: bool = False, runs: bool = False
+    ) -> None:
         self.code = code
         self.fatal = fatal
+        self.window_missing = window_missing
         self.last_message = "Something went wrong"
         self.kills = 0
         self._exited = asyncio.Event()
@@ -144,6 +147,17 @@ async def test_a_config_error_gets_a_banner_and_no_restart(make_source):
     assert message in banner.text
     assert len(launcher.launches) == 1
     assert sleep.delays == []
+
+
+async def test_a_missing_game_window_gets_three_restarts_then_a_banner_naming_it(make_source):
+    settings = OcrSettings(rects="0,540,1280,720", window_title="Some Game")
+    launcher, sleep, banners = FakeLauncher(lambda n: FakeProc(window_missing=True)), FakeSleep(), Banners()
+    make_source(launcher, settings, sleep=sleep, on_banner=banners).start(Sink())
+    banner = await banners.wait_raised()
+    assert len(launcher.launches) == 4
+    assert sleep.delays == [1.0, 2.0, 5.0]
+    assert 'the window "Some Game" is not open' in banner.text
+    assert "Something went wrong" not in banner.text
 
 
 async def test_a_run_that_lasted_resets_the_restart_count(make_source):
@@ -295,3 +309,17 @@ async def test_owocr_config_error_reaches_a_banner(make_source, tmp_path):
     banners = Banners()
     make_source(addon, on_banner=banners).start(Sink())
     assert "No engines available!" in (await banners.wait_raised()).text
+
+
+async def test_owocr_that_cannot_find_the_game_window_is_restarted_then_named(make_source, tmp_path):
+    missing = (
+        '10:00:00 | "screen_capture_area" must be empty, "screen_N" where N is a screen number starting from 1,'
+        " one or more sets of rectangle coordinates, or a window name"
+    )
+    addon = _installed_addon(tmp_path, {"log": [missing, "10:00:00 | Terminated!"], "exit": 1})
+    settings = OcrSettings(rects="0,540,1280,720", window_title="Some Game")
+    sleep, banners = FakeSleep(), Banners()
+    make_source(addon, settings, sleep=sleep, on_banner=banners).start(Sink())
+    banner = await banners.wait_raised()
+    assert sleep.delays == [1.0, 2.0, 5.0], "three restarts before the banner"
+    assert 'the window "Some Game" is not open' in banner.text

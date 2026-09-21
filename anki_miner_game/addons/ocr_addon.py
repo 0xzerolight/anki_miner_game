@@ -137,6 +137,10 @@ class LogKind(StrEnum):
     """The picker window was closed (``run.py:2448,2502``); fatal for the screen picker."""
     CONFIG_ERROR = "config_error"
     """A fatal error that the same command line would hit again, so a restart cannot help."""
+    WINDOW_MISSING = "window_missing"
+    """No window has the title owocr was given (``run.py:1991,2005``). Worth a restart: the game may
+    not be open yet, or is being restarted (owocr first exits with "The window was closed",
+    ``run.py:2544``). Kept apart only so the error can name the window."""
 
 
 @dataclass(frozen=True)
@@ -151,7 +155,6 @@ CONFIG_ERRORS: Final = (
     "Invalid monitor number in screen_capture_area",  # run.py:1937
     "Invalid coordinate set(s) in screen_capture_area",  # run.py:1947
     "Invalid coordinate set(s) in screen_capture_window_area",  # run.py:2026
-    '"screen_capture_area" must be empty',  # run.py:1991,2005: no window with that title
     '"screen_capture_window_area" must be empty',  # run.py:2039
     "Window capture is only currently supported",  # run.py:2017
     "Error initializing screenshots",  # run.py:1910,2529: no screen to capture
@@ -160,6 +163,8 @@ CONFIG_ERRORS: Final = (
 )
 """owocr's fatal messages (``exit_with_error``) that a restart with the same flags would hit again.
 Anything else it exits on, such as a websocket port taken meanwhile, is worth a restart."""
+WINDOW_MISSING_ERROR: Final = '"screen_capture_area" must be empty'
+"""How owocr's message starts when no window has the title (``LogKind.WINDOW_MISSING``)."""
 
 _ANSI: Final = re.compile(r"\x1b\[[0-9;]*m")
 _LOG_LINE: Final = re.compile(r"^\d{2}:\d{2}:\d{2} \| (.*)$")
@@ -187,7 +192,14 @@ def parse_log_line(line: str) -> LogEvent | None:
         return LogEvent(LogKind.PICKER_CLOSED, message)
     if message.startswith(CONFIG_ERRORS):
         return LogEvent(LogKind.CONFIG_ERROR, message)
+    if message.startswith(WINDOW_MISSING_ERROR):
+        return LogEvent(LogKind.WINDOW_MISSING, message)
     return None
+
+
+def window_missing_text(window_title: str | None) -> str:
+    """Why owocr stopped when it reported ``LogKind.WINDOW_MISSING``, naming the window."""
+    return f'the window "{window_title}" is not open' if window_title else "the game window is not open"
 
 
 # --- process tree ------------------------------------------------------------------------------------
@@ -199,8 +211,9 @@ class OwocrProcess:
     Made by ``spawn_owocr`` on a running asyncio loop, and used on that loop only. The log is read
     from owocr's stderr for as long as it runs: every line is logged at debug level, the last
     timestamped message is kept in ``last_message``, the first fatal one (``LogKind.CONFIG_ERROR``
-    or ``PICKER_CLOSED``) in ``fatal``, and every ``LogEvent`` is queued for ``next_event``. Always
-    end with ``kill_tree``, also after owocr exited on its own: its children may have outlived it.
+    or ``PICKER_CLOSED``) in ``fatal``, ``window_missing`` says whether owocr found no window with
+    its title, and every ``LogEvent`` is queued for ``next_event``. Always end with ``kill_tree``,
+    also after owocr exited on its own: its children may have outlived it.
     """
 
     def __init__(self, proc: asyncio.subprocess.Process, job: int | None) -> None:
@@ -211,6 +224,7 @@ class OwocrProcess:
         self._events: asyncio.Queue[LogEvent | None] = asyncio.Queue()
         self._log_ended = False
         self.fatal: str | None = None
+        self.window_missing = False
         self.last_message: str | None = None
         loop = asyncio.get_running_loop()
         self._reader = loop.create_task(self._read(), name=f"owocr-log-{proc.pid}")
@@ -304,6 +318,8 @@ class OwocrProcess:
             return
         if self.fatal is None and event.kind in (LogKind.CONFIG_ERROR, LogKind.PICKER_CLOSED):
             self.fatal = event.text
+        if event.kind is LogKind.WINDOW_MISSING:
+            self.window_missing = True
         self._events.put_nowait(event)
 
     async def _end_log_after_exit(self) -> None:
@@ -640,6 +656,8 @@ class OcrAddon:
                     return None
                 if event.kind is LogKind.CONFIG_ERROR:
                     raise OcrError(f"owocr could not open its picker: {event.text}")
+                if event.kind is LogKind.WINDOW_MISSING:
+                    raise OcrError(f"owocr could not open its picker: {window_missing_text(window_title)}")
             raise OcrError(f"owocr exited before an area was selected; its last message: {proc.last_message}")
         finally:
             await proc.kill_tree()

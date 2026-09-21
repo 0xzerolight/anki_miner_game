@@ -111,6 +111,16 @@ async def test_a_config_error_is_kept_as_fatal(spawned):
     assert proc.last_message == "Terminated!"
 
 
+async def test_a_missing_window_is_flagged_but_not_fatal(spawned):
+    message = '"screen_capture_area" must be empty, "screen_N" where N is a screen number starting from 1'
+    proc = await _spawn(log=[f"10:00:00 | {message}", "10:00:00 | Terminated!"], exit=1)
+    spawned.append(proc)
+    assert await _events(proc) == [LogEvent(LogKind.WINDOW_MISSING, message)]
+    assert await proc.wait() == 1
+    assert proc.window_missing
+    assert proc.fatal is None
+
+
 async def test_an_overlong_line_is_skipped_not_fatal(spawned, monkeypatch):
     monkeypatch.setattr(ocr_addon, "LINE_LIMIT", 1024)
     proc = await _spawn(log=["10:00:00 | " + "x" * 5000, "10:00:01 | Selected coordinates: 1,2,3,4"], exit=0)
