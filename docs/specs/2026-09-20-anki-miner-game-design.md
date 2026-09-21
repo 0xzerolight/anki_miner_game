@@ -2,6 +2,9 @@
 
 Status: design approved 2026-09-20. No code exists. Implementation happens in a new repository,
 `anki_miner_game`. This file is the input to that repository's first implementation plan.
+Amended at the M0 gate on 2026-09-21 with what the spikes found (`docs/m0/*.md`) and the
+orchestrator's rulings on them. The spikes ran on Linux; every Windows-derived value is marked
+provisional until the Windows checks of pre-release QA (H5, owner decision D2).
 
 Working name "Anki Miner Game". A standalone desktop app that records a video-game session through
 OBS and writes a subtitle file from text-hooker lines, so that Anki Miner can mine games the way it
@@ -63,7 +66,9 @@ Made by the maintainer on 2026-09-20. Not open for re-litigation in the implemen
 ## 3. External contracts
 
 Everything here was checked against source on 2026-09-19/20. Line numbers for Anki Miner are at
-commit `380e83f3`; for GSM at `479747fe`; owocr at 1.26.8. Appendix B lists what was verified how.
+commit `380e83f3`; for GSM at `479747fe`; owocr at 1.26.8. M0 re-read the OBS facts in obs-studio
+32.2.2 and obs-websocket 5.7.4 source and ran them against a real OBS 32.2.2 on Linux
+(`docs/m0/source-findings.md`, `clock.md`, `obs-behaviour.md`). Appendix B lists what was verified how.
 
 ### 3.1 Anki Miner input contract
 
@@ -112,7 +117,9 @@ Defaults and the JSON shape are GSM's (`util/config/configuration.py:580-602`, `
 - Websocket settings live in `plugin_config/obs-websocket/config.json` under the OBS config root.
   Keys: `server_enabled`, `server_port`, `server_password`, `auth_required`, `alerts_enabled`,
   `first_load`. OBS's own default port is 4455. GSM treats this file as the source of truth
-  (`obs/launch.py:440-483`); so does this app.
+  (`obs/launch.py:440-483`); so does this app. obs-websocket reads it once, when OBS starts, and
+  writes it at start and when the user saves its settings dialog, never at exit
+  (`docs/m0/source-findings.md` section 5). The server listens on all interfaces.
 - Config roots: Windows `%APPDATA%\obs-studio`; Linux `~/.config/obs-studio`; Flatpak
   `~/.var/app/com.obsproject.Studio/config/obs-studio`.
 - Requests used: `GetVersion`, `GetRecordStatus`, `StartRecord`, `StopRecord`, `GetStreamStatus`,
@@ -121,37 +128,76 @@ Defaults and the JSON shape are GSM's (`util/config/configuration.py:580-602`, `
   `GetProfileParameter`, `SetProfileParameter`, `GetVideoSettings`, `SetVideoSettings`,
   `GetRecordDirectory`, `SetRecordDirectory`, `CreateScene`, `GetInputKindList`, `CreateInput`,
   `SetInputSettings`, `GetSpecialInputs`, `SetInputMute`, `GetInputPropertiesListPropertyItems`,
-  `GetSceneList`, `SetCurrentProgramScene`, `GetInputSettings`, `GetInputMute`, `RemoveInput`.
+  `GetSceneList`, `SetCurrentProgramScene`, `GetInputSettings`, `GetInputMute`, `RemoveInput`,
+  `GetOutputSettings` (27; the last one ties an active recording to its manifest after a reconnect,
+  section 6.3). The app never sends `PauseRecord` (section 7).
+- Minimum OBS: **30.0.0** (obs-websocket 5.3.3). `SetRecordDirectory` (5.3.0) is the newest of the
+  27; every other request exists since 5.0.0. `RecordFileChanged` needs OBS 30.2.0; on 30.0 and 30.1
+  a split is silent, and the app's profile keeps splitting off (`docs/m0/source-findings.md`
+  section 9).
+- OBS is ready when `GetVersion` succeeds, not when the websocket accepts a connection. Until OBS
+  has loaded, and between `CurrentSceneCollectionChanging` and `...Changed`, every request gets
+  status 207 `NotReady` and every event is dropped, not queued (`docs/m0/source-findings.md`
+  sections 5 and 8, confirmed by R2 in `switch_not_ready`). The protocol calls requests during a
+  collection change undefined behaviour; obs-websocket 5.7.4 rejects them.
 - `GetRecordStatus` returns `outputActive`, `outputPaused`, `outputTimecode`, `outputDuration` (ms),
-  `outputBytes`.
+  `outputBytes`, and no path. `outputDuration` counts frames delivered to the output (it trails the
+  capture by the encoder's latency, section 7) and is 0 once the output is inactive. After
+  `STOPPED` it still reports `outputActive: true` for about 170 ms (`docs/m0/obs-behaviour.md`
+  section 4).
+- `GetOutputSettings {outputName}` on `simple_file_output` (Simple output mode) or `adv_file_output`
+  (Advanced) returns the file being written as `outputSettings.path`, identical to
+  `STARTED.outputPath` (R2 `reconnect`). After a split it still names the first file.
+- `GetReplayBufferStatus` and `GetVirtualCamStatus` answer 604 when that output is not configured or
+  not installed; the app reads 604 as "not active".
 - Events used: `RecordStateChanged {outputActive, outputState, outputPath}` where `outputPath` is
-  populated on both STARTED and STOPPED; `RecordFileChanged {newOutputPath}`;
+  populated on both STARTED and STOPPED (the protocol comment says STOPPED only; the code sets both)
+  and null otherwise; `RecordFileChanged {newOutputPath}`;
   `CurrentSceneCollectionChanging` / `CurrentSceneCollectionChanged`; `CurrentProfileChanging` /
   `CurrentProfileChanged`; `ExitStarted`.
 - Output states: `OBS_WEBSOCKET_OUTPUT_STARTING`, `_STARTED`, `_STOPPING`, `_STOPPED`, `_PAUSED`,
-  `_RESUMED`. STARTED and STOPPED were confirmed in obs-websocket source this session; the pause pair
-  comes from the protocol enum and is confirmed when M0 records real transcripts.
-- Sending requests while a scene collection is changing is documented as undefined behaviour.
+  `_RESUMED`, all confirmed in source and in R2's transcripts. A `PAUSED` event carries
+  `outputActive: false`, so the session keys on `outputState`, never on `outputActive`.
+- Order: obs-websocket sends each event and each response from its own thread-pool task, so neither
+  two events nor an event and a response have a guaranteed order. R2 saw a response arrive before
+  its `...Changed` event twice in 27 switches. The first event on a freshly identified connection
+  arrives about 40 ms late (`docs/m0/obs-behaviour.md` section 3).
 - Input kinds: Windows `game_capture`, `window_capture`, `monitor_capture`,
   `wasapi_process_output_capture` (one application's audio), `wasapi_output_capture` (desktop audio).
   Linux `pipewire-screen-capture-source`, `xcomposite_input`, `pulse_output_capture`. Always
-  feature-detected with `GetInputKindList`, never assumed.
-- Client library: `obsws-python` (`ReqClient`, `EventClient`), the one GSM and owocr both use.
+  feature-detected with `GetInputKindList`, never assumed. `wasapi_process_output_capture` exists
+  only on Windows 10 build 19041 or later.
+- Client library: `obsws-python` 1.8.0 (`ReqClient`, `EventClient`), the one GSM and owocr both use.
+  It logs the password at INFO when it connects and puts it in `repr()`; `ReqClient` does not match
+  request ids, so one client allows one request at a time from one thread and must be reconnected
+  after a timeout; `EventClient`'s thread ends silently when the connection closes
+  (`docs/m0/source-findings.md` section 11). Section 11.2 says how the gateway copes.
 
 ### 3.4 owocr
 
 `pip install owocr`, GPL-3.0-only, Python >= 3.11, a CLI with no library API.
 
-- Flags used: `-r screencapture`, `-w websocket`, `-wp <port>`, `-e <engine>`, `-l <lang>`,
-  `-sa <area>`, `-swa <rects>`, `-t False` (`owocr/config.py:21-105`).
+- Flags used: `-r screencapture`, `-w websocket`, `-wp <port>`, `-e <engine>`, `-el <engine>`,
+  `-l <lang>`, `-sa <area>`, `-swa <rects>`, `-t False` (`owocr/config.py:21-105`). Without `-el`,
+  owocr builds every engine it can import, and an unavailable `-e` engine falls back to any other,
+  cloud ones included (`run.py:3261-3266,3297-3298`).
 - Output: plain-text frames broadcast to every websocket client (`owocr/run.py:486-490,2730`).
 - The server binds `0.0.0.0` (`run.py:528`).
 - The config file path is fixed at `~/.config/owocr_config.ini` with no override flag
-  (`config.py:110`). This app never reads or writes it.
+  (`config.py:110`). owocr reads it for every key the command line does not pass, and downloads a
+  default copy from GitHub when it is missing (`config.py:188-194`); R3 saw it created on a first
+  run. So the app's owocr child runs with a private home (section 14), and neither the app nor its
+  child touches the user's file.
+- Every start also contacts `pypi.org` (version check, 5 s timeout) and tries to fetch Chrome
+  Screen AI into `~/.config/screen_ai`; both only log on failure (`docs/m0/owocr.md`).
 - `-r obs` captures the whole program scene with no crop (`run.py:1830-1845`) and needs the OBS
   password on the command line. Not used in v1.
-- It logs `Selected coordinates: <rects>` and `Selected window coordinates: <rects>`
-  (`run.py:1956,2035,2480,2517`), which is how the chosen OCR area is read back.
+- It logs, to stderr as `HH:MM:SS | <message>`, `Selected coordinates: <rects>` for an explicit
+  `-sa` at start and after the screen picker (`run.py:1956,2480`), and `Selected window coordinates:
+  <rects>` for an explicit `-swa` and after the window picker (`run.py:2035,2517`). That is how the
+  chosen OCR area is read back. Rectangles print as `x1,y1,x2,y2`, several joined with `_`. The
+  window line is Windows-only: on Linux X11 a window title in `-sa` is an error, and on Wayland it
+  falls back to the screen picker. After a picker selection owocr keeps running and starts OCR.
 - Frame stabilisation is on by default (`config.py:140`): a line is emitted only once the text has
   stopped changing, so OCR lines arrive after the voice has started.
 - Local engines: OneOCR (Windows 10/11), meikiocr (any platform, onnxruntime). Cloud engines Google
