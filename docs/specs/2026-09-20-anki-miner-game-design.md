@@ -445,7 +445,9 @@ the encoder medians lie within 50 ms of each other (NVENC with lookahead, x264, 
 step. The `StartRecord` response and `STARTING` arrive before the encoder has started, 7-15 ms early
 for x264 and 132-184 ms for NVENC, which would widen the spread to about 183 ms. Against 10 the
 largest residual was 50 ms without overload and 133 ms under encoder overload. Both values are
-Linux measurements, provisional for Windows until H5 (D2).
+Linux measurements, provisional for Windows until H5 (D2), which also checks the resolution of
+`time.monotonic()` on the shipped Windows Python: a coarse tick would add its size to every line's
+error (`docs/m0/clock.md` Limits).
 
 Pause edges come only from the `OBS_WEBSOCKET_OUTPUT_PAUSED` and `_RESUMED` events. The app never
 sends `PauseRecord`: a pause is whatever OBS reports, whoever caused it. On OBS's default profile
