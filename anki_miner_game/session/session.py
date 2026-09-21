@@ -167,11 +167,12 @@ DRIFT_SAMPLE_AFTER_S: Final = 10.0
 TICK_S: Final = 1.0
 """How often ``run`` posts a ``Tick``; the resolution of every timer below."""
 OBS_GONE_CHECK_S: Final = 5.0
-"""While recording with the connection lost: how often to ask whether OBS still runs (spec 6.4)."""
+"""While recording with the connection lost, and after a launch that found OBS not running: how
+often to ask whether OBS still runs (spec 6.4)."""
 OBS_GONE_ANSWERS: Final = 2
 """How many "not running" answers in a row make OBS gone; ``is_running`` answers ``True`` when it
-cannot tell, so one ``False`` is a confident answer, and two keep a process-list blip from ending a
-recording OBS still writes."""
+cannot tell, so one ``False`` is a confident answer, and two keep a process-list blip from ending,
+or finalising as an orphan, a recording OBS still writes."""
 RESTORE_RETRY_S: Final = 10.0
 """While idle with ``obs_restore.json`` still present: how often to try the restore (or, with no
 connection, to look for a running OBS) again."""
@@ -420,7 +421,12 @@ class SessionActor:
         """While recording: the clock reading when the connection dropped, the stop if OBS turns out gone."""
         self._next_gone_check = 0.0
         self._gone_answers = 0
-        """Consecutive ``is_running() == False`` answers since the connection dropped."""
+        """Consecutive ``is_running() == False`` answers since the connection dropped while recording,
+        or since a launch found OBS not running (``_confirming_absence``)."""
+        self._confirming_absence = False
+        """The launch found OBS not running: the tick asks again every ``OBS_GONE_CHECK_S``, the orphans
+        are finalised after ``OBS_GONE_ANSWERS`` ``False`` answers in a row, and a ``True`` connects
+        instead. Any connection ends it (its reconcile handles the orphans)."""
         self._next_restore = 0.0
         """The earliest ``now()`` for the next restore of ``obs_restore.json``: after a failed try, or
         after a switch OBS left unanswered (its question may still be open)."""
@@ -493,14 +499,17 @@ class SessionActor:
         """Launch duties (spec 6.2, 6.3, 10.3, 17 "Unclean previous exit").
 
         OBS running: connect; the ``_Connected`` event reconciles, restores ``obs_restore.json``
-        and finalises orphans. OBS not running (a confident answer: ``is_running`` says ``True``
-        when it cannot tell): nothing can be recording, so every session left in ``_incoming/`` is
-        finalised now; the restore waits for the next connection.
+        and finalises orphans. OBS not running: the tick confirms it the way it confirms "OBS gone"
+        (``OBS_GONE_ANSWERS`` answers in a row) before it finalises every session left in
+        ``_incoming/``, since a wrong answer would rename a video OBS still writes; the restore
+        waits for the next connection.
         """
         if await asyncio.to_thread(self._discovery.is_running):
             await self._ensure_connected()
         else:
-            await self._sweep_orphans(exclude=None)
+            self._confirming_absence = True
+            self._gone_answers = 1
+            self._next_gone_check = self._now() + OBS_GONE_CHECK_S
 
     async def _handle(self, msg: SessionInput) -> None:
         match msg:
@@ -548,6 +557,16 @@ class SessionActor:
     async def _on_tick(self, t: float) -> None:
         if self._start_deadline is not None and t >= self._start_deadline:
             await self._start_timed_out()
+        if self._confirming_absence and not self._connected and t >= self._next_gone_check:
+            self._next_gone_check = t + OBS_GONE_CHECK_S
+            if await asyncio.to_thread(self._discovery.is_running):
+                self._confirming_absence = False
+                await self._ensure_connected()  # its _Connected reconciles, finalises orphans and restores
+                return
+            self._gone_answers += 1
+            if self._gone_answers >= OBS_GONE_ANSWERS:
+                self._confirming_absence = False
+                await self._sweep_orphans(exclude=None)  # OBS confirmed absent: nothing can be recording
         s = self._session
         if s is not None and not self._connected and self._lost_ms is not None and t >= self._next_gone_check:
             self._next_gone_check = t + OBS_GONE_CHECK_S
@@ -607,6 +626,7 @@ class SessionActor:
         match ev.name:
             case ObsEventName.CONNECTED:
                 self._connected = True
+                self._confirming_absence = False
                 self._obs_status(SourceStatus.CONNECTED)
                 self._clear(BannerKey.OBS)
                 await self._reconcile()
@@ -1547,9 +1567,10 @@ class SessionActor:
         """Finalise every session left in ``_incoming/`` (spec 6.3 last row, 10.3) except ``exclude``.
 
         Called only when no recording can be writing one of them: after reconcile, after a
-        ``STOPPED`` with no session, and at launch with OBS not running. A ``finalise_pending`` one
-        (its video stayed locked) is retried by the first sweep after launch only (spec 10.3, 17),
-        since each locked video costs up to 9.8 s of rename retries inside a handler.
+        ``STOPPED`` with no session, and once a launch without OBS confirmed it absent. A
+        ``finalise_pending`` one (its video stayed locked) is retried by the first sweep after
+        launch only (spec 10.3, 17), since each locked video costs up to 9.8 s of rename retries
+        inside a handler.
         """
         states = {ManifestState.RECORDING}
         if not self._launch_swept:

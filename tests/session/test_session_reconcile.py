@@ -299,14 +299,49 @@ async def test_orphans_wait_while_obs_runs_but_cannot_be_reached(rig: Harness):
     assert "connection refused" in rig.banners()[BannerKey.OBS]
 
 
-async def test_orphans_are_finalised_at_launch_when_obs_is_not_running(rig: Harness):
+async def test_orphans_are_finalised_once_obs_is_confirmed_absent(rig: Harness):
     leave_session(rig, ORPHAN_STEM)
     save_restore(restore_path(), ObsRestore(profile="Mine", collection="Scenes"))
     rig.discovery.running = False
     await rig.start()
+    assert rig.finalised() == []  # one "not running" answer is not enough (spec 6.4's rule)
+    await rig.tick(T0 + 1.0)
+    assert rig.finalised() == []  # the second answer is asked OBS_GONE_CHECK_S after the first
+    await rig.tick(T0 + session_mod.OBS_GONE_CHECK_S)
     assert len(rig.finalised()) == 1
     assert rig.gateway.connects == 0
     assert restore_path().exists()  # waits for the next connection
+
+
+async def test_a_launch_that_misses_a_running_obs_connects_before_any_orphan_goes(rig: Harness):
+    video = leave_session(rig, OBS_STEM, records=(LineRecord(offset_ms=5_000, text="まえ", source="textractor"),))
+    rig.obs.record_active = True  # OBS still records the session a crashed app left
+    rig.obs.output_path = str(video)
+    rig.obs.output_duration = 60_000
+    rig.discovery.answers = [False]  # a process-list blip at launch
+    await rig.start()
+    assert rig.finalised() == []
+    assert rig.gateway.connects == 0
+    await rig.tick(T0 + session_mod.OBS_GONE_CHECK_S)  # True: connect, and reconcile finds the session
+    assert rig.gateway.connects == 1
+    assert rig.states() == [(AppState.RECORDING, SLUG)]  # row 4: resumed, not finalised
+    assert rig.finalised() == []
+    assert video.exists()
+
+
+async def test_a_connection_ends_the_absence_check_of_a_launch_without_obs(rig: Harness):
+    rig.discovery.running = False
+    await rig.start()
+    await rig.arm()  # launches OBS and connects before the second answer is due
+    await rig.started(ZERO)
+    rig.gateway.connected = False
+    await rig.emit(ObsEventName.CONNECTION_LOST, {}, ZERO + 2.0)
+    rig.discovery.running = False
+    for n in (1, 2):
+        await rig.tick(ZERO + 2.0 + n * session_mod.OBS_GONE_CHECK_S)
+    # OBS gone (spec 6.4), not the live session swept as an orphan while still `recording`
+    assert rig.actor.state is AppState.ARMED
+    assert Flag.OBS_EXITED in load_manifest(rig.finalised()[0]).flags
 
 
 async def test_launch_restores_the_profile_an_unclean_exit_left(rig: Harness):
