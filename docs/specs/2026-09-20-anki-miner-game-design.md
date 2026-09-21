@@ -1075,6 +1075,20 @@ First-run wizard: (1) OBS found, websocket enabled, connection made, profile and
 created; (2) text sources, each showing "waiting for a line" until one arrives; (3) output folder;
 (4) optional add-ons with sizes. Every step can be re-run from Settings.
 
+Step 1 states what the app changes in OBS, before it changes anything:
+
+- It turns on OBS's websocket server when it is off and OBS is closed (section 11.1).
+- It creates a profile and a scene collection named `Anki Miner Game` and switches OBS to them
+  while armed, back to the user's own when disarmed.
+- In its own profile only: the record folder, output size and frame rate, the `.mkv` container,
+  file splitting and automatic remux off, a recording encoder separate from the stream encoder so
+  that pause works, and the audio sample rate and channels copied from the user's profile. Stream
+  settings and the user's own profiles are not touched.
+- In its own collection only: the scene `Game` with the capture and audio inputs, set as the
+  program scene.
+- OBS itself turns off its offer to run the auto-configuration wizard for new profiles
+  (`[Basic] ConfigOnNewProfile` in `user.ini`) when the app creates its profile.
+
 Global control:
 
 - Windows: `RegisterHotKey` through `ctypes` with a `QAbstractNativeEventFilter` for `WM_HOTKEY`.
@@ -1092,13 +1106,15 @@ The hand-off text shown after each session (Appendix C) tells the user what to d
 | Situation | Behaviour |
 |---|---|
 | OBS not installed | wizard step 1 blocks with a download link; re-check button |
-| OBS not running | Arm launches it minimised, waits up to 30 s for the websocket |
+| OBS not running | Arm launches it minimised, waits up to 30 s for a successful `GetVersion` |
+| No `GetVersion` within the wait | banner: OBS may be waiting on a dialog in its own window, such as "OBS Studio Crash Detected" after a crash |
 | Websocket server disabled | fix automatically when OBS is closed; otherwise instructions and a Fix button |
 | Authentication fails | re-read `config.json` once; then a banner asking for the password override |
 | A required request is missing | refuse to arm; banner names the request and the OBS version |
 | An output is active at Arm | refuse; banner names it |
 | Profile or collection switch times out | restore the previous names; banner |
-| `StartRecord` fails | banner with OBS's message; state stays `armed` |
+| `CurrentProfileChanged` arrives, the switch's answer does not | banner "OBS is asking to restart", pointing at OBS's window (section 6.2) |
+| `StartRecord` fails | failure = no `STARTED` within 10 s of `StartRecord` and `GetRecordStatus` inactive. OBS answers a failed start with success and shows its message as a modal in its own window, never on the websocket (`docs/m0/obs-behaviour.md` item 11), so the banner says to look at OBS's window; state stays `armed` |
 | No text source connected at Start | recording starts; persistent warning banner |
 | Connection lost while recording | lines keep being journalled on `EventClock`; reconcile on reconnect |
 | OBS exits while recording | finalise with flag `obs_exited` |
