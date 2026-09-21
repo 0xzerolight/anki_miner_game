@@ -14,15 +14,17 @@ marked provisional; they come from source reading (``docs/m0/source-findings.md`
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable
+import sys
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Final
 
 from anki_miner_game import paths
 from anki_miner_game.interfaces.obs import ObsGateway
 from anki_miner_game.models.config import AppConfig
-from anki_miner_game.models.constants import OBS_PROFILE_NAME
-from anki_miner_game.models.obs import ObsError, ProvisionResult
+from anki_miner_game.models.constants import OBS_COLLECTION_NAME, OBS_PROFILE_NAME, OBS_SCENE_NAME
+from anki_miner_game.models.obs import ObsError, ObsRequestError, ProvisionResult
+from anki_miner_game.models.profile import AudioMode, CaptureKind, GameProfile
 
 log = logging.getLogger(__name__)
 
@@ -93,6 +95,9 @@ PROFILE_SWITCH_TIMEOUT_S: Final = 15.0
 
 PROFILE_POLL_S: Final = 0.2
 
+RESOURCE_NOT_FOUND: Final = 600
+"""obs-websocket ``RequestStatus::ResourceNotFound``."""
+
 
 def scaled_output_size(base_width: int, base_height: int, max_height: int) -> tuple[int, int]:
     """Output size for a base (canvas) size: height capped at ``max_height``, aspect kept.
@@ -117,6 +122,132 @@ def _config_bool(value: str | None) -> bool:
         return int(text) != 0
     except ValueError:
         return False
+
+
+# Scene collection -------------------------------------------------------------------------------
+
+GAME_CAPTURE: Final = "game_capture"
+WINDOW_CAPTURE: Final = "window_capture"
+APP_AUDIO_CAPTURE: Final = "wasapi_process_output_capture"
+WINDOWS_DESKTOP_AUDIO: Final = "wasapi_output_capture"
+XCOMPOSITE: Final = "xcomposite_input"
+PIPEWIRE: Final = "pipewire-screen-capture-source"
+PULSE_DESKTOP_AUDIO: Final = "pulse_output_capture"
+
+GAME_CAPTURE_INPUT: Final = "Game Capture"
+WINDOW_CAPTURE_INPUT: Final = "Window Capture"
+XCOMPOSITE_INPUT: Final = "Window Capture (X11)"
+PIPEWIRE_INPUT: Final = "Screen Capture (PipeWire)"
+APP_AUDIO_INPUT: Final = "Game Audio"
+DESKTOP_AUDIO_INPUT: Final = "Desktop Audio Capture"
+"""A regular input, not OBS's ``desktop1`` special input: a collection OBS creates after its first run
+has no special audio inputs (``obs-studio@ba2f32bd frontend/widgets/OBSBasic_SceneCollections.cpp:1033-1048``,
+``:1163-1165``). The name differs from the special input's default ("Desktop Audio") so both can exist."""
+
+WINDOWS_INPUTS: Final = (GAME_CAPTURE_INPUT, WINDOW_CAPTURE_INPUT, APP_AUDIO_INPUT, DESKTOP_AUDIO_INPUT)
+LINUX_INPUTS: Final = (XCOMPOSITE_INPUT, PIPEWIRE_INPUT, DESKTOP_AUDIO_INPUT)
+
+XCOMPOSITE_PLACEHOLDER: Final = "0\r\nno window pinned\r\nanki-miner-game"
+"""``capture_window`` of the X11 input while no window is pinned: it captures nothing, and OBS 32.2.2
+aborts when the windows of an ``xcomposite_input`` with an empty ``capture_window`` are listed
+(R1 side finding 2, ``docs/m0/clock.md``). Provisional until R2."""
+
+SPECIAL_AUDIO_SLOTS: Final = ("desktop1", "desktop2", "mic1", "mic2", "mic3", "mic4")
+"""``GetSpecialInputs`` fields; every one present in the app's collection is muted: the microphones by
+spec 11.3, the desktop ones because the app's own inputs carry the game audio."""
+
+
+@dataclass(frozen=True)
+class InputSpec:
+    name: str
+    kind: str
+    settings: Mapping[str, object]
+
+
+@dataclass(frozen=True)
+class CollectionPlan:
+    """What the scene ``Game`` should hold for one game profile on one OBS."""
+
+    video: tuple[InputSpec, ...]
+    """Bottom to top."""
+    audio: tuple[InputSpec, ...]
+    capture: str | None
+    """The input kind that captures the game (the dialog's "capture method in use"); ``None`` when none is available."""
+
+
+def _is_windows(platform: str) -> bool:
+    return platform == "win32"
+
+
+def plan_collection(profile: GameProfile, kinds: frozenset[str], platform: str) -> CollectionPlan:
+    """Spec 11.3's collection table for ``profile``, skipping every input kind OBS does not report.
+
+    A ``capture.kind`` that cannot work here (another platform's kind, a missing input kind, a
+    window kind without a pinned window) falls back to ``auto``. The input the window list is read
+    from is always present when its kind is: ``game_capture`` on Windows, ``xcomposite_input`` on X11
+    (idle while it does not capture).
+    """
+    if _is_windows(platform):
+        video, capture, audio = _plan_windows(profile, kinds)
+    else:
+        video, capture, audio = _plan_linux(profile, kinds)
+    ordered = sorted(video, key=lambda spec: -get_video_source_priority(spec.kind))
+    return CollectionPlan(video=tuple(ordered), audio=tuple(audio), capture=capture)
+
+
+def _plan_windows(profile: GameProfile, kinds: frozenset[str]) -> tuple[list[InputSpec], str | None, list[InputSpec]]:
+    window = profile.capture.window
+    pinned = window if window and parse_obs_window_target(window) is not None else None
+    kind = profile.capture.kind
+    window_kind = kind is CaptureKind.WINDOW and pinned is not None and WINDOW_CAPTURE in kinds
+    game_kind = kind is CaptureKind.GAME and GAME_CAPTURE in kinds
+    video: list[InputSpec] = []
+    capture: str | None = None
+    if pinned is not None and WINDOW_CAPTURE in kinds and not game_kind:
+        # The capture itself for the window kind; for auto, the fallback underneath game capture
+        # for games that refuse the hook.
+        video.append(InputSpec(WINDOW_CAPTURE_INPUT, WINDOW_CAPTURE, {"window": pinned, "cursor": False}))
+        capture = WINDOW_CAPTURE
+    if GAME_CAPTURE in kinds:
+        settings: dict[str, object]
+        if window_kind:
+            # Kept only for its window list, which keeps minimized windows; it captures nothing.
+            settings = {"capture_mode": "window", "window": ""}
+        elif pinned is not None:
+            settings = {"capture_mode": "window", "window": pinned, "capture_cursor": False}
+        else:
+            settings = {"capture_mode": "any_fullscreen", "capture_cursor": False}
+        video.append(InputSpec(GAME_CAPTURE_INPUT, GAME_CAPTURE, settings))
+        if not window_kind:
+            capture = GAME_CAPTURE
+    audio: list[InputSpec] = []
+    if profile.audio.mode is AudioMode.APP and pinned is not None and APP_AUDIO_CAPTURE in kinds:
+        audio.append(InputSpec(APP_AUDIO_INPUT, APP_AUDIO_CAPTURE, {"window": pinned}))
+    elif WINDOWS_DESKTOP_AUDIO in kinds:
+        audio.append(InputSpec(DESKTOP_AUDIO_INPUT, WINDOWS_DESKTOP_AUDIO, {"device_id": "default"}))
+    return video, capture, audio
+
+
+def _plan_linux(profile: GameProfile, kinds: frozenset[str]) -> tuple[list[InputSpec], str | None, list[InputSpec]]:
+    window = profile.capture.window
+    pinned = window if window and _X11_SEP in window else None
+    wants_pipewire = profile.capture.kind is CaptureKind.PIPEWIRE and PIPEWIRE in kinds
+    use_xcomposite = pinned is not None and XCOMPOSITE in kinds and not wants_pipewire
+    use_pipewire = not use_xcomposite and PIPEWIRE in kinds
+    video: list[InputSpec] = []
+    capture: str | None = None
+    if use_pipewire:
+        video.append(InputSpec(PIPEWIRE_INPUT, PIPEWIRE, {"ShowCursor": False}))
+        capture = PIPEWIRE
+    if XCOMPOSITE in kinds:
+        target = pinned if use_xcomposite and pinned is not None else XCOMPOSITE_PLACEHOLDER
+        video.append(InputSpec(XCOMPOSITE_INPUT, XCOMPOSITE, {"capture_window": target, "show_cursor": False}))
+        if use_xcomposite:
+            capture = XCOMPOSITE
+    audio: list[InputSpec] = []
+    if PULSE_DESKTOP_AUDIO in kinds:
+        audio.append(InputSpec(DESKTOP_AUDIO_INPUT, PULSE_DESKTOP_AUDIO, {"device_id": "default"}))
+    return video, capture, audio
 
 
 class ObsProvisioner:
@@ -156,8 +287,114 @@ class ObsProvisioner:
                 changed = True
         return ProvisionResult(changed=changed, needs_restart=needs_restart)
 
+    async def ensure_collection(self, profile: GameProfile) -> ProvisionResult:
+        """Make the app's scene collection current (creating it when missing), make ``Game`` its
+        program scene, and set the scene's inputs and mutes for ``profile`` (spec 11.3).
+
+        Only the app's own inputs (``WINDOWS_INPUTS`` / ``LINUX_INPUTS``) are created, changed or
+        removed; any other input in the collection is left as it is.
+        """
+        changed = await self._use_collection()
+        changed |= await self._use_scene()
+        kinds = frozenset((await self._request("GetInputKindList")).get("inputKinds") or [])
+        plan = plan_collection(profile, kinds, self._current_platform())
+        log.info("OBS capture for %s: %s", profile.slug, plan.capture or "none available")
+        changed |= await self._apply_inputs(plan)
+        changed |= await self._mute_special_inputs()
+        return ProvisionResult(changed=changed, needs_restart=False)
+
+    def _current_platform(self) -> str:
+        return self._platform or sys.platform
+
     async def _request(self, name: str, **fields: Any) -> dict[str, Any]:
         return await self._gateway.request(name, **fields)
+
+    async def _use_collection(self) -> bool:
+        listing = await self._request("GetSceneCollectionList")
+        if listing.get("currentSceneCollectionName") == OBS_COLLECTION_NAME:
+            return False
+        # Both requests block until the switch is done (source findings 8).
+        if OBS_COLLECTION_NAME in (listing.get("sceneCollections") or []):
+            await self._request("SetCurrentSceneCollection", sceneCollectionName=OBS_COLLECTION_NAME)
+        else:
+            await self._request("CreateSceneCollection", sceneCollectionName=OBS_COLLECTION_NAME)
+        return True
+
+    async def _use_scene(self) -> bool:
+        listing = await self._request("GetSceneList")
+        names = {scene.get("sceneName") for scene in listing.get("scenes") or [] if isinstance(scene, dict)}
+        changed = False
+        if OBS_SCENE_NAME not in names:
+            await self._request("CreateScene", sceneName=OBS_SCENE_NAME)
+            changed = True
+        if listing.get("currentProgramSceneName") != OBS_SCENE_NAME:
+            await self._request("SetCurrentProgramScene", sceneName=OBS_SCENE_NAME)
+            changed = True
+        return changed
+
+    async def _input_settings(self, name: str) -> tuple[str, dict[str, Any]] | None:
+        """``(kind, settings)`` of an input of the current collection, ``None`` when it does not exist."""
+        try:
+            data = await self._request("GetInputSettings", inputName=name)
+        except ObsRequestError as exc:
+            if exc.code == RESOURCE_NOT_FOUND:
+                return None
+            raise
+        settings = data.get("inputSettings")
+        return str(data.get("inputKind")), settings if isinstance(settings, dict) else {}
+
+    async def _apply_inputs(self, plan: CollectionPlan) -> bool:
+        managed = WINDOWS_INPUTS if _is_windows(self._current_platform()) else LINUX_INPUTS
+        wanted = {spec.name: spec for spec in plan.video + plan.audio}
+        existing: dict[str, dict[str, Any]] = {}
+        changed = False
+        for name in managed:
+            found = await self._input_settings(name)
+            if found is None:
+                continue
+            kind, settings = found
+            spec = wanted.get(name)
+            if spec is None or spec.kind != kind:
+                await self._request("RemoveInput", inputName=name)
+                changed = True
+            else:
+                existing[name] = settings
+        # CreateInput puts the new item on top: once a video input has to be created, every video
+        # input planned above it is created again, so the window capture fallback stays underneath.
+        missing_below = False
+        for spec in plan.video:
+            if spec.name not in existing:
+                missing_below = True
+            elif missing_below:
+                await self._request("RemoveInput", inputName=spec.name)
+                del existing[spec.name]
+        for spec in plan.video + plan.audio:
+            settings = dict(spec.settings)
+            if spec.name not in existing:
+                await self._request(
+                    "CreateInput",
+                    sceneName=OBS_SCENE_NAME,
+                    inputName=spec.name,
+                    inputKind=spec.kind,
+                    inputSettings=settings,
+                )
+                changed = True
+            elif any(existing[spec.name].get(key) != value for key, value in settings.items()):
+                await self._request("SetInputSettings", inputName=spec.name, inputSettings=settings)
+                changed = True
+        return changed
+
+    async def _mute_special_inputs(self) -> bool:
+        special = await self._request("GetSpecialInputs")
+        changed = False
+        for slot in SPECIAL_AUDIO_SLOTS:
+            name = special.get(slot)
+            if not isinstance(name, str) or not name:
+                continue
+            if not (await self._request("GetInputMute", inputName=name)).get("inputMuted"):
+                await self._request("SetInputMute", inputName=name, inputMuted=True)
+                changed = True
+        return changed
 
     async def _use_profile(self) -> bool:
         listing = await self._request("GetProfileList")
