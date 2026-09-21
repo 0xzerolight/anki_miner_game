@@ -82,6 +82,13 @@ def test_incoming_files_are_named_after_the_obs_file(tmp_path, output_path):
     )
 
 
+@pytest.mark.parametrize("output_path", ["", ".", "..", "C:\\Users\\u\\Videos\\", "/v/_incoming/", "no extension"])
+def test_an_output_path_that_names_no_video_file_is_refused(tmp_path, output_path):
+    # "" would name ``incoming`` itself, and ".." its parent: finalise would move the folder.
+    with pytest.raises(ValueError, match="names no video file"):
+        incoming_files(tmp_path, output_path)
+
+
 def test_the_game_folder_is_the_sanitised_title_beside_incoming(tmp_path):
     assert game_folder(tmp_path / "_incoming", "Fate/stay night") == tmp_path / "Fate stay night"
 

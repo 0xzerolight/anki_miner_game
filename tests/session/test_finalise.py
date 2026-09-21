@@ -222,6 +222,19 @@ def test_a_session_number_no_stem_can_carry_is_reported(tmp_path):
         finalise(_session(tmp_path, RECORDS, index=0), CFG)
 
 
+@pytest.mark.parametrize("output_path", ["", ".."])
+def test_a_manifest_whose_output_path_names_no_video_is_reported_and_moves_nothing(tmp_path, output_path):
+    # Another session is still recording in _incoming/; the malformed manifest must not carry it off.
+    _session(tmp_path, RECORDS)
+    broken = tmp_path / "_incoming" / "broken.session.json"
+    write_manifest_atomic(broken, replace(RECORDED, obs=replace(RECORDED.obs, output_path=output_path)))
+    before = _tree(tmp_path)
+    with pytest.raises(FinaliseError, match="names no video file") as caught:
+        finalise(broken, CFG)
+    assert caught.value.manifest_path == broken
+    assert _tree(tmp_path) == before
+
+
 @pytest.mark.parametrize(
     ("records", "changes"),
     [

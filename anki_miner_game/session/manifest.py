@@ -34,8 +34,13 @@ def incoming_files(incoming: Path, output_path: str) -> IncomingFiles:
 
     Only the file name of ``output_path`` is used, split on ``/`` and ``\\`` alike, so a Windows path
     or a Flatpak sandbox path names the same files inside ``incoming``.
+
+    Raises ``ValueError`` when that name has no extension: ``""`` or ``".."`` would name ``incoming``
+    or its parent, and finalise would move the folder.
     """
     video = PureWindowsPath(output_path).name  # PureWindowsPath treats both separators as separators
+    if not PurePath(video).suffix:
+        raise ValueError(f"the recording path {output_path!r} names no video file")
     stem = PurePath(video).stem
     return IncomingFiles(
         video=incoming / video,
