@@ -2,7 +2,9 @@
 
 Two ports, both on 127.0.0.1. ``FeedServer`` is what ``app.py`` composes; a
 :class:`FeedPortInUseError` from :meth:`FeedServer.start` means "disable the feed for the
-run and raise a banner naming ``err.port``" (spec 17).
+run and raise a banner naming ``err.port``" (spec 17). Any other ``OSError`` from it (a
+``page.html`` missing from the bundle, a bind refused for another reason) also means "feed
+off + banner", with the error's text instead of a port.
 """
 
 from __future__ import annotations
@@ -45,7 +47,12 @@ class FeedServer:
         return [addr for addr in found if addr is not None]
 
     async def start(self) -> None:
-        """Bind both ports; on any failure nothing stays bound."""
+        """Bind both ports; on any failure nothing stays bound. A no-op while running.
+
+        Raises ``FeedPortInUseError`` for a port that cannot be bound, and ``OSError`` otherwise.
+        """
+        if self._http is not None:
+            return
         await self._ws.start()
         http = HttpFeedServer(self._http_port, ws_port=self._ws.port)
         try:

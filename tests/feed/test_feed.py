@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 from websockets.asyncio.client import connect
 
-from anki_miner_game.feed import FEED_HOST, FeedPortInUseError, FeedServer
+from anki_miner_game.feed import FEED_HOST, FeedPortInUseError, FeedServer, http_server
 
 PAGE = Path(__file__).resolve().parents[2] / "anki_miner_game" / "feed" / "page.html"
 
@@ -66,6 +66,25 @@ async def test_broadcast_before_start_and_after_stop_is_a_no_op() -> None:
     await server.stop()
     server.broadcast("ignored")
     await server.stop()  # idempotent
+
+
+async def test_a_second_start_keeps_the_running_servers(feed: FeedServer) -> None:
+    bound = feed.bound_addresses()
+    await feed.start()
+    assert feed.bound_addresses() == bound
+    status, _, _ = await asyncio.to_thread(_get, feed.page_url)
+    assert status == 200
+
+
+async def test_a_page_missing_from_the_bundle_raises_an_oserror_and_binds_nothing(monkeypatch) -> None:
+    # Not a FeedPortInUseError, but still an OSError: the composition treats any OSError from
+    # start() as "feed off + banner".
+    monkeypatch.setattr(http_server, "PAGE_PATH", PAGE.with_name("missing.html"))
+    server = FeedServer(ws_port=0, http_port=0)
+    with pytest.raises(OSError) as exc:
+        await server.start()
+    assert not isinstance(exc.value, FeedPortInUseError)
+    assert server.bound_addresses() == []
 
 
 async def test_both_servers_bind_loopback_only(feed: FeedServer) -> None:
