@@ -1,13 +1,16 @@
 """``obs/discovery.py``: install lookup, config roots, the websocket config, launch and readiness (spec 11.1, 17)."""
 
 import json
+import logging
+import sys
+import time
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
 import pytest
 
 from anki_miner_game.models.config import AppConfig, ObsSettings
-from anki_miner_game.models.obs import ObsConfigError, ObsCredentials, ObsInstall, WsConfig
+from anki_miner_game.models.obs import ObsConfigError, ObsConnectError, ObsCredentials, ObsInstall, WsConfig
 from anki_miner_game.obs import discovery
 from anki_miner_game.obs.discovery import LocalObsDiscovery
 
@@ -429,3 +432,242 @@ def test_missing_config_with_a_port_override_connects_without_a_file(tmp_path):
     cfg = AppConfig(obs=ObsSettings(port=5000))
 
     assert make(tmp_path).credentials(cfg) == ObsCredentials(host="127.0.0.1", port=5000, password=None)
+
+
+# --- is_running --------------------------------------------------------------------------------
+
+
+def test_linux_sees_an_obs_process(tmp_path):
+    assert native_linux(tmp_path, running=["bash", "kwin_wayland", "obs"]).is_running()
+
+
+def test_linux_ignores_processes_that_only_look_like_obs(tmp_path):
+    assert not native_linux(tmp_path, running=["bash", "obs-ffmpeg-mux", "obsidian", "xdg-dbus-proxy"]).is_running()
+
+
+def test_linux_skips_entries_that_are_not_processes_or_vanish(tmp_path):
+    proc = fake_proc(tmp_path / "proc", [])
+    (proc / "self").mkdir()
+    (proc / "self" / "comm").write_text("obs\n", encoding="utf-8")  # not a pid folder
+    (proc / "123").mkdir()  # exited between the listing and the read: no comm
+    obs = LocalObsDiscovery(AppConfig, which=which_from({"obs": "/usr/bin/obs"}), runner=FakeRunner(), proc_root=proc)
+
+    assert not obs.is_running()
+
+
+def test_linux_ignores_another_users_obs(tmp_path, monkeypatch):
+    obs = native_linux(tmp_path, running=["obs"])
+    monkeypatch.setattr(discovery, "_own_uid", lambda: (tmp_path / "proc").stat().st_uid + 1)
+
+    assert not obs.is_running()
+
+
+def test_windows_asks_tasklist_for_obs64(tmp_path):
+    runner = FakeRunner(lambda argv: (0, '"obs64.exe","4242","Console","1","250,000 K"\r\n'))
+    obs = make(tmp_path, platform="win32", runner=runner)
+
+    assert obs.is_running()
+    assert runner.ran == [("tasklist", "/FI", "IMAGENAME eq obs64.exe", "/FO", "CSV", "/NH")]
+
+
+@pytest.mark.parametrize(
+    "answer", [(0, "INFO: No tasks are running which match the specified criteria.\r\n"), (-1, "")]
+)
+def test_windows_without_obs64_is_not_running(tmp_path, answer):
+    assert not make(tmp_path, platform="win32", runner=FakeRunner(lambda argv: answer)).is_running()
+
+
+# --- ensure_server_enabled ---------------------------------------------------------------------
+
+
+def read_json(path: Path) -> dict:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def test_an_enabled_server_is_left_alone(tmp_path):
+    path = write_ws(native_root(), FULL)
+    before = path.read_bytes()
+
+    assert native_linux(tmp_path, running=["obs"]).ensure_server_enabled()
+    assert path.read_bytes() == before
+
+
+def test_enables_the_server_while_obs_is_closed_and_keeps_everything_else(tmp_path):
+    settings = {**FULL, "server_enabled": False, "some_future_key": [1, 2]}
+    path = write_ws(native_root(), settings)
+
+    assert native_linux(tmp_path).ensure_server_enabled()
+    assert read_json(path) == {**settings, "server_enabled": True}
+
+
+def test_enabling_generates_a_password_when_auth_is_required_and_none_exists(tmp_path):
+    path = write_ws(native_root(), {**FULL, "server_enabled": False, "server_password": ""})
+
+    assert native_linux(tmp_path).ensure_server_enabled()
+
+    written = read_json(path)
+    assert written["server_enabled"] is True and written["auth_required"] is True
+    assert len(written["server_password"]) == 16 and written["server_password"].isalnum()
+    assert written["server_password"].isascii()
+
+
+def test_enabling_generates_no_password_when_auth_is_off(tmp_path):
+    path = write_ws(native_root(), {**FULL, "server_enabled": False, "auth_required": False, "server_password": ""})
+
+    assert native_linux(tmp_path).ensure_server_enabled()
+    assert read_json(path) == {**FULL, "server_enabled": True, "auth_required": False, "server_password": ""}
+
+
+def test_generated_passwords_differ(tmp_path):
+    passwords = set()
+    for _ in range(3):
+        path = write_ws(native_root(), {"server_enabled": False})
+        assert native_linux(tmp_path).ensure_server_enabled()
+        passwords.add(read_json(path)["server_password"])
+
+    assert len(passwords) == 3
+
+
+def test_a_disabled_server_is_left_alone_while_obs_runs(tmp_path):
+    path = write_ws(native_root(), {**FULL, "server_enabled": False})
+    before = path.read_bytes()
+
+    assert not native_linux(tmp_path, running=["obs"]).ensure_server_enabled()
+    assert path.read_bytes() == before
+
+
+def test_a_missing_config_is_created_enabled_while_obs_is_closed(tmp_path):
+    obs = native_linux(tmp_path)
+
+    assert obs.ensure_server_enabled()
+
+    ws = obs.read_ws_config()
+    assert ws is not None
+    assert (ws.server_enabled, ws.port, ws.auth_required) == (True, 4455, True)
+    assert ws.password is not None and len(ws.password) == 16
+    assert read_json(native_root() / WS_CONFIG)["first_load"] is False
+
+
+def test_a_missing_config_is_not_created_while_obs_runs(tmp_path):
+    assert not native_linux(tmp_path, running=["obs"]).ensure_server_enabled()
+    assert not (native_root() / WS_CONFIG).exists()
+
+
+def test_nothing_to_enable_without_an_install(tmp_path):
+    assert not make(tmp_path).ensure_server_enabled()
+
+
+def test_an_unreadable_config_is_not_overwritten(tmp_path):
+    path = write_ws(native_root(), None, raw="{not json")
+
+    with pytest.raises(ObsConfigError):
+        native_linux(tmp_path).ensure_server_enabled()
+    assert path.read_text(encoding="utf-8") == "{not json"
+
+
+def test_a_config_that_cannot_be_written_raises_obs_config_error(tmp_path, monkeypatch):
+    write_ws(native_root(), {**FULL, "server_enabled": False})
+
+    def refuse(*args: object, **kwargs: object) -> None:
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(discovery, "write_text_atomic", refuse)
+
+    with pytest.raises(ObsConfigError):
+        native_linux(tmp_path).ensure_server_enabled()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes")
+def test_the_written_config_is_private(tmp_path):
+    path = write_ws(native_root(), {"server_enabled": False})
+
+    assert native_linux(tmp_path).ensure_server_enabled()
+    assert path.stat().st_mode & 0o077 == 0
+
+
+def test_enabling_never_logs_the_password(tmp_path, caplog):
+    caplog.set_level(logging.DEBUG)
+    path = write_ws(native_root(), {"server_enabled": False})
+
+    assert native_linux(tmp_path).ensure_server_enabled()
+
+    password = read_json(path)["server_password"]
+    assert password not in caplog.text
+
+
+# --- launch ------------------------------------------------------------------------------------
+
+
+def test_windows_launches_obs64_minimised_from_its_folder(tmp_path, monkeypatch):
+    monkeypatch.setenv("PROGRAMFILES", str(tmp_path / "pf"))
+    exe = windows_exe(tmp_path / "pf" / "obs-studio")
+    runner = FakeRunner(lambda argv: (0, "INFO: No tasks are running which match the specified criteria.\r\n"))
+
+    make(tmp_path, platform="win32", runner=runner).launch()
+
+    assert runner.spawned == [((str(exe), "--minimize-to-tray"), exe.parent)]
+
+
+def test_linux_launches_native_obs_minimised(tmp_path):
+    runner = FakeRunner()
+
+    native_linux(tmp_path, runner=runner).launch()
+
+    assert runner.spawned == [(("/usr/bin/obs", "--minimize-to-tray"), None)]
+
+
+def test_linux_launches_the_flatpak_minimised(tmp_path):
+    runner = FakeRunner(flatpak_installed)
+
+    make(tmp_path, which={"flatpak": "/usr/bin/flatpak"}, runner=runner).launch()
+
+    assert runner.spawned == [(("/usr/bin/flatpak", "run", "com.obsproject.Studio", "--minimize-to-tray"), None)]
+
+
+def test_launch_does_not_start_a_second_obs(tmp_path):
+    """A second instance would stop at OBS's modal "already running" question (S1 section 4)."""
+    runner = FakeRunner()
+
+    native_linux(tmp_path, runner=runner, running=["obs"]).launch()
+
+    assert runner.spawned == []
+
+
+def test_launch_without_an_install_raises(tmp_path):
+    with pytest.raises(ObsConnectError):
+        make(tmp_path).launch()
+
+
+def test_launch_reports_a_program_that_cannot_start(tmp_path):
+    runner = FakeRunner(spawn_error=FileNotFoundError(2, "No such file or directory"))
+
+    with pytest.raises(ObsConnectError):
+        native_linux(tmp_path, runner=runner).launch()
+
+
+# --- the default process runner ----------------------------------------------------------------
+
+
+def test_the_default_runner_returns_exit_code_and_stdout():
+    code, out = discovery.SubprocessRunner().run([sys.executable, "-c", "print('hi'); raise SystemExit(3)"])
+
+    assert (code, out.strip()) == (3, "hi")
+
+
+def test_the_default_runner_reports_a_missing_program_as_minus_one(tmp_path):
+    assert discovery.SubprocessRunner().run([str(tmp_path / "no-such-program")]) == (-1, "")
+
+
+def test_the_default_runner_spawns_in_the_given_folder(tmp_path):
+    marker = tmp_path / "started"
+    discovery.SubprocessRunner().spawn([sys.executable, "-c", "open('started', 'w').close()"], tmp_path)
+
+    deadline = time.monotonic() + 10
+    while not marker.exists():
+        assert time.monotonic() < deadline, "the spawned program never ran"
+        time.sleep(0.02)
+
+
+def test_the_default_runner_raises_when_a_program_cannot_start(tmp_path):
+    with pytest.raises(OSError):
+        discovery.SubprocessRunner().spawn([str(tmp_path / "no-such-program")], None)

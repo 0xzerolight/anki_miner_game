@@ -11,6 +11,13 @@
 - ``read_ws_config`` / ``credentials``: ``plugin_config/obs-websocket/config.json`` under that root,
   read at every call. A key that is missing or of the wrong JSON type takes obs-websocket's own
   default, as ``Config::Load`` does (``docs/m0/source-findings.md`` section 5).
+- ``ensure_server_enabled``: only while OBS is closed, since obs-websocket reads the file once at
+  start. Sets ``server_enabled``, keeps every other key, and adds a password only when auth is
+  required and none exists. A missing file is created that way.
+- ``is_running``: an ``obs`` process of this user in ``/proc`` (native and Flatpak alike), or
+  ``obs64.exe`` in ``tasklist`` on Windows.
+- ``launch``: the install's command plus ``--minimize-to-tray``, detached, in the folder it needs;
+  nothing while OBS already runs.
 
 The password is never logged; ``WsConfig`` and ``ObsCredentials`` keep it out of ``repr``.
 
@@ -24,14 +31,19 @@ reads it once at start) and all other keys are kept.
 import json
 import logging
 import os
+import secrets
 import shutil
+import string
+import subprocess
 import sys
+import threading
 from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path, PurePath
 from typing import Any, Final, Protocol
 
 from anki_miner_game.models.config import AppConfig
-from anki_miner_game.models.obs import ObsConfigError, ObsCredentials, ObsInstall, WsConfig
+from anki_miner_game.models.obs import ObsConfigError, ObsConnectError, ObsCredentials, ObsInstall, WsConfig
+from anki_miner_game.store import write_text_atomic
 
 log = logging.getLogger(__name__)
 
@@ -56,6 +68,18 @@ DEFAULT_WS_PORT: Final = 4455
 """obs-websocket's defaults (``src/Config.h``): server off, port 4455, auth on, no password."""
 DEFAULT_WS_ENABLED: Final = False
 DEFAULT_WS_AUTH_REQUIRED: Final = True
+PASSWORD_ALPHABET: Final = string.ascii_letters + string.digits
+PASSWORD_LENGTH: Final = 16
+"""What obs-websocket's own ``Utils::Crypto::GeneratePassword`` makes."""
+
+LINUX_PROCESS: Final = "obs"
+"""``comm`` of the OBS main process, native or Flatpak."""
+WINDOWS_PROCESS: Final = "obs64.exe"
+TASKLIST: Final = ("tasklist", "/FI", f"IMAGENAME eq {WINDOWS_PROCESS}", "/FO", "CSV", "/NH")
+RUN_TIMEOUT_S: Final = 10.0
+
+_NO_WINDOW: Final[int] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+_DETACHED: Final[int] = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
 
 
 class ProcessRunner(Protocol):
@@ -68,6 +92,39 @@ class ProcessRunner(Protocol):
     def spawn(self, argv: Sequence[str], cwd: Path | None) -> None:
         """Start a program that outlives this app, never waited for; ``OSError`` when it cannot start."""
         ...
+
+
+class SubprocessRunner:
+    """The real ``ProcessRunner``: no console window on Windows, OBS in its own session on POSIX."""
+
+    def run(self, argv: Sequence[str]) -> tuple[int, str]:
+        try:
+            done = subprocess.run(
+                list(argv),
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                errors="replace",
+                timeout=RUN_TIMEOUT_S,
+                creationflags=_NO_WINDOW,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return -1, ""
+        return done.returncode, done.stdout
+
+    def spawn(self, argv: Sequence[str], cwd: Path | None) -> None:
+        proc = subprocess.Popen(
+            list(argv),
+            cwd=cwd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=_DETACHED,
+            start_new_session=True,  # POSIX: a signal to this app's process group never reaches OBS
+        )
+        # Reap OBS when it exits before this app does, so it leaves no zombie behind.
+        threading.Thread(target=proc.wait, name="obs-reaper", daemon=True).start()
 
 
 RegistryReader = Callable[[str], str | None]
@@ -109,14 +166,14 @@ class LocalObsDiscovery:
         platform: str = sys.platform,
         which: Callable[[str], str | None] = shutil.which,
         registry: RegistryReader = read_registry_install_dir,
-        runner: ProcessRunner,
+        runner: ProcessRunner | None = None,
         proc_root: Path = Path("/proc"),
     ) -> None:
         self._config = config
         self._windows = platform == "win32"
         self._which = which
         self._registry = registry
-        self._runner = runner
+        self._runner = runner or SubprocessRunner()
         self._proc_root = proc_root
         self._install: ObsInstall | None = None
         self._looked = False
@@ -157,9 +214,13 @@ class LocalObsDiscovery:
             return ObsInstall(argv=(flatpak, "run", FLATPAK_APP_ID), cwd=None, flatpak=True)
         return None
 
+    def _found(self) -> ObsInstall | None:
+        """What the latest ``find_install`` found, looking once if none ran."""
+        return self._install if self._looked else self.find_install()
+
     def config_root(self) -> Path | None:
         """The config root of the install the latest ``find_install`` found (looking once if none ran)."""
-        install = self._install if self._looked else self.find_install()
+        install = self._found()
         if install is None:
             return None
         if install.flatpak:
@@ -184,6 +245,40 @@ class LocalObsDiscovery:
         root = self.config_root()
         return None if root is None else root / WS_CONFIG_PATH
 
+    def ensure_server_enabled(self) -> bool:
+        """Turn the websocket server on while OBS is closed; ``False`` while it is off and OBS runs.
+
+        Also ``False`` without an install. Raises ``ObsConfigError`` when the file cannot be read,
+        parsed or written; an unusable file is never overwritten.
+        """
+        path = self._ws_config_path()
+        if path is None:
+            return False
+        data = _load_json(path)
+        if data is not None and _ws_config(path, data).server_enabled:
+            return True
+        if self.is_running():
+            log.info("OBS websocket server is off while OBS runs; %s left alone", path)
+            return False
+        if data is None:
+            data = {
+                "first_load": False,  # as obs-websocket leaves it after its own first load
+                "server_enabled": DEFAULT_WS_ENABLED,
+                "server_port": DEFAULT_WS_PORT,
+                "alerts_enabled": False,
+                "auth_required": DEFAULT_WS_AUTH_REQUIRED,
+            }
+        current = _ws_config(path, data)
+        data["server_enabled"] = True
+        if current.auth_required and current.password is None:
+            data["server_password"] = "".join(secrets.choice(PASSWORD_ALPHABET) for _ in range(PASSWORD_LENGTH))
+        try:
+            write_text_atomic(path, json.dumps(data, indent=4) + "\n", mode=0o600)
+        except OSError as exc:
+            raise ObsConfigError(f"{path}: cannot be written ({exc.strerror or type(exc).__name__})") from exc
+        log.info("OBS websocket server turned on in %s", path)
+        return True
+
     def credentials(self, cfg: AppConfig) -> ObsCredentials:
         override = cfg.obs
         try:
@@ -205,6 +300,48 @@ class LocalObsDiscovery:
         elif ws is not None and ws.auth_required:
             password = ws.password
         return ObsCredentials(host=override.host, port=port, password=password)
+
+    # --- process ---------------------------------------------------------------------------
+
+    def is_running(self) -> bool:
+        if self._windows:
+            return f'"{WINDOWS_PROCESS}"' in self._runner.run(TASKLIST)[1].lower()
+        uid = _own_uid()
+        try:
+            entries = list(self._proc_root.iterdir())
+        except OSError:
+            return False
+        for entry in entries:
+            if not entry.name.isdigit():
+                continue
+            try:
+                if uid is not None and entry.stat().st_uid != uid:
+                    continue  # another user's OBS has its own config
+                name = (entry / "comm").read_text(encoding="utf-8", errors="replace").strip()
+            except OSError:
+                continue  # exited meanwhile
+            if name == LINUX_PROCESS:
+                return True
+        return False
+
+    def launch(self) -> None:
+        """Start OBS minimised to the tray, in the folder it needs; nothing while OBS already runs.
+
+        A second instance would stop at OBS's modal "already running" question. Raises
+        ``ObsConnectError`` when no install is found or the program cannot be started.
+        """
+        if self.is_running():
+            log.info("OBS already runs; not starting another")
+            return
+        install = self._found()
+        if install is None:
+            raise ObsConnectError("OBS is not installed")
+        argv = [*install.argv, *LAUNCH_FLAGS]
+        try:
+            self._runner.spawn(argv, install.cwd)
+        except OSError as exc:
+            raise ObsConnectError(f"OBS could not be started ({exc.strerror or type(exc).__name__})") from exc
+        log.info("OBS started: %s", " ".join(argv))
 
 
 def _load_json(path: Path) -> dict[str, Any] | None:
@@ -245,3 +382,9 @@ def _ws_config(path: Path, data: dict[str, Any]) -> WsConfig:
 def _bool(data: dict[str, Any], key: str, default: bool) -> bool:
     value = data.get(key, default)
     return value if isinstance(value, bool) else default
+
+
+def _own_uid() -> int | None:
+    """This process's user id; ``None`` where there is none (Windows)."""
+    getuid = getattr(os, "getuid", None)
+    return None if getuid is None else int(getuid())
