@@ -1,0 +1,45 @@
+14:59:05 | Starting owocr version 1.26.8
+14:59:05 | Latest available version: 1.26.8
+14:59:05 | Parsed config file
+14:59:05 | Starting websocket server on port 52457
+14:59:05 | Selected coordinates: 100,100,900,260
+14:59:05 | Loading dependencies for Azure Document Intelligence
+14:59:05 | Dependencies not available, Azure Document Intelligence will not work!
+14:59:05 | Bing ready
+14:59:05 | Loading dependencies for Chrome Screen AI
+14:59:05 | Downloading screen AI files to <owocr-home>/.config/screen_ai
+14:59:07 | Unable to download screen AI files, Chrome Screen AI will not work!
+14:59:07 | Loading dependencies for EasyOCR
+14:59:07 | Dependencies not available, EasyOCR will not work!
+14:59:07 | Loading dependencies for Google Lens
+14:59:07 | Google Lens ready
+14:59:07 | Loading dependencies for Google Vision
+14:59:07 | Dependencies not available, Google Vision will not work!
+14:59:07 | Loading dependencies for Manga OCR
+14:59:07 | Dependencies not available, Manga OCR will not work!
+14:59:07 | Loading dependencies for Manga OCR (segmented)
+14:59:07 | Dependencies not available, Manga OCR (segmented) will not work!
+14:59:07 | Loading dependencies for meikiocr
+14:59:08 | Loading meikiocr model
+14:59:08 | meikiocr ready
+14:59:08 | Loading dependencies for NDLOCR-Lite
+14:59:08 | Dependencies not available, NDLOCR-Lite will not work!
+14:59:08 | Error reading API key from config, OCRSpace will not work!
+14:59:08 | Error reading URL from config, OneOCR will not work!
+14:59:08 | Loading dependencies for RapidOCR
+14:59:08 | Dependencies not available, RapidOCR will not work!
+14:59:08 | Error reading URL from config, WinRT OCR will not work!
+Exception in thread Thread-3 (user_input_thread_run):
+Traceback (most recent call last):
+  File "<uv-python>/lib/python3.12/threading.py", line 1075, in _bootstrap_inner
+    self.run()
+  File "<uv-python>/lib/python3.12/threading.py", line 1012, in run
+14:59:08 | Reading from screen capture, writing to websocket using meikiocr
+    self._target(*self._args, **self._kwargs)
+  File "<tool-env>/lib/python3.12/site-packages/owocr/run.py", line 2970, in user_input_thread_run
+    old_settings = termios.tcgetattr(fd)
+                   ^^^^^^^^^^^^^^^^^^^^^
+termios.error: (25, 'Inappropriate ioctl for device')
+14:59:08 | Text recognized in 0.062s using meikiocr: 今日はいい天気ですね
+14:59:18 | Text recognized in 0.060s using meikiocr: 明日も学校に行きます
+14:59:33 | Text recognized in 0.049s using meikiocr: 猫が窓の外を見ている

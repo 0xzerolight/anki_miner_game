@@ -1,0 +1,6 @@
+15:00:27 | Starting owocr version 1.26.8
+15:00:27 | Latest available version: 1.26.8
+15:00:27 | Parsed config file
+15:00:27 | Starting websocket server on port 45175
+15:00:28 | Window capture is only currently supported on Windows, macOS and Linux + Wayland
+15:00:28 | Terminated!
