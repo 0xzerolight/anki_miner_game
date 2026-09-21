@@ -491,11 +491,34 @@ def test_windows_asks_tasklist_for_obs64(tmp_path):
     assert runner.ran == [("tasklist", "/FI", "IMAGENAME eq obs64.exe", "/FO", "CSV", "/NH")]
 
 
-@pytest.mark.parametrize(
-    "answer", [(0, "INFO: No tasks are running which match the specified criteria.\r\n"), (-1, "")]
-)
+@pytest.mark.parametrize("answer", [(0, "INFO: No tasks are running which match the specified criteria.\r\n"), (0, "")])
 def test_windows_without_obs64_is_not_running(tmp_path, answer):
     assert not make(tmp_path, platform="win32", runner=FakeRunner(lambda argv: answer)).is_running()
+
+
+@pytest.mark.parametrize("answer", [(-1, ""), (1, "ERROR: Access denied\r\n")])
+def test_windows_reads_a_tasklist_that_failed_as_running(tmp_path, answer):
+    """``tasklist`` timing out on a busy machine says nothing about OBS: never report it gone."""
+    assert make(tmp_path, platform="win32", runner=FakeRunner(lambda argv: answer)).is_running()
+
+
+def test_linux_reads_a_process_table_it_cannot_list_as_running(tmp_path):
+    obs = LocalObsDiscovery(
+        AppConfig, which=which_from({"obs": "/usr/bin/obs"}), runner=FakeRunner(), proc_root=tmp_path / "no-proc"
+    )
+
+    assert obs.is_running()
+
+
+def test_launch_starts_nothing_when_it_cannot_tell_whether_obs_runs(tmp_path, monkeypatch):
+    """A second OBS would stop at OBS's modal "already running" question."""
+    monkeypatch.setenv("PROGRAMFILES", str(tmp_path / "Program Files"))
+    windows_exe(tmp_path / "Program Files" / "obs-studio")
+    runner = FakeRunner(lambda argv: (-1, ""))
+
+    make(tmp_path, platform="win32", runner=runner).launch()
+
+    assert runner.spawned == []
 
 
 # --- ensure_server_enabled ---------------------------------------------------------------------

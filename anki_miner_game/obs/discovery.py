@@ -15,7 +15,7 @@
   start. Sets ``server_enabled``, keeps every other key, and adds a password only when auth is
   required and none exists. A missing file is created that way.
 - ``is_running``: an ``obs`` process of this user in ``/proc`` (native and Flatpak alike), or
-  ``obs64.exe`` in ``tasklist`` on Windows.
+  ``obs64.exe`` in ``tasklist`` on Windows; ``True`` when the process list cannot be read.
 - ``launch``: the install's command plus ``--minimize-to-tray``, detached, in the folder it needs;
   nothing while OBS already runs.
 - ``wait_ready``: ready once ``GetVersion`` succeeds on a fresh connection. Until OBS has loaded,
@@ -380,13 +380,23 @@ class LocalObsDiscovery:
     # --- process ---------------------------------------------------------------------------
 
     def is_running(self) -> bool:
+        """Whether an OBS of this user runs; ``True`` when the process list cannot be read.
+
+        "Cannot tell" never reads as "not running": a caller would end a recording OBS is still
+        writing, or ``launch`` would start a second OBS.
+        """
         if self._windows:
-            return f'"{WINDOWS_PROCESS}"' in self._runner.run(TASKLIST)[1].lower()
+            code, out = self._runner.run(TASKLIST)
+            if code != 0:
+                log.warning("tasklist failed (exit code %s); assuming OBS runs", code)
+                return True
+            return f'"{WINDOWS_PROCESS}"' in out.lower()
         uid = _own_uid()
         try:
             entries = list(self._proc_root.iterdir())
-        except OSError:
-            return False
+        except OSError as exc:
+            log.warning("cannot list %s (%s); assuming OBS runs", self._proc_root, exc.strerror or type(exc).__name__)
+            return True
         for entry in entries:
             if not entry.name.isdigit():
                 continue
