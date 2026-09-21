@@ -707,23 +707,37 @@ same NN would both move onto one video.
 ### 11.1 Discovery (`obs/discovery.py`)
 
 1. Find the install. Windows: `%ProgramFiles%\obs-studio\bin\64bit\obs64.exe`, then the install
-   path the OBS installer records in the registry (key confirmed in M0). Linux: `obs` on PATH, then Flatpak `com.obsproject.Studio`.
+   folder the OBS installer records in the registry: `HKLM\SOFTWARE\OBS Studio`, default value, read
+   in the 64-bit view and then the 32-bit view, with `bin\64bit\obs64.exe` appended. The NSIS
+   installer and the Steam build both write that key in both views (`docs/m0/source-findings.md`
+   section 3; provisional until H5). Linux: `obs` on PATH, then Flatpak `com.obsproject.Studio`.
    Not found: the wizard links to `https://obsproject.com/download` and re-checks on demand.
 2. Find the config root (section 3.3) and read `plugin_config/obs-websocket/config.json`.
 3. `server_enabled` false and OBS not running: set it true, leave `auth_required` and the password
    as they are (generate a password only if auth is required and none exists), then launch OBS.
-   `server_enabled` false and OBS running: OBS would overwrite the file on exit, so the wizard asks
-   the user to tick Tools -> WebSocket Server Settings -> Enable, or to close OBS and press Fix.
+   `server_enabled` false and OBS running: obs-websocket read the file when OBS started and does not
+   read it again, so a change takes effect only at the next start, and saving its settings dialog
+   would overwrite it (section 3.3). The wizard asks the user to tick Tools -> WebSocket Server
+   Settings -> Enable, or to close OBS and press Fix.
 4. Port and password are read from that file at every connect. The password is never logged and
-   never copied into the app's own config unless the user types an override.
+   never copied into the app's own config unless the user types an override. The port override
+   and the password override each win over the file. `ObsDiscovery.credentials` raises
+   `ObsConfigError` only when no port is known, neither an override nor a readable file; with a
+   port override and an unreadable file it connects without a password unless one is overridden.
 
-Minimum OBS: the first version whose `GetVersion.availableRequests` contains every request in
-section 3.3. The app checks the list, not a version number, and names the missing request when it
-refuses. Expect this to mean OBS 30 or newer; M0 records the exact floor.
+Minimum OBS: **30.0.0** (obs-websocket 5.3.3), the first release whose
+`GetVersion.availableRequests` contains every request in section 3.3 (`SetRecordDirectory` is the
+newest). The app checks the list, not a version number, and names the missing request when it
+refuses: on OBS 29 that is `SetRecordDirectory`.
 
 Launching OBS: `obs64.exe --minimize-to-tray` on Windows (working directory must be the `bin\64bit`
-folder), `obs --minimize-to-tray` or `flatpak run com.obsproject.Studio --minimize-to-tray` on Linux.
-The app does not pass `--profile` or `--collection`; arming does the switch, one code path.
+folder), `obs --minimize-to-tray` or `flatpak run com.obsproject.Studio --minimize-to-tray` on Linux
+(R2 confirmed that `flatpak run` passes the flag through). The app does not pass `--profile` or
+`--collection`; arming does the switch, one code path. Readiness is a successful `GetVersion`
+(section 3.3): on the Linux host it first succeeded 2.3-5.5 s after launch, median 3.0 s. Two
+modal dialogs can stop a launch before the websocket answers: "already running" for a second
+instance, and "OBS Studio Crash Detected" after a crash or kill, which no flag in 32.2.2 skips.
+`wait_ready`'s timeout banner names the second (section 17).
 
 ### 11.2 Gateway (`obs/client.py`)
 
@@ -740,6 +754,14 @@ class ObsGateway(Protocol):
 and only enqueue onto the session actor with the monotonic time at which they arrived. Connection
 loss triggers reconnect with backoff, and every successful connect runs reconcile (section 6.3).
 
+A 207 `NotReady` answer (OBS still loading, or a collection change whose `...Changing` event has
+not arrived yet) is retried in `connect()` and `request()` until a timeout, then raised as
+`ObsRequestError`. Because of obsws-python's behaviour (section 3.3) the gateway sets the
+`obsws_python` logger to WARNING and never formats a client with `repr`, sends every request from
+one thread (a single-thread executor), drops and reconnects the request client after a timeout,
+since a late reply would be read as the next request's, and watches the event thread to detect a
+lost connection. Nothing depends on the order of a response against events.
+
 ### 11.3 Provisioning (`obs/provision.py`)
 
 Idempotent; runs from the wizard and again at each arm, touching only what differs.
@@ -748,24 +770,59 @@ Profile `Anki Miner Game`:
 
 | Setting | Value | How |
 |---|---|---|
-| Record directory | `<output_root>/_incoming` | `SetRecordDirectory` |
-| Output size | base size scaled so height <= `recording.max_height`, aspect kept | `SetVideoSettings` |
+| Record directory | `<output_root>/_incoming` | `SetRecordDirectory` (writes `[SimpleOutput] FilePath` and `[AdvOut] RecFilePath`) |
+| Output size | base size scaled so height <= `recording.max_height`, aspect kept, then the width rounded down to a multiple of 4 and the height to a multiple of 2 | `SetVideoSettings` |
 | Frame rate | `recording.fps` / 1 | `SetVideoSettings` |
-| Container | `mkv` | `SetProfileParameter`; expected keys `SimpleOutput` / `RecFormat2` and `AdvOut` / `RecFormat2`, **unverified** |
-| Automatic file splitting | off | `SetProfileParameter`; expected key `AdvOut` / `RecSplitFile`, **unverified** |
-| Encoder, bitrate, audio codec | untouched | OBS's own defaults suit the machine better than a guess |
+| Container | `mkv` | `SetProfileParameter` `[SimpleOutput] RecFormat2` and `[AdvOut] RecFormat2` |
+| Automatic file splitting | off | `SetProfileParameter` `[AdvOut] RecSplitFile` = `false`. Simple output mode never splits |
+| Automatic remux | off | `SetProfileParameter` `[Video] AutoRemux` = `false` |
+| Recording encoder | separate from the stream encoder | `SetProfileParameter`: Simple mode `[SimpleOutput] RecQuality` = `Small` when it is `Stream`; Advanced mode `[AdvOut] RecEncoder` set to the stream encoder's type (`[AdvOut] Encoder`) when it is `none` |
+| Audio sample rate, channels | the values of the profile provisioning started on | `GetProfileParameter` there, `SetProfileParameter` `[Audio] SampleRate` and `ChannelSetup` here |
+| Encoder, bitrate, audio codec | untouched except that recording uses its own encoder | OBS's own defaults suit the machine better than a guess |
 
-`SetProfileParameter` is used only where obs-websocket has no first-class request. The two key names
-marked unverified could not be checked this session (no OBS install on the design machine, and GSM
-sets neither); M0 reads them from a real `basic.ini` before any code depends on them. GSM logs that one
-of its profile changes needs an OBS restart (`obs/actions.py:224`). M0 found that every row above
-applies at the next `StartRecord` except the container: OBS reads it, like the output mode and the
-recording quality or encoder, only when it builds its outputs, at launch and when a profile is
-activated (`docs/m0/source-findings.md` section 2, `docs/m0/obs-behaviour.md` item 2). After
-changing one of them, provisioning switches to the profile it started on and back. Before that it
-gives the app's profile that profile's `[Audio] SampleRate` and `ChannelSetup`, since a switch
-between profiles where they differ stops at OBS's modal restart question (item 3). The app never
-restarts OBS.
+`SetProfileParameter` is used only where obs-websocket has no first-class request. It takes a string
+and saves the profile at once. The key names are confirmed in source and in a real `basic.ini`
+written by these requests (`docs/m0/source-findings.md` section 1, `docs/m0/obs-behaviour.md`
+item 1). OBS's default container is `hybrid_mp4`, and `AutoRemux` has no default, so it is off
+unless the user turned it on; on, it would remux each finished recording to a second video while
+finalise renames the first.
+
+The recording encoder row follows from the pause ruling of section 7: a recording that shares the
+stream encoder, OBS's default, cannot pause, and OBS then sends no pause event at all. Simple mode
+keeps OBS's own encoder for the `Small` quality (R2's `pause_resume` transcript); Advanced mode
+keeps the user's settings of the chosen encoder (R1 validated pause with an Advanced recording
+encoder, `docs/m0/clock.md` "Pause"). Like every other row it is re-checked at every arm.
+
+Output size alignment: libobs rounds the running output down to a width divisible by 4 and an even
+height, which `GetVideoSettings` reports while `basic.ini` keeps the value sent (854x480 ran as
+852x480; 2560x1080 scaled to 720 lines gives 1706, which runs as 1704). Provisioning aligns before
+comparing or sending, or it would re-send `SetVideoSettings` at every arm (`docs/m0/obs-behaviour.md`
+item 16).
+
+Restarts. GSM logs that one of its profile changes needs an OBS restart (`obs/actions.py:224`). M0
+found that record directory, output size, frame rate and splitting apply at the next `StartRecord`.
+The container does not: OBS picks the muxer, like the output mode and the recording quality or
+encoder, only when it builds its outputs, at launch and when a profile is activated. The first
+recording after provisioning was MP4 data in a `.mkv` file (`docs/m0/source-findings.md` section 2,
+`docs/m0/obs-behaviour.md` item 2). After changing one of those keys, provisioning re-activates the
+app's profile by switching to the profile it started on and back (31 and 84 ms in R2); the next
+recording is Matroska. When the app's profile is already current there is nowhere to switch to,
+and provisioning reports that the change needs a restart of OBS.
+
+A profile switch between profiles whose `[Audio] SampleRate` or `ChannelSetup` differ stops at
+OBS's modal restart question; `...Changed` arrives and the answer does not (`docs/m0/obs-behaviour.md`
+item 3). `CreateProfile` itself never asks, and the new profile runs at OBS's defaults (48000,
+`Stereo`), so a user at 44.1 kHz meets the question at the first switch from the app's profile back
+to their own: the switch-away above. Provisioning therefore reads both values with
+`GetProfileParameter` while the user's profile is current, before `CreateProfile`, and writes them
+with `SetProfileParameter` right after it, before any switch away. `SetProfileParameter` writes the
+running profile, the side OBS compares, so neither the switch away nor the switch back asks. This
+order is from source, not run (provisional until E1). The app never restarts OBS; if the question
+appears anyway, arming shows the banner of section 6.2.
+
+`CreateProfile` over the websocket also sets `[Basic] ConfigOnNewProfile=false` in the user's
+`user.ini`, which turns off OBS's offer to run its auto-configuration wizard for new profiles. The
+wizard says so (section 16).
 
 Scene collection `Anki Miner Game`, scene `Game`:
 
@@ -778,11 +835,26 @@ Scene collection `Anki Miner Game`, scene `Game`:
 
 The app's collection has none of OBS's special audio inputs: OBS creates them only in the
 collection of its first run (`docs/m0/obs-behaviour.md` section 1). A special input the user adds
-to it later, desktop or microphone, is muted through `GetSpecialInputs` and `SetInputMute`. The game
-profile dialog fills its window list from `GetInputPropertiesListPropertyItems(inputName,
-propertyName="window")`, the same call GSM uses, and stores the returned item value verbatim in
-`capture.window`. Input kinds that `GetInputKindList` does not report are skipped, and the dialog
-says which capture method is in use.
+to it later, desktop or microphone, is muted through `GetSpecialInputs` and `SetInputMute`.
+
+`CreateSceneCollection` gives the new collection OBS's default scene `Scene`, which stays the
+program scene after `CreateScene Game`; provisioning sets `Game` with `SetCurrentProgramScene`, or
+the app would record an empty scene (`docs/m0/obs-behaviour.md` item 13).
+
+The game profile dialog fills its window list from `GetInputPropertiesListPropertyItems(inputName,
+propertyName)`, the same call GSM uses, offers enabled items only, and stores the chosen item value
+verbatim in `capture.window`. `propertyName` is `window` for `game_capture`, `window_capture` and
+`wasapi_process_output_capture`, whose values share the format `<title>:<class>:<exe>` with `#` and
+`:` escaped as `#22` and `#3A` (built by one function, so the `game_capture` string is valid for
+application audio; provisional until H5). It is `capture_window` for `xcomposite_input`, value
+`<xid>\r\n<name>\r\n<class>` (`docs/m0/source-findings.md` section 10). An `xcomposite_input` is
+created with a non-empty placeholder `capture_window`: listing the windows of one whose value is
+empty aborts OBS 32.2.2 (`std::logic_error` on a NULL item value, `docs/m0/clock.md` side
+finding 2), so the app never lists windows of such an input. Input kinds that `GetInputKindList`
+does not report are skipped, and the dialog says which capture method is in use.
+
+On the Linux host `xcomposite_input` recorded black with OBS 32.2.2 on EGL, NVIDIA and Mesa alike
+(`docs/m0/clock.md` side finding 1); whether real X11 desktops hit this is an H5 check.
 
 ### 11.4 Recorder (`obs/recorder.py`)
 
