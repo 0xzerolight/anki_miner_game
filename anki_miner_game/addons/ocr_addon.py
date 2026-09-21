@@ -681,23 +681,9 @@ class OcrAddon:
 
 
 async def _run_uv(argv: Sequence[str], env: Mapping[str, str]) -> None:
-    proc = await asyncio.create_subprocess_exec(
-        *argv,
-        stdin=asyncio.subprocess.DEVNULL,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-        env=dict(env),
-        creationflags=_CREATE_NO_WINDOW,
-    )
-    try:
-        out, _ = await proc.communicate()
-    except BaseException:
-        with contextlib.suppress(ProcessLookupError):
-            proc.kill()
-        await proc.wait()
-        raise
-    text = out.decode("utf-8", errors="replace").strip()
-    logger.debug("uv %s exited %s:\n%s", " ".join(argv[1:]), proc.returncode, text)
-    if proc.returncode != 0:
+    code, output = await bootstrap.run_uv(argv, env)
+    text = output.strip()
+    logger.debug("uv %s exited %s:\n%s", " ".join(argv[1:]), code, text)
+    if code != 0:
         tail = "\n".join(text.splitlines()[-_UV_ERROR_LINES:])
-        raise OcrError(f"Installing owocr failed (uv exit code {proc.returncode}):\n{tail}")
+        raise OcrError(f"Installing owocr failed (uv exit code {code}):\n{tail}")

@@ -598,3 +598,87 @@ def test_real_download_matches_the_pin(tmp_path):
     assert hashlib.sha256(uv.read_bytes()).hexdigest() == pin.member_sha256
     out = subprocess.run([str(uv), "--version"], capture_output=True, text=True, timeout=60, check=True)
     assert out.stdout.startswith(f"uv {bootstrap.UV_VERSION} ")
+
+
+# --- running uv and blocking work for an async install ---------------------------------------------
+
+
+async def test_run_uv_returns_the_exit_code_and_the_merged_output(tmp_path):
+    script = "import sys; print('out', flush=True); print('err', file=sys.stderr, flush=True); sys.exit(3)"
+    code, output = await bootstrap.run_uv([sys.executable, "-c", script], dict(os.environ), cwd=tmp_path)
+    assert code == 3
+    assert output.splitlines() == ["out", "err"]
+
+
+async def test_run_uv_runs_in_the_given_folder_with_the_given_environment(tmp_path):
+    script = "import os; print(os.getcwd()); print(os.environ['AMG_MARK'])"
+    code, output = await bootstrap.run_uv([sys.executable, "-c", script], {**os.environ, "AMG_MARK": "kept"}, tmp_path)
+    assert code == 0
+    assert output.splitlines() == [str(tmp_path), "kept"]
+
+
+async def test_run_uv_that_cannot_start_raises_oserror(tmp_path):
+    with pytest.raises(OSError):
+        await bootstrap.run_uv([str(tmp_path / "no-uv")], dict(os.environ))
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="probes the pid with signal 0")
+async def test_cancelling_run_uv_kills_uv(tmp_path):
+    import asyncio
+
+    pid_file = tmp_path / "pid"
+    script = f"import os, time; open({str(pid_file)!r}, 'w').write(str(os.getpid())); time.sleep(60)"
+    run = asyncio.create_task(bootstrap.run_uv([sys.executable, "-c", script], dict(os.environ)))
+    async with asyncio.timeout(10):
+        while not pid_file.exists() or not pid_file.read_text():
+            await asyncio.sleep(0.01)
+    run.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await run
+    with pytest.raises(ProcessLookupError):
+        os.kill(int(pid_file.read_text()), 0)
+
+
+async def test_in_worker_thread_returns_the_work_result_off_the_loop_thread():
+    seen: list[threading.Thread] = []
+
+    def work(check: Callable[[], None]) -> int:
+        check()
+        seen.append(threading.current_thread())
+        return 5
+
+    assert await bootstrap.in_worker_thread(work) == 5
+    assert seen and seen[0] is not threading.current_thread()
+
+
+async def test_in_worker_thread_passes_the_work_error_on():
+    def work(check: Callable[[], None]) -> None:
+        raise BootstrapError("offline")
+
+    with pytest.raises(BootstrapError, match="offline"):
+        await bootstrap.in_worker_thread(work)
+
+
+async def test_cancelling_in_worker_thread_stops_the_work_at_its_next_check_and_waits_for_it():
+    import asyncio
+
+    started = threading.Event()
+    ended: list[str] = []
+
+    def work(check: Callable[[], None]) -> None:
+        started.set()
+        try:
+            for _ in range(1000):
+                check()
+                threading.Event().wait(0.01)
+            ended.append("ran to the end")
+        except bootstrap.InstallCancelledError:
+            ended.append("stopped")
+            raise
+
+    task = asyncio.create_task(bootstrap.in_worker_thread(work))
+    await asyncio.to_thread(started.wait, 5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert ended == ["stopped"]

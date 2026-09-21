@@ -1,7 +1,9 @@
 """Download a sha256-pinned ``uv`` into ``<home>/bin/`` (spec 19, last bullet).
 
 The VAD and OCR add-ons build their environments with this ``uv``, always under
-``uv_environment(home, addon)``. The checks are a minimal copy
+``uv_environment(home, addon)``, and share the two helpers that keep an install cancellable:
+``run_uv`` (an asyncio subprocess, killed when the call is cancelled) and ``in_worker_thread``
+(blocking downloads that stop at their next chunk once cancelled). The checks are a minimal copy
 of the idea in Anki Miner's ``anki_miner/services/_install_common.py`` (``verify_sha256``, ``.part``
 cleanup) at commit ``ea4a30ce``: copied, not imported. Deliberately no resume, no receipt files and
 no resolver tiers; an installed ``uv`` is recognised by the sha256 of the executable itself.
@@ -14,17 +16,19 @@ place with ``os.replace``. Any failure raises ``BootstrapError`` and leaves the 
 any, untouched and no scratch file behind.
 """
 
+import asyncio
 import contextlib
 import hashlib
 import os
 import platform
+import subprocess
 import sys
 import tarfile
 import threading
 import urllib.error
 import urllib.request
 import zipfile
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from email.message import Message
 from http.client import HTTPException
@@ -47,9 +51,16 @@ CHUNK_SIZE: Final = 64 * 1024
 
 _REDIRECT_STATUSES: Final = frozenset({301, 302, 303, 307, 308})
 
+NO_WINDOW: Final[int] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+"""Keeps a console window from flashing up on Windows; 0 elsewhere."""
+
 
 class BootstrapError(Exception):
     """``uv`` could not be installed; the message says why."""
+
+
+class InstallCancelledError(Exception):
+    """Raised by ``check()`` inside ``in_worker_thread`` work once the awaiting call was cancelled."""
 
 
 @dataclass(frozen=True)
@@ -291,3 +302,53 @@ def _sha256_of(path: Path) -> str:
         for chunk in iter(lambda: fh.read(CHUNK_SIZE), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+async def run_uv(argv: Sequence[str], env: Mapping[str, str], cwd: Path | None = None) -> tuple[int, str]:
+    """Run one ``uv`` command line to its end: its exit code and its output, stdout and stderr merged.
+
+    Cancelling the call kills uv and waits for it to exit. Raises ``OSError`` when uv cannot start.
+    """
+    proc = await asyncio.create_subprocess_exec(
+        *argv,
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+        env=dict(env),
+        cwd=cwd,
+        creationflags=NO_WINDOW,
+    )
+    try:
+        out, _ = await proc.communicate()
+    except BaseException:
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+        await proc.wait()
+        raise
+    code = proc.returncode
+    assert code is not None
+    return code, out.decode("utf-8", errors="replace")
+
+
+async def in_worker_thread[T](work: Callable[[Callable[[], None]], T]) -> T:
+    """Run ``work(check)`` on a worker thread and return what it returns.
+
+    ``work`` calls ``check()`` between chunks, for example from a download's ``progress``. Once the
+    awaiting call is cancelled, ``check()`` raises ``InstallCancelledError``; the call then waits for
+    ``work`` to end before it re-raises ``CancelledError``, so nothing it started still writes files.
+    """
+    stop = threading.Event()
+
+    def check() -> None:
+        if stop.is_set():
+            raise InstallCancelledError("the install was cancelled")
+
+    task = asyncio.ensure_future(asyncio.to_thread(work, check))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        stop.set()
+        await asyncio.wait({task})
+        if not task.cancelled():
+            task.exception()  # retrieved: ``InstallCancelledError``, or what the work raised on its way out
+        raise
