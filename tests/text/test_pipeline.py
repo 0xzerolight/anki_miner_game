@@ -343,3 +343,23 @@ def test_step9_compares_text_after_speaker_strip():
 
 def test_step9_no_previous_line_is_accepted():
     assert isinstance(_pipe(typewriter_merge=True).process(_msg("え", 1.0)), Accepted)
+
+
+# --- reset: the previous accepted line is forgotten -------------------------------
+
+
+def test_reset_turns_a_typewriter_continuation_into_a_new_line():
+    # The actor resets when the previous accepted line will not be journalled (armed, paused, split).
+    pipe = _pipe(typewriter_merge=True)
+    pipe.process(_msg("こんに", 1.0))
+    pipe.reset()
+    result = pipe.process(_msg("こんにちは", 1.5))
+    assert _text(result) == "こんにちは"
+    assert result.line.t_mono == 1.5
+
+
+def test_reset_lets_the_next_session_start_with_the_last_line_of_the_previous_one():
+    pipe = _pipe()
+    pipe.process(_msg("またね", 1.0))
+    pipe.reset()
+    assert _text(pipe.process(_msg("またね", 100.0))) == "またね"

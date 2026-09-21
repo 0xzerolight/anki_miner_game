@@ -2,6 +2,13 @@
 
 One instance per game session, fed from the session actor's thread only; it keeps the previous
 accepted line for the duplicate check (step 8) and the typewriter merge (step 9).
+
+"The previous accepted line" means the previous line journalled in this recording. The pipeline
+cannot see the journal, so the actor calls ``reset`` whenever the line it accepted last will not be
+journalled: after dropping an accepted line as ``paused``, at ``STARTED`` (unless the auto-start
+line held while armed is the one journalled at offset 0), and after a split stop. A ``Replaced``
+is journalled as a ``ReplaceRecord`` only when its base line is the journal's last ``LineRecord``;
+otherwise as a new ``LineRecord`` at ``clock.offset_ms(line.t_mono)`` (``None``: dropped as ``paused``).
 """
 
 import re
@@ -44,6 +51,10 @@ class TextPipeline:
         """The previous accepted line, holding merged text and the first frame's ``t_mono``."""
         self._previous_arrival = 0.0
         """``t_mono`` of the latest frame accepted or merged: the typewriter window runs from it."""
+
+    def reset(self) -> None:
+        """Forget the previous accepted line: the next line is neither a duplicate of it nor merged into it."""
+        self._previous = None
 
     def process(self, msg: LineReceived) -> PipelineResult:
         text = _normalise(msg.raw, speaker_strip=self._filters.speaker_strip)

@@ -128,7 +128,9 @@ def timed_lines(records: Iterable[JournalRecord]) -> list[TimedLine]:
     """The journalled lines in order, each with its latest text: the input of ``build_cues``.
 
     A replace record rewrites the line before it, which keeps its offset and source; one with no line
-    before it is ignored. Pause, resume and stop records carry no line.
+    before it is ignored. Pause, resume and stop records carry no line. The actor writes a replace
+    record only when the merged line's base is the journal's last line record; a merge into a line
+    that was never journalled (armed, paused, after a stop) is journalled as a line of its own.
     """
     lines: list[TimedLine] = []
     for record in records:
