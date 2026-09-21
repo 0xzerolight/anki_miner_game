@@ -85,8 +85,12 @@ root after each step, run `provision-183652`):
   (`frontend/widgets/OBSBasic_Profiles.cpp:70-74`).
 - Program scene: after `CreateScene Game`, `GetSceneList` and `GetCurrentProgramScene` still report
   `Scene` (`provision.jsonl`).
-- Special inputs: `GetSpecialInputs` answered every slot `null` (no audio devices in the display),
-  so provisioning must skip the mic mute when `mic1` is null.
+- Special inputs: `GetSpecialInputs` answered every slot `null`. That holds on every host, not
+  only in this display without audio devices: OBS creates the desktop and mic special inputs only
+  in the collection it makes at its first run (`frontend/widgets/OBSBasic_SceneCollections.cpp:1047-1048,
+  1163-1165`, and then only for devices that exist, `frontend/widgets/OBSBasic_SceneItems.cpp:91-110`),
+  so a collection created later, like the app's, has none. Provisioning therefore creates its own
+  desktop-audio input and mutes a special input only when the user has added one.
 - `xcomposite_input` created with a placeholder `capture_window` (R1 side finding 2) lists the
   placeholder as disabled item 0 and the live windows after it; the probe window's item value was
   `4194311\r\namg-probe-window\r\nprobe_window.py`.
@@ -309,8 +313,10 @@ section 10): open while item 0 is enabled or an enabled item has the stored xid.
 
 1. One host, Linux, the Flatpak build, X11 through a nested display. Windows (`game_capture`,
    registry, rename locks, the restart question's wording) is H5.
-2. OBS had no audio devices (no PulseAudio socket in the sandbox): `GetSpecialInputs` was all
-   null, so the mic mute and `pulse_output_capture` audio were not exercised.
+2. OBS had no audio devices (no PulseAudio socket in the sandbox), so `pulse_output_capture`
+   audio was not exercised. `GetSpecialInputs` was all null, as it is for any collection created
+   after OBS's first run (section 1), so muting a special input the user added was not exercised
+   either.
 3. `xcomposite_input` rendered black with both NVIDIA EGL and Mesa llvmpipe, and
    `GetSourceScreenshot` failed with 702, so "capture keeps following a retitled window" is
    unverified here; R1 side finding 1 has the cause. E1 and H5 check it.
