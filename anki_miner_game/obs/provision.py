@@ -93,7 +93,16 @@ file with ffprobe."""
 PROFILE_SWITCH_TIMEOUT_S: Final = 15.0
 """How long to wait for OBS to switch to a profile ``CreateProfile`` made (spec 6.2's switch timeout)."""
 
-PROFILE_POLL_S: Final = 0.2
+INPUT_RELEASE_TIMEOUT_S: Final = 5.0
+"""How long to wait for OBS to free the name of an input ``RemoveInput`` removed before creating it again.
+
+``CreateInput`` refuses any name a source still holds (``obs-websocket@1ef34bf4
+src/requesthandler/RequestHandler_Inputs.cpp:154-156``), and a removed source keeps its name until it
+is destroyed, after the scene's next render and the UI have dropped their references
+(``obs-studio@ba2f32bd libobs/obs-source.c:754-755``, ``libobs/obs-scene.c:1015-1021``). Provisional
+until E1 measures the delay on a real OBS."""
+
+POLL_S: Final = 0.2
 
 RESOURCE_NOT_FOUND: Final = 600
 """obs-websocket ``RequestStatus::ResourceNotFound``."""
@@ -388,6 +397,7 @@ class ObsProvisioner:
         managed = WINDOWS_INPUTS if _is_windows(self._current_platform()) else LINUX_INPUTS
         wanted = {spec.name: spec for spec in plan.video + plan.audio}
         existing: dict[str, dict[str, Any]] = {}
+        removed: set[str] = set()
         changed = False
         for name in managed:
             found = await self._input_settings(name)
@@ -397,6 +407,7 @@ class ObsProvisioner:
             spec = wanted.get(name)
             if spec is None or spec.kind != kind:
                 await self._request("RemoveInput", inputName=name)
+                removed.add(name)
                 changed = True
             else:
                 existing[name] = settings
@@ -408,10 +419,13 @@ class ObsProvisioner:
                 missing_below = True
             elif missing_below:
                 await self._request("RemoveInput", inputName=spec.name)
+                removed.add(spec.name)
                 del existing[spec.name]
         for spec in plan.video + plan.audio:
             settings = dict(spec.settings)
             if spec.name not in existing:
+                if spec.name in removed:
+                    await self._wait_released(spec.name)
                 await self._request(
                     "CreateInput",
                     sceneName=OBS_SCENE_NAME,
@@ -424,6 +438,27 @@ class ObsProvisioner:
                 await self._request("SetInputSettings", inputName=spec.name, inputSettings=settings)
                 changed = True
         return changed
+
+    async def _wait_released(self, name: str) -> None:
+        """Wait until OBS has freed the name of the removed input ``name`` (``INPUT_RELEASE_TIMEOUT_S``).
+
+        A removed source still answers ``GetInputSettings`` until OBS destroys it; then 600.
+        """
+
+        async def released() -> bool:
+            return await self._input_settings(name) is None
+
+        if not await self._poll(released, INPUT_RELEASE_TIMEOUT_S):
+            raise ObsError(f"OBS still holds the removed input {name!r} after {INPUT_RELEASE_TIMEOUT_S:g} s")
+
+    async def _poll(self, done: Callable[[], Awaitable[bool]], timeout_s: float) -> bool:
+        """Check ``done`` now and every ``POLL_S`` until it holds (``True``) or ``timeout_s`` has passed (``False``)."""
+        for attempt in range(round(timeout_s / POLL_S) + 1):
+            if attempt:
+                await self._sleep(POLL_S)
+            if await done():
+                return True
+        return False
 
     async def _mute_special_inputs(self) -> bool:
         special = await self._request("GetSpecialInputs")
@@ -446,13 +481,12 @@ class ObsProvisioner:
             return True
         # CreateProfile answers before the profile exists; OBS then switches to it (source findings 8).
         await self._request("CreateProfile", profileName=OBS_PROFILE_NAME)
-        polls = round(PROFILE_SWITCH_TIMEOUT_S / PROFILE_POLL_S)
-        for attempt in range(polls + 1):
-            if attempt:
-                await self._sleep(PROFILE_POLL_S)
-            listing = await self._request("GetProfileList")
-            if listing.get("currentProfileName") == OBS_PROFILE_NAME:
-                return True
+
+        async def switched() -> bool:
+            return (await self._request("GetProfileList")).get("currentProfileName") == OBS_PROFILE_NAME
+
+        if await self._poll(switched, PROFILE_SWITCH_TIMEOUT_S):
+            return True
         raise ObsError(f"OBS did not switch to the profile {OBS_PROFILE_NAME!r} within {PROFILE_SWITCH_TIMEOUT_S:g} s")
 
     async def _ensure_record_directory(self, cfg: AppConfig) -> bool:

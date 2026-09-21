@@ -5,20 +5,22 @@ from typing import Any
 import pytest
 
 from anki_miner_game.models.constants import OBS_COLLECTION_NAME, OBS_SCENE_NAME
-from anki_miner_game.models.obs import ProvisionResult
+from anki_miner_game.models.obs import ObsError, ProvisionResult
 from anki_miner_game.models.profile import AudioMode, AudioSettings, CaptureKind, CaptureSettings, GameProfile
 from anki_miner_game.obs.provision import (
     APP_AUDIO_INPUT,
     DESKTOP_AUDIO_INPUT,
     GAME_CAPTURE_INPUT,
+    INPUT_RELEASE_TIMEOUT_S,
     PIPEWIRE_INPUT,
+    POLL_S,
     WINDOW_CAPTURE_INPUT,
     XCOMPOSITE_INPUT,
     XCOMPOSITE_PLACEHOLDER,
     ObsProvisioner,
     plan_collection,
 )
-from tests.obs.fake_obs import LINUX_WAYLAND_KINDS, LINUX_X11_KINDS, WINDOWS_KINDS, FakeObs
+from tests.obs.fake_obs import LINUX_WAYLAND_KINDS, LINUX_X11_KINDS, WINDOWS_KINDS, FakeObs, Sleeps
 
 WIN_WINDOW = "Steins#3AGate:UnityWndClass:SteinsGate.exe"
 X11_WINDOW = "0x3a00007\r\nSteins;Gate\r\nsteinsgate"
@@ -47,12 +49,12 @@ def profile(
 
 def windows_obs(kinds: tuple[str, ...] = WINDOWS_KINDS) -> tuple[FakeObs, ObsProvisioner]:
     obs = FakeObs(input_kinds=kinds)
-    return obs, ObsProvisioner(obs, platform="win32")
+    return obs, ObsProvisioner(obs, platform="win32", sleep=Sleeps())
 
 
 def linux_obs(kinds: tuple[str, ...] = LINUX_X11_KINDS) -> tuple[FakeObs, ObsProvisioner]:
     obs = FakeObs(input_kinds=kinds)
-    return obs, ObsProvisioner(obs, platform="linux")
+    return obs, ObsProvisioner(obs, platform="linux", sleep=Sleeps())
 
 
 def inputs(obs: FakeObs) -> dict[str, tuple[str, dict[str, Any]]]:
@@ -378,6 +380,49 @@ async def test_pinning_later_recreates_game_capture_so_the_fallback_stays_undern
     assert inputs(obs)[GAME_CAPTURE_INPUT] == ("game_capture", GAME_ON_WINDOW)
     creates = [c[1]["inputName"] for c in obs.calls if c[0] == "CreateInput"]
     assert creates == [WINDOW_CAPTURE_INPUT, GAME_CAPTURE_INPUT]
+
+
+async def test_unpinning_on_x11_recreates_the_window_list_input_above_pipewire():
+    obs, provisioner = linux_obs()
+    await provisioner.ensure_collection(profile(window=X11_WINDOW))
+
+    await provisioner.ensure_collection(profile())
+
+    assert inputs(obs)[XCOMPOSITE_INPUT] == ("xcomposite_input", XCOMPOSITE_IDLE)
+    items = obs.scene_items()
+    assert items.index(PIPEWIRE_INPUT) < items.index(XCOMPOSITE_INPUT)
+
+
+async def test_a_removed_input_is_created_again_only_once_obs_has_released_its_name():
+    # OBS frees a removed input's name only after its next render and the UI drop their references;
+    # the fake holds it for four requests: CreateInput of the fallback, then three polls.
+    obs = FakeObs(input_kinds=WINDOWS_KINDS, release_delay=4)
+    sleeps = Sleeps()
+    provisioner = ObsProvisioner(obs, platform="win32", sleep=sleeps)
+    await provisioner.ensure_collection(profile())
+    obs.reset_calls()
+
+    await provisioner.ensure_collection(profile(window=WIN_WINDOW))
+
+    assert inputs(obs)[GAME_CAPTURE_INPUT] == ("game_capture", GAME_ON_WINDOW)
+    removed = obs.names().index("RemoveInput")
+    polls = [c for c in obs.calls[removed:] if c == ("GetInputSettings", {"inputName": GAME_CAPTURE_INPUT})]
+    assert len(polls) == 4
+    assert sleeps.waits == [POLL_S] * 3
+
+
+async def test_an_input_obs_never_releases_raises_after_the_release_timeout():
+    obs = FakeObs(input_kinds=WINDOWS_KINDS, release_delay=10**9)
+    sleeps = Sleeps()
+    provisioner = ObsProvisioner(obs, platform="win32", sleep=sleeps)
+    await provisioner.ensure_collection(profile())
+    obs.reset_calls()
+
+    with pytest.raises(ObsError, match=GAME_CAPTURE_INPUT):
+        await provisioner.ensure_collection(profile(window=WIN_WINDOW))
+
+    assert sum(sleeps.waits) == pytest.approx(INPUT_RELEASE_TIMEOUT_S)
+    assert [c[1]["inputName"] for c in obs.calls if c[0] == "CreateInput"] == [WINDOW_CAPTURE_INPUT]
 
 
 async def test_a_drifted_setting_is_rewritten_with_the_planned_settings_only():

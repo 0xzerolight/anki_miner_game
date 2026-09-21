@@ -17,15 +17,7 @@ from anki_miner_game.obs.provision import (
     ObsProvisioner,
     scaled_output_size,
 )
-from tests.obs.fake_obs import LINUX_X11_KINDS, FakeObs
-
-
-class Sleeps:
-    def __init__(self) -> None:
-        self.waits: list[float] = []
-
-    async def __call__(self, seconds: float) -> None:
-        self.waits.append(seconds)
+from tests.obs.fake_obs import LINUX_X11_KINDS, FakeObs, Sleeps
 
 
 def make_cfg(tmp_path: Path, *, max_height: int = 1080, fps: int = 30) -> AppConfig:

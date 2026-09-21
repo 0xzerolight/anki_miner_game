@@ -13,6 +13,11 @@ obs-websocket 5.7.4 uses (``docs/m0/source-findings.md``; ``RequestHandler_Confi
 - ``SetVideoSettings`` aligns the output size as libobs does (width to 4, height to 2).
 - A new scene collection holds one scene, ``Scene``, and no inputs or special inputs.
 - ``CreateInput`` appends the scene item on top; names are unique per collection.
+- ``RemoveInput`` takes the input out of its scenes, but OBS frees its name only once the source is
+  destroyed, after the scene's next render and the UI have dropped their references
+  (``obs-studio@ba2f32bd libobs/obs-source.c:754-755``, ``libobs/obs-scene.c:1015-1021``). For the next
+  ``release_delay`` requests the name still answers ``GetInputSettings`` with the removed input, and
+  ``CreateInput`` refuses it with 601 (``RequestHandler_Inputs.cpp:154-156``).
 - Listing the windows of an ``xcomposite_input`` whose ``capture_window`` is empty aborts OBS
   (R1 side finding 2); the fake records it and drops the connection.
 
@@ -69,6 +74,18 @@ class FakeCollection:
     program_scene: str = "Scene"
     inputs: dict[str, FakeInput] = field(default_factory=dict)
     special: dict[str, str | None] = field(default_factory=dict)
+    removed: dict[str, tuple[FakeInput, int]] = field(default_factory=dict)
+    """Removed inputs OBS has not destroyed yet: name -> (input, number of the ``RemoveInput`` request)."""
+
+
+class Sleeps:
+    """An injected ``sleep`` that records each wait and returns at once."""
+
+    def __init__(self) -> None:
+        self.waits: list[float] = []
+
+    async def __call__(self, seconds: float) -> None:
+        self.waits.append(seconds)
 
 
 class FakeObs:
@@ -79,11 +96,14 @@ class FakeObs:
         base_size: tuple[int, int] = (1920, 1080),
         window_lists: Mapping[str, list[dict[str, Any]]] | None = None,
         create_profile_delay: int = 1,
+        release_delay: int = 2,
     ) -> None:
         self.input_kinds = list(input_kinds)
         self.window_lists = dict(window_lists or {})
         """Input kind -> ``propertyItems`` of its window list."""
         self.create_profile_delay = create_profile_delay
+        self.release_delay = release_delay
+        """Requests after ``RemoveInput`` during which OBS still holds the removed input's name."""
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.profiles: dict[str, dict[tuple[str, str], str]] = {"Untitled": {}}
         self.current_profile = "Untitled"
@@ -95,6 +115,7 @@ class FakeObs:
         self._base_size = base_size
         self._pending_profile: str | None = None
         self._pending_polls = 0
+        self._requests = 0
 
     # ObsGateway surface ------------------------------------------------------------------
 
@@ -112,6 +133,7 @@ class FakeObs:
         pass
 
     async def request(self, name: str, **fields: Any) -> dict[str, Any]:
+        self._requests += 1
         self.calls.append((name, copy.deepcopy(fields)))
         if self.crashed:
             raise ObsConnectError("OBS is gone")
@@ -157,8 +179,19 @@ class FakeObs:
     def _fail(request: str, code: int, comment: str = "") -> ObsRequestError:
         return ObsRequestError(request, code, comment)
 
+    def _held(self, input_name: str) -> FakeInput | None:
+        """A removed input whose source OBS has not destroyed yet, so it still owns its name."""
+        held = self.collection.removed.get(input_name)
+        if held is None:
+            return None
+        found, removed_at = held
+        if self._requests - removed_at > self.release_delay:
+            del self.collection.removed[input_name]
+            return None
+        return found
+
     def _input(self, request: str, input_name: str) -> FakeInput:
-        found = self.collection.inputs.get(input_name)
+        found = self.collection.inputs.get(input_name) or self._held(input_name)
         if found is None:
             raise self._fail(request, RESOURCE_NOT_FOUND, f"No source was found by the name of `{input_name}`.")
         return found
@@ -267,8 +300,8 @@ class FakeObs:
         collection = self.collection
         if sceneName not in collection.scenes:
             raise self._fail("CreateInput", RESOURCE_NOT_FOUND)
-        if inputName in collection.inputs:
-            raise self._fail("CreateInput", RESOURCE_ALREADY_EXISTS)
+        if inputName in collection.inputs or self._held(inputName) is not None:
+            raise self._fail("CreateInput", RESOURCE_ALREADY_EXISTS, "A source already exists by that input name.")
         if inputKind not in self.input_kinds:
             raise self._fail("CreateInput", INVALID_INPUT_KIND)
         collection.inputs[inputName] = FakeInput(inputKind, copy.deepcopy(inputSettings or {}))
@@ -283,9 +316,12 @@ class FakeObs:
             found.settings = copy.deepcopy(inputSettings)
 
     def _RemoveInput(self, inputName: str) -> None:
-        self._input("RemoveInput", inputName)
+        found = self._input("RemoveInput", inputName)
         collection = self.collection
+        if collection.inputs.get(inputName) is not found:
+            return  # Already removed: obs_source_remove does nothing to a removed source.
         del collection.inputs[inputName]
+        collection.removed[inputName] = (found, self._requests)
         for items in collection.scenes.values():
             if inputName in items:
                 items.remove(inputName)
