@@ -1,16 +1,18 @@
 """FakeObs replayed against real OBS frames (card T14: provisioning transcript replay).
 
 Every provisioning test runs on ``FakeObs``, so "the second run sends no mutating request" holds only
-as far as the fake answers the way OBS does. The fixtures hold frames copied verbatim from runs
-against OBS 32.2.2 (Flatpak) with obs-websocket 5.7.4 on the M0 rig:
+as far as the fake answers the way OBS does. The fixtures hold frames recorded against OBS 32.2.2
+(Flatpak) with obs-websocket 5.7.4 on the M0 rig:
 
-- ``r1-trial2-provisioning.jsonl``: R1 run ``campaign-simple-default-trial2-173143``,
-  ``transcript.jsonl`` lines 9-22 (``docs/m0/clock.md``): video settings written and read back, an
-  ``xcomposite_input`` created with a placeholder window, its window list, a window set on it.
-- ``r2-provision.jsonl``: R2 run ``provision-183652``, ``provision.jsonl`` lines 19-100: the app's
-  profile created, its record directory, video and ``basic.ini`` rows written and read back, the
-  app's collection and scene ``Game`` created, an ``xcomposite_input`` and a ``pulse_output_capture``
-  created, the special inputs read.
+- ``tests/fixtures/obs_provision/r1-trial2-provisioning.jsonl``: R1 run
+  ``campaign-simple-default-trial2-173143``, ``transcript.jsonl`` lines 9-22 (``docs/m0/clock.md``),
+  copied verbatim: video settings written and read back, an ``xcomposite_input`` created with a
+  placeholder window, its window list, a window set on it.
+- ``tests/fixtures/obs_transcripts/provision.jsonl``: R2's first provisioning (its ``README.md``): the
+  app's profile created, its record directory, video and ``basic.ini`` rows written and read back,
+  the app's collection and scene ``Game`` created, an ``xcomposite_input`` and a
+  ``pulse_output_capture`` created, the special inputs read. Requests the fake does not implement
+  (``GetVersion``, the output statuses) are not provisioning's and are skipped.
 
 Each recorded request that provisioning also sends goes to a ``FakeObs`` that knows only the rig
 (screen size, input kinds, the windows on screen). The fake must answer with OBS's status code and,
@@ -36,11 +38,21 @@ from pathlib import Path
 from typing import Any
 
 from anki_miner_game.models.config import AppConfig, RecordingSettings
+from anki_miner_game.models.constants import OBS_SCENE_NAME
 from anki_miner_game.models.obs import ObsRequestError, ProvisionResult
-from anki_miner_game.obs.provision import CONTAINER_KEYS, OFF_KEYS, ObsProvisioner
+from anki_miner_game.models.profile import CaptureSettings, GameProfile
+from anki_miner_game.obs.provision import (
+    CONTAINER_KEYS,
+    DESKTOP_AUDIO_INPUT,
+    OFF_KEYS,
+    XCOMPOSITE_INPUT,
+    ObsProvisioner,
+)
 from tests.obs.fake_obs import FakeObs, Sleeps
 
-FIXTURES = Path(__file__).parents[1] / "fixtures" / "obs_provision"
+FIXTURES = Path(__file__).parents[1] / "fixtures"
+R1_CAPTURE = FIXTURES / "obs_provision" / "r1-trial2-provisioning.jsonl"
+R2_PROVISION = FIXTURES / "obs_transcripts" / "provision.jsonl"
 
 READ_PARAMETERS = frozenset(CONTAINER_KEYS + OFF_KEYS + (("Output", "Mode"), ("SimpleOutput", "RecQuality")))
 """The ``basic.ini`` keys the fake models that the recorded run reads; it models no other key's default."""
@@ -55,8 +67,8 @@ SWITCH_EVENTS = (
 )
 
 
-def load(name: str) -> list[dict[str, Any]]:
-    return [json.loads(line) for line in (FIXTURES / name).read_text(encoding="utf-8").splitlines()]
+def load(path: Path) -> list[dict[str, Any]]:
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
 
 
 def payloads(frames: list[dict[str, Any]], op: int) -> list[dict[str, Any]]:
@@ -70,7 +82,7 @@ def recorded(frames: list[dict[str, Any]], request_type: str) -> dict[str, Any]:
 
 def rig_kinds() -> list[str]:
     """Input kinds of the rig's OBS: both fixtures come from the same Flatpak OBS on the same host."""
-    return recorded(load("r2-provision.jsonl"), "GetInputKindList")["inputKinds"]
+    return recorded(load(R2_PROVISION), "GetInputKindList")["inputKinds"]
 
 
 def view(request_type: str, data: dict[str, Any] | None) -> object:
@@ -139,14 +151,14 @@ async def replay(obs: FakeObs, frames: list[dict[str, Any]]) -> tuple[list[str],
 
 
 def r2_rig() -> FakeObs:
-    base = recorded(load("r2-provision.jsonl"), "GetVideoSettings")
+    base = recorded(load(R2_PROVISION), "GetVideoSettings")
     return FakeObs(input_kinds=rig_kinds(), base_size=(base["baseWidth"], base["baseHeight"]))
 
 
 async def test_fake_obs_answers_the_r2_provisioning_run_as_obs_did():
     obs = r2_rig()
 
-    checked, mismatches = await replay(obs, load("r2-provision.jsonl"))
+    checked, mismatches = await replay(obs, load(R2_PROVISION))
 
     assert mismatches == []
     assert set(checked) == {
@@ -182,7 +194,7 @@ async def test_fake_obs_answers_the_r2_provisioning_run_as_obs_did():
 async def test_fake_obs_answers_the_r1_capture_setup_as_obs_did():
     obs = FakeObs(input_kinds=rig_kinds())
 
-    checked, mismatches = await replay(obs, load("r1-trial2-provisioning.jsonl"))
+    checked, mismatches = await replay(obs, load(R1_CAPTURE))
 
     assert mismatches == []
     assert checked == [
@@ -200,7 +212,7 @@ async def test_the_profile_r2_wrote_on_a_real_obs_needs_the_app_record_directory
     # R2 wrote the rows provisioning writes, at the default 720p30, but left the recording sharing
     # the stream encoder (it read back RecQuality=Stream); the output root differs.
     obs = r2_rig()
-    await replay(obs, load("r2-provision.jsonl"))
+    await replay(obs, load(R2_PROVISION))
     obs.reset_calls()
     provisioner = ObsProvisioner(obs, platform="linux", sleep=Sleeps())
 
@@ -212,3 +224,24 @@ async def test_the_profile_r2_wrote_on_a_real_obs_needs_the_app_record_directory
     assert result == ProvisionResult(changed=True, needs_restart=True)
     assert obs.mutating() == ["SetRecordDirectory", "SetProfileParameter", "SetProfileParameter"]
     assert obs.recording_pausable is False
+
+
+async def test_the_collection_r2_made_on_a_real_obs_gets_game_as_program_scene_and_the_app_inputs():
+    """R2 item 13: ``CreateScene Game`` left OBS's ``Scene`` as the program scene (``provision.jsonl``)."""
+    frames = load(R2_PROVISION)
+    obs = r2_rig()
+    await replay(obs, frames)
+    obs.reset_calls()
+    assert obs.collection.program_scene == "Scene"
+    window = recorded(frames, "GetInputSettings")["inputSettings"]["capture_window"]  # the probe window
+    provisioner = ObsProvisioner(obs, platform="linux", sleep=Sleeps())
+
+    await provisioner.ensure_collection(
+        GameProfile(slug="probe", title="Probe", capture=CaptureSettings(window=window))
+    )
+
+    assert ("SetCurrentProgramScene", {"sceneName": OBS_SCENE_NAME}) in obs.calls
+    assert obs.collection.program_scene == OBS_SCENE_NAME
+    # R2's driver named its inputs differently; they are not the app's and stay as they were.
+    assert obs.scene_items() == ["Game capture", "Game audio", XCOMPOSITE_INPUT, DESKTOP_AUDIO_INPUT]
+    assert obs.collection.inputs[XCOMPOSITE_INPUT].settings["capture_window"] == window
