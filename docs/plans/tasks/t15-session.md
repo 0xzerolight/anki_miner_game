@@ -29,9 +29,13 @@ No new dependency.
 listed in the coverage map below, 18.1 row Reconcile) and the master plan
 `/home/light/Projects/anki_miner_game/.worktrees/t15-session/docs/plans/2026-09-21-master-plan.md`
 (sections 1-4 and the card `### T15 session actor + recorder`). M0 inputs:
-`docs/m0/source-findings.md` (S1), `docs/m0/wave-1-amendments.md`, `docs/contracts.md`, and R1's
+`docs/m0/source-findings.md` (S1), `docs/m0/wave-1-amendments.md`, `docs/contracts.md`, R1's
 `docs/m0/clock.md` on branch `feat/r1-clock-sync` (read it with
-`git -C /home/light/Projects/anki_miner_game show feat/r1-clock-sync:docs/m0/clock.md`).
+`git -C /home/light/Projects/anki_miner_game show feat/r1-clock-sync:docs/m0/clock.md`), and R2's
+`docs/m0/obs-behaviour.md` on branch `feat/r2-obs-behaviour` (`git -C /home/light/Projects/anki_miner_game
+show feat/r2-obs-behaviour:docs/m0/obs-behaviour.md`; its transcripts are
+`tests/fixtures/obs_transcripts/` on that branch). "R2 item N" below is a row of that file's summary
+table.
 
 ## Global Constraints
 
@@ -87,9 +91,9 @@ Verbatim from the master plan; every task below inherits them.
 - Single-file test runs pass `-n0 -p no:cacheprovider` to skip xdist start-up; Task 7 runs the real
   gate.
 - Every piece of code in this plan was applied on 2026-09-21, task by task, to a scratch copy of
-  this worktree at BASE: each "run it to fail" step failed as stated, each "run it to pass" step
-  passed, and after Task 6 black, ruff and mypy were clean and the whole suite was green. Paste it
-  as written.
+  this worktree at BASE, and again after the round-1 judge revision: each "run it to fail" step
+  failed as stated, each "run it to pass" step passed, and after Task 6 black, ruff and mypy were
+  clean and the whole suite was green. Paste it as written.
 - Before starting, re-read `docs/specs/2026-09-20-anki-miner-game-design.md` sections 6.3 and 7:
   if the M0 gate amended the degraded clock (decision 4 below), apply that amendment inside
   `_degraded_clock` and `_reanchor` only, and add a test beside `test_row3_*`.
@@ -103,11 +107,20 @@ Answered from the card, the spec, the M0 inputs and the code; nobody else rules 
    arrives through the same queue; `_enqueue` (on the loop) resolves a registered waiter before
    queueing the event, so the handler wakes while the event copy waits its turn and is then
    ignored. The waiter is registered before the request goes out, because obs-websocket sends
-   events and responses from separate pool tasks with no order (source findings summary 7). The
-   15 s switch timeout cancels only the actor's await: a request stuck in OBS (the restart question
-   of source findings section 2 holds the `SetCurrentProfile` answer) keeps the gateway's request
-   thread until the gateway's own request timeout drops the link (T12), and the restore that
-   follows then fails and stays pending (decision 11).
+   events and responses from separate pool tasks with no order (source findings summary 7; R2
+   item 5 saw both orders). `_expecting(predicate)` is that waiter, shared by the switch and by
+   quit (decision 18).
+   **OBS's restart question** (R2 item 3): switching between profiles whose `[Audio] SampleRate` or
+   `ChannelSetup` differ makes OBS switch, send `...Changing` and `...Changed`, then hold the
+   `SetCurrentProfile` answer behind a modal "Restart" question. A `...Changed` with no answer
+   `RESTART_QUESTION_S` (3 s; R2: the answer follows the event within a millisecond) later raises
+   the `obs_question` banner ("answer it in OBS's window") and the switch waits on for the answer
+   until `SWITCH_TIMEOUT_S`: an answered question lets the arm go on. A switch whose request is
+   still unanswered at the timeout raises `_SwitchTimeoutError(unanswered=True)`; T12 sends one
+   request at a time and keeps an unanswered one until its `REQUEST_TIMEOUT_S` drops the link, so
+   a restore sent now would only queue behind it: the failed arm goes idle without restoring and
+   the restore runs at the idle retry (decision 11). The lasting fix is provisioning's (R2 item 3:
+   copy the user's audio values into the app profile, T14's M0 amendment); this is the fallback.
 2. **Finalise is awaited inside the handler.** The session's `STOPPED` handler closes the journal,
    writes the manifest, publishes `finalising`, awaits `FinaliseWorker.run` (up to ~10 s of rename
    retries on Windows) and returns to `armed`. Messages queue meanwhile; a `STARTED` that arrives
@@ -125,13 +138,13 @@ Answered from the card, the spec, the M0 inputs and the code; nobody else rules 
    `_degraded_clock`/`_mark_degraded`/`_reanchor`, and the banner says the timing may be off by a
    few seconds.
 5. **Matching an active recording to its manifest (reconcile row 4).** `GetOutputSettings` on the
-   record output returns the file being written (source findings section 7). R2 is still running,
-   but its run data already shows both halves: after a reconnect `simple_file_output`'s `path` is
-   the file OBS reported at `STARTED`
-   (`.orchestration/m0/data/r2-obs-behaviour/runs/reconnect-184034/reconnect.jsonl`, the
-   `GetOutputSettings` answers before and after the drop), and after a split both the `path` and
-   the `STOPPED` `outputPath` stay the first file's (`runs/split-184053/split.jsonl`). The actor tries `RECORD_OUTPUT_NAMES` (`simple_file_output`, `adv_file_output`,
-   `adv_ffmpeg_output`, provisional until R2) and uses the first path returned; the manifest is
+   record output returns the file being written (source findings section 7). R2 settled it (items
+   8 and 10): after a reconnect `simple_file_output`'s `path` equals the `STARTED` `outputPath`
+   (`reconnect.jsonl`), in Advanced mode the output is `adv_file_output` (`split.jsonl`), and after
+   a split the `path` and the `STOPPED` `outputPath` stay the first file's. File size against
+   `outputBytes` does not work (R2 section 5). The actor tries `RECORD_OUTPUT_NAMES`
+   (`simple_file_output`, `adv_file_output`: the one `[Output] Mode` uses answers, the other is
+   600) and uses the first path returned; the manifest is
    `incoming_files(_incoming, path).manifest` in state `recording`, and the path must lie in
    `_incoming/`. When no output answers, the actor cannot tell which `_incoming/` session is live,
    so it finalises no orphan then; the next `STOPPED` or reconcile does. `GetOutputSettings` is not
@@ -141,11 +154,13 @@ Answered from the card, the spec, the M0 inputs and the code; nobody else rules 
 6. **Rows 1-3 check the live file too.** While recording, reconcile treats the session as stopped
    when the record output is inactive (row 1) or writes a different file (stopped and restarted
    while the app was disconnected); the other recording is not a session.
-7. **Stop offset without `STOPPED`** is the clock reading at `ExitStarted`, or at the
-   `_ConnectionLost` that preceded reconcile row 1 or "OBS gone" (spec 6.4 "last clock reading").
-   T03's `reading_ms` never returns less than the last journalled offset, so a line journalled
-   after the loss becomes a zero-length click-through and is dropped by the cue rules instead of
-   producing a cue past the video's end.
+7. **Stop offset without `STOPPED`** is the clock reading at `ExitStarted`, or the reading taken
+   at the `_ConnectionLost` that preceded reconcile row 1 or "OBS gone" (spec 6.4 "last clock
+   reading"). The reading is taken when the loss is handled and kept as `_lost_ms`, before any
+   later line is journalled (T03's `reading_ms` never returns less than the last journalled offset,
+   so taking it at the end would move the stop past those lines). Every line journalled after the
+   loss then lies past the stop and `build_cues` drops it as a skip (`cues.py`, the `kept` rule),
+   so no cue runs past a crashed OBS's video.
 8. **"Reconcile finding OBS gone"** (spec 6.4): while recording with the connection lost, every
    `OBS_GONE_CHECK_S` (5 s) the actor asks `ObsDiscovery.is_running()` on a worker thread; `False`
    ends the session flagged `obs_exited`. The gateway keeps reconnecting on its own (T12).
@@ -167,10 +182,14 @@ Answered from the card, the spec, the M0 inputs and the code; nobody else rules 
     first and stops the old sources only once they pass. `needs_restart` from `ensure_profile` is a
     warning banner; the wizard (T21) restarts OBS.
 11. **Restore.** `_restore_obs` switches collection then profile back to the saved names and
-    deletes the file. It runs at disarm, after a failed arm, on every `_Connected` while idle
-    (which is the launch restore after an unclean exit) and every `RESTORE_RETRY_S` (10 s) while
-    idle; it waits while any output is active (spec 6.2), skips a name OBS no longer has, and
-    deletes an unreadable file.
+    deletes the file. It runs at disarm, after a failed arm (not after a switch OBS left
+    unanswered, decision 1), on every `_Connected` while idle (which is the launch restore after
+    an unclean exit) and every `RESTORE_RETRY_S` (10 s) while idle; it waits while any output is
+    active (spec 6.2), skips a name OBS no longer has, and deletes an unreadable file. A failed
+    restore waits a full `RESTORE_RETRY_S` before the next try. While idle and not connected with
+    the file present, the same timer asks `ObsDiscovery.is_running()` on a worker thread and
+    connects once OBS runs, so a launch with OBS closed still restores when the user opens OBS
+    (spec 6.2, 17 "Unclean previous exit"; T12 makes no connection after a failed first one).
 12. **Sources.** Built by an injected `source_factory(cfg, profile)` at arm, started and stopped on
     the loop (TextSource contract); `_stop_sources` awaits `wait_closed()` for each. The status
     listener runs on the source's thread and is handed to the loop with `call_soon_threadsafe`
@@ -187,18 +206,30 @@ Answered from the card, the spec, the M0 inputs and the code; nobody else rules 
     `replaces_previous=True` marks every typewriter merge, however it was journalled.
 15. **Split** (spec 7): the first `RecordFileChanged` journals a stop at the clock reading, flags
     `split_unsupported`, resets the pipeline and raises a banner; later lines are not journalled
-    and the final `STOPPED` adds no second stop. Finalise uses the manifest's first file; the second
-    file stays in `_incoming/` without a manifest.
-16. **Start failure.** `StartRecord` raising, no `STARTED` within `START_TIMEOUT_S` (10 s,
-    provisional: OBS refuses some starts in a modal with no event, source findings section 6), or a
-    `STOPPED` while a start is pending: `START_FAILED_BANNER_KEY` banner, held lines dropped, state
-    stays `armed`. A late `STARTED` is still a session.
+    (`_Session.stop_journalled`) and the final `STOPPED` adds no second stop. Finalise uses the
+    manifest's first file; the second file stays in `_incoming/` without a manifest. `STOPPED`'s
+    `outputPath` still names the first file (R2 item 10) and is never read.
+16. **Start failure.** `StartRecord` raising, a `STOPPED` while a start is pending, or (R2 item 11)
+    no `STARTED` within `START_TIMEOUT_S` (10 s) of the answer **and** `GetRecordStatus` inactive
+    (or unreadable): `START_FAILED_BANNER_KEY` banner, held lines dropped, state stays `armed`. A
+    failed start answers `StartRecord` 100 and shows its reason only in an OBS modal, so the
+    timeout banner points at OBS's window. Active at the deadline means still starting: the
+    deadline moves on by `START_TIMEOUT_S`. A late `STARTED` is still a session.
 17. **Drift samples** (spec 7): `GetRecordStatus` at `STARTED` (after the manifest is written), at
-    each pause edge, and on the Stop command before `StopRecord`; only while the output is active.
+    each pause edge, and on the Stop command and at quit before `StopRecord`; only while the output
+    is active.
     A stop from OBS's own button has no stop sample.
-18. **Quit** (`shutdown()`, awaited by T16 before the loop stops): armed -> disarm (OBS restored);
-    recording -> sources closed, manifest written, journal closed, OBS keeps recording, and the next
-    launch resumes the session (row 4) or finalises it (row 6).
+18. **Quit** (`shutdown()`, awaited by T16 before the loop stops): armed -> disarm (OBS restored).
+    Recording -> the session is stopped and finished first, so no recording runs on in a
+    minimised OBS with nobody watching the disk: drift sample, `StopRecord`, the stop journalled at
+    the reading when `StopRecord` is answered (the video ends there within a frame, R2 item 9),
+    `STOPPED` awaited through `_expecting` up to `QUIT_STOP_TIMEOUT_S` (5 s; R2: 0.6-1.3 s), then
+    the normal finalise and disarm. Not connected, `StopRecord` refused, or no `STOPPED` in time:
+    the old fallback, sources closed, manifest written, journal closed, and the next launch
+    resumes the session (row 4) or finalises it (row 6). Spec 16 hides the window while recording
+    but has a tray Quit and no error-matrix row for it; this is the behaviour chosen. OBS may still
+    report the recording active for ~170 ms after `STOPPED` (R2 item 9); a disarm restore that
+    meets that waits for the next launch like any pending restore.
 19. **An unexpected exception in a handler** is logged and raises the `internal_error` banner; the
     actor keeps consuming. A subscriber that raises is logged and skipped.
 20. **Resume without the profile** (row 4, profile deleted meanwhile): a `GameProfile(slug, title,
@@ -207,6 +238,26 @@ Answered from the card, the spec, the M0 inputs and the code; nobody else rules 
     passes it to the actor and to anything else that finalises.
 22. **Banner keys** are the `BannerKey` enum in `session.py` plus `START_FAILED_BANNER_KEY`; a key
     is cleared only after it was raised, so no stray `BannerCleared` events.
+23. **The stop is `STOPPING`'s reading** (R2 item 9): the video ends at `STOPPING` within a frame;
+    `STOPPED` follows 0.6 s (Simple, NVENC) to 1.3 s (Advanced, x264) later. `STOPPING` with a
+    session journals `StopRecord(reading_ms(t))` and sets `stop_journalled`, so a line accepted
+    before `STOPPED` is shown but not journalled; `STOPPED` finalises as before and journals the
+    stop at its own reading only when `STOPPING` was missed.
+24. **A pause edge that changes nothing** (the clock already in that state) means its partner was
+    lost (R2 `missed_pause`: a `RESUMED` with no `PAUSED`, which can reach the actor after
+    reconcile read "not paused"; source findings summary 7: no ordering). On the `EventClock` the
+    pause length is then unknown, so it takes reconcile row 3's path: `GetRecordStatus`, the
+    `OutputDurationClock`, `clock_degraded` (`_degrade`). On the `OutputDurationClock` it is
+    ignored: the 10 s re-anchor follows OBS's pause flag.
+25. **`finalise_pending` is retried at launch only** (spec 10.3, 17 "Rename fails after retries"):
+    the first orphan sweep after launch (the first reconcile, or launch with OBS absent) finalises
+    `recording` and `finalise_pending` manifests; later sweeps (reconnects, a `STOPPED` with no
+    session) only `recording` ones, since each locked video costs up to 9.8 s inside a handler.
+26. **Manifest writes leave the loop.** `write_manifest_atomic` fsyncs (`store.py`), and the loop
+    also stamps websocket frames at receipt while OBS writes video to the same disk (spec 4.2,
+    8.1), so every manifest write while a session runs is awaited through `asyncio.to_thread`
+    inside its handler (order kept: the handler waits). Journal appends only flush and stay on the
+    loop.
 
 ## M0 values and where they live
 
@@ -215,8 +266,10 @@ All at the top of `anki_miner_game/session/session.py`, in one block:
 | Constant | Value | Source | Status |
 |---|---|---|---|
 | `ZERO_EVENT`, `CAPTURE_LATENCY_MS` | `"STARTED"`, `10` | R1 `docs/m0/clock.md` | Linux measured; Windows provisional until H5 |
-| `START_TIMEOUT_S` | `10.0` | S1 section 6 (failed start sends no event), R1 (`STARTED` 7-184 ms after the request) | provisional until R2 |
-| `RECORD_OUTPUT_NAMES` | `simple_file_output`, `adv_file_output`, `adv_ffmpeg_output` | S1 section 7, R2 reconnect run | provisional until R2 |
+| `START_TIMEOUT_S` | `10.0` | R2 item 11 (failed start: no `STARTED` within 10 s and `GetRecordStatus` inactive), R1 (`STARTED` 7-184 ms after the request) | settled by R2 |
+| `RECORD_OUTPUT_NAMES` | `simple_file_output`, `adv_file_output` | R2 items 8, 10 (the output per `[Output] Mode`) | settled by R2 |
+| `RESTART_QUESTION_S` | `3.0` | R2 items 3, 5 (answer within a millisecond of `...Changed`, or never while OBS asks) | settled by R2 |
+| `QUIT_STOP_TIMEOUT_S` | `5.0` | R2 item 9 (`STOPPED` 0.6-1.3 s after `StopRecord`) | settled by R2 |
 | `SWITCH_TIMEOUT_S` | `15.0` | spec 6.2 step 3 | fixed |
 | `OBS_LAUNCH_TIMEOUT_S` | `30.0` | spec 17 | fixed |
 | `REANCHOR_S` | `10.0` | spec 7 | fixed |
@@ -249,12 +302,13 @@ and T25 (integration) rely on exactly these names.
 ```python
 # anki_miner_game/session/session.py
 ZERO_EVENT: Final = "STARTED"; CAPTURE_LATENCY_MS: Final = 10
-START_TIMEOUT_S: Final = 10.0; RECORD_OUTPUT_NAMES: Final = ("simple_file_output", "adv_file_output", "adv_ffmpeg_output")
+START_TIMEOUT_S: Final = 10.0; RECORD_OUTPUT_NAMES: Final = ("simple_file_output", "adv_file_output")
+RESTART_QUESTION_S: Final = 3.0; QUIT_STOP_TIMEOUT_S: Final = 5.0
 SWITCH_TIMEOUT_S: Final = 15.0; OBS_LAUNCH_TIMEOUT_S: Final = 30.0; REANCHOR_S: Final = 10.0
 FREE_SPACE_WARN_BYTES: Final = 5 * 10**9; TICK_S: Final = 1.0; OBS_GONE_CHECK_S: Final = 5.0; RESTORE_RETRY_S: Final = 10.0
 
 class BannerKey(StrEnum):   # Banner.key values, besides START_FAILED_BANNER_KEY
-    OBS, ARM, LOW_DISK, OBS_RESTART, RESTORE, NO_SOURCE, STOP_FAILED, FOREIGN_RECORDING,
+    OBS, ARM, LOW_DISK, OBS_RESTART, OBS_QUESTION, RESTORE, NO_SOURCE, STOP_FAILED, FOREIGN_RECORDING,
     SESSION_FILES, SPLIT, CLOCK, OBS_EXITED, FINALISE, NO_CUES, INTERNAL
 
 class FinaliseWorker:
@@ -276,7 +330,8 @@ class SessionActor:                     # satisfies interfaces.session.SessionCo
     def state(self) -> AppState: ...
     async def run(self) -> None: ...        # launch duties, then the queue, until shutdown(); schedule once on the I/O loop
     async def join(self) -> None: ...       # launch done and every queued message handled
-    async def shutdown(self) -> None: ...   # on the I/O loop, while run() runs; awaits wait_closed of every source
+    async def shutdown(self) -> None: ...   # on the I/O loop, while run() runs; awaits wait_closed of every source;
+                                            # while recording it first stops OBS and finalises (decision 18)
 
 # anki_miner_game/session/restore.py
 RESTORE_FILENAME: Final = "obs_restore.json"
@@ -294,32 +349,38 @@ For T16: build `FinaliseWorker()` once; build the actor on the I/O loop's thread
 `gateway.subscribe` is done by the actor itself; the sink the sources get posts `LineReceived`
 through `post`; forward `SessionEvent`s to the Presenter (and accepted lines to the feed) with
 `actor.subscribe`; schedule `actor.run()` once; on quit `await actor.shutdown()`, then
-`finaliser.shutdown()`, then close the gateway.
+`finaliser.shutdown()`, then close the gateway. Quit while recording can take up to
+`QUIT_STOP_TIMEOUT_S` plus one finalise (up to ~10 s of rename retries on Windows) before
+`shutdown()` returns.
 
 ## Spec coverage map
 
 | Requirement (card, spec) | Where | Tests |
 |---|---|---|
 | Arming steps 1-4, timeout restore (6.2) | Task 3 `_arm`, `_switch_to_app`, `_switch`, `_to_idle` | `test_session_arm.py` |
-| Disarm, restore file, launch restore (6.2, 17 unclean exit) | Task 3 `_restore_obs`; Task 6 reconcile | `test_disarm_*`, `test_restore_*`, `test_launch_restores_*` |
+| OBS's restart question at a switch (R2 items 3, 5) | Task 3 `_switch`, `_to_idle(restore=False)` | `test_obs_asking_to_restart_*`, `test_an_answered_restart_question_*` |
+| Disarm, restore file, launch restore (6.2, 17 unclean exit) | Task 3 `_restore_obs`, `_on_tick`; Task 6 reconcile | `test_disarm_*`, `test_restore_*`, `test_a_restore_left_at_launch_*`, `test_launch_restores_*` |
 | Ownership rule (6.2) | Task 4 `_on_started` | `test_a_recording_that_starts_while_idle_*`, `test_a_recording_outside_*` |
 | Recorder (11.4) | Task 2 | `tests/obs/test_recorder.py` |
 | Manifest + journal at `STARTED`, NN (10.2) | Task 4 `_on_started` | `test_started_writes_*`, `test_the_session_number_*` |
 | Lines, pipeline reset, replace rule (8.2, W1 amendments 3) | Task 4 `_on_line`, `_accept`, `_replace`, `_journal_line` | `test_lines_while_armed_*`, `test_a_pause_*`, `test_a_merge_*` |
 | Pause edges, drift samples (7) | Task 4 `_on_pause_edge`, `_sample_drift` | `test_a_pause_drops_lines_*`, `test_a_whole_session_*` |
 | Auto-start hold (12, W2a) | Task 4 `_start`, `_accept`, `_replace`, `_on_started` | `test_auto_start_*`, `test_a_merge_into_a_held_line_*`, `test_a_failed_start_*` |
-| StartRecord fails (17) | Task 4 `_start_failed`, `_on_tick` | `test_a_failed_start_record_*`, `test_no_started_within_*` |
+| StartRecord fails (17, R2 item 11) | Task 4 `_start_failed`, `_start_timed_out`, `_on_tick` | `test_a_failed_start_record_*`, `test_no_started_within_*`, `test_a_start_still_active_*` |
+| Stop offset at `STOPPING` (7, R2 item 9) | Task 4 `_on_stopping`, `_on_stopped`, `_end_session` | `test_a_whole_session_*` (a line between `STOPPING` and `STOPPED`); every other test ends on `STOPPED` alone |
 | No text source at Start (17) | Task 4 `_on_started`, Task 3 `_on_source_status` | `test_no_connected_source_*` |
 | Zero cues (17), finalise worker (10.3, W1 amendment 8) | Task 4 `_finalise`; Task 3 `FinaliseWorker` | `test_zero_cues_*`, `test_finalise_worker_*` |
 | Writability, free space (17) | Task 3 `_writable`, `_arm` | `test_an_output_folder_*`, `test_low_free_space_*` |
 | Split (7, 17) | Task 5 `_on_split` | `test_a_split_*` |
-| OBS exit, connection loss (6.4, 17) | Task 5 `_obs_gone`, `_on_tick` | `test_exit_started_*`, `test_lines_keep_*`, `test_obs_gone_*` |
+| OBS exit, connection loss (6.4, 17) | Task 5 `_obs_gone`, `_on_tick`, `_lost_ms` | `test_exit_started_*`, `test_lines_keep_*`, `test_obs_gone_*` (two lines after the loss) |
 | Reconcile rows 1-6, matching (6.3, 18.1) | Task 6 `_reconcile`, `_live_output_path`, `_manifest_for`, `_resume` | `test_row1_*` ... `test_row6_*` |
-| Degraded clock and re-anchor (7) | Task 6 `_degraded_clock`, `_mark_degraded`, `_reanchor` | `test_row3_*`, `test_row4_*` |
-| Orphan finalise only after reconcile or with OBS absent (card) | Task 6 `_launch`, `_sweep_orphans`, `_on_stopped` | `test_row5_*`, `test_row6_*`, `test_orphans_*` |
+| Degraded clock and re-anchor (7) | Task 6 `_degrade`, `_degraded_clock`, `_mark_degraded`, `_reanchor` | `test_row3_*`, `test_row4_*` |
+| A pause edge that changes nothing (R2 `missed_pause`) | Task 6 `_on_pause_edge`, `_degrade` | `test_a_pause_edge_that_changes_nothing_*` |
+| Orphan finalise only after reconcile or with OBS absent (card); `finalise_pending` at launch only (10.3, 17) | Task 6 `_launch`, `_sweep_orphans`, `_on_stopped` | `test_row5_*`, `test_row6_*`, `test_orphans_*`, `test_finalise_pending_is_retried_*` |
 | `SessionEvent` publication, `StateChanged.slug` (W2a) | Task 3 `_set_state` | `test_arming_another_game_*`, `test_a_whole_session_*` |
 | Sources on the actor's thread, `wait_closed` at disarm, listener marshalling (W2a) | Task 3 `_start_sources`, `_stop_sources`, `_source_status_listener` | `test_sources_start_*`, `test_status_listener_*`, `test_disarm_*` |
-| Quit (T16 relies on it) | Task 3/4 `_shutdown` | `test_quitting_*` |
+| Quit (T16 relies on it) | Task 3/4 `_shutdown`, `_stop_for_quit` | `test_quitting_*` |
+| Manifest writes off the loop | Task 4 `_on_started`, `_write_manifest` | every test that reads a manifest |
 
 ---
 
@@ -600,7 +661,7 @@ cd /home/light/Projects/anki_miner_game/.worktrees/t15-session && git add anki_m
   `SessionActor` with `post`, `subscribe`, `state`, `run`, `join`, `shutdown`; arming, disarming,
   restore, sources. Private names later tasks extend: `_handle`, `_on_command`, `_on_obs_event`,
   `_on_tick`, `_shutdown`, `_launch` (replaced whole), `_publish`, `_set_state`, `_banner`,
-  `_clear`, `_obs_status`, `_to_idle`, `_active_outputs`, `_switch`, `_restore_obs`,
+  `_clear`, `_obs_status`, `_to_idle`, `_active_outputs`, `_expecting`, `_switch`, `_restore_obs`,
   `_ensure_connected`, `_start_sources`, `_stop_sources`.
 
 - [ ] **Step 1: Write the test harness**
@@ -691,6 +752,11 @@ class FakeObs:
     websocket: str = "5.7.4"
     lost_switch_events: int = 0
     """How many of the next ``...Changed`` events after a ``SetCurrent...`` never arrive (the switch times out)."""
+    restart_question: asyncio.Event | None = None
+    """Set: ``SetCurrentProfile`` switches and sends its event, then answers only once this is set
+    (OBS's modal restart question, R2 item 3)."""
+    stops_on_request: bool = False
+    """``StopRecord`` makes OBS send ``STOPPING`` and ``STOPPED`` (otherwise the tests send them)."""
 
 
 class FakeGateway:
@@ -732,7 +798,10 @@ class FakeGateway:
             raise pending.pop(0)
         if not self.connected:
             raise ObsConnectError("not connected")
-        return self._answer(name, fields)
+        answer = self._answer(name, fields)
+        if name == "SetCurrentProfile" and self.obs.restart_question is not None:
+            await self.obs.restart_question.wait()
+        return answer
 
     # test side
     def emit(self, name: str, data: dict[str, Any] | None = None, t: float | None = None) -> None:
@@ -783,7 +852,13 @@ class FakeGateway:
                 if fields["outputName"] != "simple_file_output" or obs.output_path is None:
                     raise ObsRequestError(name, 600, "No output was found")
                 return {"outputSettings": {"path": obs.output_path, "muxer_settings": ""}}
-            case "StartRecord" | "StopRecord":
+            case "StartRecord":
+                return {}
+            case "StopRecord":
+                if obs.stops_on_request:
+                    obs.record_active = obs.record_paused = False
+                    self.record_event(OutputState.STOPPING)
+                    self.record_event(OutputState.STOPPED, obs.output_path)
                 return {}
         raise AssertionError(f"unexpected request {name}")
 
@@ -996,7 +1071,14 @@ class Harness:
         await self.settle()
         return video
 
+    async def stopping(self, t: float) -> None:
+        """OBS begins to stop at ``t``: the video ends here (R2 item 9)."""
+        self.clock.t = t
+        self.gateway.record_event(OutputState.STOPPING, None, t)
+        await self.settle()
+
     async def stopped(self, t: float, stem: str = OBS_STEM) -> None:
+        """``STOPPED`` at ``t``; without ``stopping`` first it stands for a ``STOPPING`` the app missed."""
         self.obs.record_active = False
         self.obs.record_paused = False
         self.clock.t = t
@@ -1038,12 +1120,18 @@ class Harness:
 
 import pytest
 
+from anki_miner_game.session import session as session_mod
 from tests.session.actor_harness import Harness
 
 
 @pytest.fixture
-async def rig(tmp_path):
-    """A ``Harness`` that is built but not started: set the fakes up, then ``await rig.start()``."""
+async def rig(tmp_path, monkeypatch):
+    """A ``Harness`` that is built but not started: set the fakes up, then ``await rig.start()``.
+
+    Teardown quits the actor; a test that ends while recording must not wait the real
+    ``QUIT_STOP_TIMEOUT_S`` for a ``STOPPED`` the fake OBS only sends when ``stops_on_request``.
+    """
+    monkeypatch.setattr(session_mod, "QUIT_STOP_TIMEOUT_S", 0.05)
     harness = Harness(tmp_path)
     yield harness
     await harness.stop()
@@ -1218,15 +1306,25 @@ async def test_finalise_worker_runs_one_call_at_a_time_on_its_own_thread(monkeyp
 """Arming, disarming and the restore file (spec 6.2; 17 rows OBS not running, missing request, active
 output, switch timeout, output folder not writable, free space)."""
 
+import asyncio
+
 import pytest
 
 from anki_miner_game.models.constants import OBS_COLLECTION_NAME, OBS_PROFILE_NAME
-from anki_miner_game.models.messages import OBS_SOURCE_ID, AppState, CommandKind, SourceStatus, SourceStatusChanged
+from anki_miner_game.models.messages import (
+    OBS_SOURCE_ID,
+    AppState,
+    BannerRaised,
+    CommandKind,
+    SourceStatus,
+    SourceStatusChanged,
+    UserCommand,
+)
 from anki_miner_game.models.obs import ObsAuthError, ObsError, ObsUnsupportedError
 from anki_miner_game.session import session as session_mod
 from anki_miner_game.session.restore import ObsRestore, load_restore, restore_path, save_restore
 from anki_miner_game.session.session import BannerKey
-from tests.session.actor_harness import SLUG, FakeSource, Harness, profile
+from tests.session.actor_harness import SLUG, T0, FakeSource, Harness, profile
 
 SWITCH_REQUESTS = ["SetCurrentProfile", "SetCurrentSceneCollection"]
 
@@ -1354,6 +1452,37 @@ async def test_a_switch_that_times_out_is_undone(h: Harness, monkeypatch):
     assert h.provisioner.profiles == []
 
 
+async def test_obs_asking_to_restart_is_a_banner_and_the_restore_waits(h: Harness, monkeypatch):
+    monkeypatch.setattr(session_mod, "SWITCH_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(session_mod, "RESTART_QUESTION_S", 0.05)
+    h.obs.restart_question = asyncio.Event()  # nobody answers it
+    await h.arm()
+    raised = [e.banner.key for e in h.events if isinstance(e, BannerRaised)]
+    assert BannerKey.OBS_QUESTION in raised and BannerKey.OBS_QUESTION not in h.banners()
+    assert h.actor.state is AppState.IDLE
+    assert "answer it in OBS's window" in h.banners()[BannerKey.ARM]
+    assert h.obs.profile == OBS_PROFILE_NAME  # OBS switched before it asked
+    assert restore_path().exists()  # a restore now would queue behind the unanswered request
+    assert h.gateway.names().count("SetCurrentProfile") == 1
+    h.obs.restart_question = None
+    await h.tick(h.clock.t + session_mod.RESTORE_RETRY_S)
+    assert (h.obs.profile, h.obs.collection) == ("Untitled", "Untitled")
+    assert not restore_path().exists()
+
+
+async def test_an_answered_restart_question_lets_the_arm_go_on(h: Harness, monkeypatch):
+    monkeypatch.setattr(session_mod, "RESTART_QUESTION_S", 0.01)
+    question = h.obs.restart_question = asyncio.Event()
+    h.actor.post(UserCommand(CommandKind.ARM, slug=SLUG))
+    async with asyncio.timeout(5):
+        while BannerKey.OBS_QUESTION not in h.banners():
+            await asyncio.sleep(0.01)
+    question.set()  # the user answers in OBS's window
+    await h.settle()
+    assert h.actor.state is AppState.ARMED
+    assert BannerKey.OBS_QUESTION not in h.banners()
+
+
 async def test_a_provisioning_failure_restores_obs(h: Harness):
     h.provisioner.error = ObsError("CreateInput failed")
     await h.arm()
@@ -1440,6 +1569,20 @@ async def test_restore_waits_for_an_active_stream(h: Harness):
     assert not restore_path().exists()
 
 
+async def test_a_restore_left_at_launch_waits_for_obs_to_open(rig: Harness):
+    save_restore(restore_path(), ObsRestore(profile="Untitled", collection="Untitled"))
+    rig.obs.profile, rig.obs.collection = OBS_PROFILE_NAME, OBS_COLLECTION_NAME
+    rig.discovery.running = False
+    await rig.start()
+    await rig.tick(T0 + 1.0)
+    assert rig.gateway.connects == 0
+    rig.discovery.running = True  # the user opens OBS
+    await rig.tick(T0 + 1.0 + session_mod.RESTORE_RETRY_S)
+    assert rig.gateway.connects == 1
+    assert (rig.obs.profile, rig.obs.collection) == ("Untitled", "Untitled")
+    assert not restore_path().exists()
+
+
 async def test_restore_skips_a_profile_obs_no_longer_has(h: Harness):
     await h.arm()
     h.obs.profiles.remove("Untitled")
@@ -1464,7 +1607,7 @@ async def test_quitting_while_armed_disarms(h: Harness):
 - [ ] **Step 3: Run them to fail**
 
 Run: `cd /home/light/Projects/anki_miner_game/.worktrees/t15-session && .venv/bin/pytest -n0 -p no:cacheprovider tests/session/test_session_actor.py tests/session/test_session_arm.py -q`
-Expected: FAIL (`ModuleNotFoundError: No module named 'anki_miner_game.session.session'`).
+Expected: FAIL (`tests/session/conftest.py`: `ImportError: cannot import name 'session' from 'anki_miner_game.session'`).
 
 - [ ] **Step 4: Implement the actor core, arming and disarming**
 
@@ -1502,7 +1645,7 @@ import logging
 import shutil
 import tempfile
 import time
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -1560,13 +1703,19 @@ log = logging.getLogger(__name__)
 ZERO_EVENT: Final = "STARTED"
 CAPTURE_LATENCY_MS: Final = 10
 
-# Provisional until R2 (docs/m0/obs-behaviour.md); read from source in docs/m0/source-findings.md.
+# Measured by R2 (docs/m0/obs-behaviour.md, summary items).
 START_TIMEOUT_S: Final = 10.0
-"""``StartRecord`` answered but no ``STARTED``: OBS refused the start in a modal and sent no event
-(source findings section 6). R1 saw ``STARTED`` 7-184 ms after the request. Provisional until R2."""
-RECORD_OUTPUT_NAMES: Final = ("simple_file_output", "adv_file_output", "adv_ffmpeg_output")
-"""Outputs whose ``GetOutputSettings`` ``path`` is the file being recorded, tried in order (source
-findings section 7; R2 read ``simple_file_output``'s path after a reconnect). Provisional until R2."""
+"""R2 item 11: a failed start answers ``StartRecord`` 100, shows its reason in an OBS modal and sends
+no ``STARTED``; no ``STARTED`` within 10 s and ``GetRecordStatus`` inactive is the failure. R1 saw
+``STARTED`` 7-184 ms after the request."""
+RECORD_OUTPUT_NAMES: Final = ("simple_file_output", "adv_file_output")
+"""R2 item 8: the file output of ``[Output] Mode`` (Simple, Advanced); its ``GetOutputSettings``
+``path`` is the file being recorded, the first file even after a split (item 10)."""
+RESTART_QUESTION_S: Final = 3.0
+"""R2 items 3 and 5: ``SetCurrentProfile`` answers within a millisecond of its ``...Changed`` event, or
+not at all while OBS's modal restart question is open."""
+QUIT_STOP_TIMEOUT_S: Final = 5.0
+"""Quit while recording: how long to wait for ``STOPPED`` after ``StopRecord`` (R2 item 9: 0.6-1.3 s)."""
 
 # Fixed by the spec.
 SWITCH_TIMEOUT_S: Final = 15.0
@@ -1608,6 +1757,7 @@ class BannerKey(StrEnum):
     ARM = "arm"
     LOW_DISK = "low_disk"
     OBS_RESTART = "obs_restart"
+    OBS_QUESTION = "obs_question"
     RESTORE = "obs_restore"
     NO_SOURCE = "no_source"
     STOP_FAILED = "stop_failed"
@@ -1662,6 +1812,12 @@ _COLLECTION: Final = _Switch(
 
 class _SwitchTimeoutError(Exception):
     """A profile or scene collection switch outlived ``SWITCH_TIMEOUT_S``."""
+
+    def __init__(self, text: str, *, unanswered: bool) -> None:
+        super().__init__(text)
+        self.unanswered = unanswered
+        """OBS still holds the request; the gateway sends one request at a time (T12), so every later
+        request waits behind it until OBS answers or the gateway drops the link."""
 
 
 @dataclass
@@ -1810,8 +1966,9 @@ class SessionActor:
         """Quit at the next message boundary; call it on the I/O loop while ``run`` runs.
 
         Stops every text source and awaits ``wait_closed``. While armed it disarms (OBS goes back
-        to the user's profile). While recording OBS keeps recording: the journal is closed and the
-        next launch resumes the session (reconcile row 4) or finalises it (last row).
+        to the user's profile). While recording it first stops OBS and finalises the session, then
+        disarms; if OBS cannot be stopped, the journal is closed and the next launch resumes the
+        session (reconcile row 4) or finalises it (last row).
         """
         done: asyncio.Future[None] = self._loop.create_future()
         self._queue.put_nowait(_Shutdown(done))
@@ -1858,9 +2015,12 @@ class SessionActor:
             await self._stop_sources()
 
     async def _on_tick(self, t: float) -> None:
-        if self._state is AppState.IDLE and self._connected and t >= self._next_restore and restore_path().exists():
+        if self._state is AppState.IDLE and t >= self._next_restore and restore_path().exists():
             self._next_restore = t + RESTORE_RETRY_S
-            await self._restore_obs()
+            if self._connected:
+                await self._restore_obs()
+            elif await asyncio.to_thread(self._discovery.is_running):  # OBS opened after a launch without it
+                await self._ensure_connected()  # its _Connected restores
 
     # --- events out -----------------------------------------------------------------------------
 
@@ -1948,7 +2108,7 @@ class SessionActor:
             result = await self._provisioner.ensure_profile(cfg)
             await self._provisioner.ensure_collection(profile)
         except (_SwitchTimeoutError, ObsError, StoreError) as exc:
-            await self._to_idle()
+            await self._to_idle(restore=not (isinstance(exc, _SwitchTimeoutError) and exc.unanswered))
             self._banner(BannerKey.ARM, BannerLevel.ERROR, f"Could not prepare OBS for {profile.title}: {exc}")
             return
         if result.needs_restart:
@@ -2053,33 +2213,62 @@ class SessionActor:
         ):
             await self._switch(_COLLECTION, OBS_COLLECTION_NAME)
 
-    async def _switch(self, kind: _Switch, name: str) -> None:
-        """``Set...`` and its ``...Changed`` event within ``SWITCH_TIMEOUT_S`` (spec 6.2 step 3).
-
-        The waiter is registered before the request: the event can arrive before the answer
-        (source findings 7). Nothing else is sent until both are in.
-        """
+    @contextlib.contextmanager
+    def _expecting(self, predicate: Callable[[ObsEvent], bool]) -> Iterator[asyncio.Future[ObsEvent]]:
+        """A future the first matching event resolves as it is queued (``_enqueue``), while a handler waits."""
         waiter: asyncio.Future[ObsEvent] = self._loop.create_future()
-        entry = (lambda ev: ev.name == kind.event and ev.data.get(kind.field) == name, waiter)
+        entry = (predicate, waiter)
         self._waiters.append(entry)
         try:
-            async with asyncio.timeout(SWITCH_TIMEOUT_S):
-                await self._gateway.request(kind.request, **{kind.field: name})
-                await waiter
-        except TimeoutError:
-            raise _SwitchTimeoutError(
-                f"OBS did not switch to the {kind.what} {name!r} within {SWITCH_TIMEOUT_S:g} s"
-            ) from None
+            yield waiter
         finally:
             self._waiters.remove(entry)
             waiter.cancel()
+
+    async def _switch(self, kind: _Switch, name: str) -> None:
+        """``Set...`` answered and its ``...Changed`` event in, within ``SWITCH_TIMEOUT_S`` (spec 6.2 step 3).
+
+        The waiter is registered before the request: the event can arrive before the answer (source
+        findings 7, R2 item 5). The event with no answer ``RESTART_QUESTION_S`` later is OBS's modal
+        restart question (R2 item 3): OBS has switched, and a banner asks the user to answer it while
+        the switch waits on. Nothing else is sent until both are in.
+        """
+        with self._expecting(lambda ev: ev.name == kind.event and ev.data.get(kind.field) == name) as changed:
+            request = asyncio.create_task(self._gateway.request(kind.request, **{kind.field: name}))
+            try:
+                async with asyncio.timeout(SWITCH_TIMEOUT_S):
+                    await asyncio.wait((request, changed), return_when=asyncio.FIRST_COMPLETED)
+                    if not request.done():  # the event came first: the answer is due at once
+                        await asyncio.wait((request,), timeout=RESTART_QUESTION_S)
+                    if not request.done():
+                        self._banner(
+                            BannerKey.OBS_QUESTION,
+                            BannerLevel.WARNING,
+                            "OBS is asking whether to restart: answer it in OBS's window.",
+                        )
+                        await asyncio.wait((request,))
+                    request.result()  # OBS refused: ObsRequestError
+                    await changed
+            except TimeoutError:
+                asked = changed.done() and not request.done()
+                raise _SwitchTimeoutError(
+                    (
+                        "OBS is still asking whether to restart; answer it in OBS's window"
+                        if asked
+                        else f"OBS did not switch to the {kind.what} {name!r} within {SWITCH_TIMEOUT_S:g} s"
+                    ),
+                    unanswered=not request.done(),
+                ) from None
+            finally:
+                request.cancel()  # an unanswered request stays on the gateway's thread (T12)
+                self._clear(BannerKey.OBS_QUESTION)
 
     async def _restore_obs(self) -> bool:
         """Switch OBS back to ``obs_restore.json`` and delete it (spec 6.2); ``False`` when it has to wait.
 
         It waits while not connected, while any output is active, or after OBS refused; the next
-        ``_Connected`` and every ``RESTORE_RETRY_S`` while idle try again. A name OBS no longer has
-        is skipped.
+        ``_Connected`` and every ``RESTORE_RETRY_S`` while idle try again, a failed try a full
+        ``RESTORE_RETRY_S`` later. A name OBS no longer has is skipped.
         """
         path = restore_path()
         try:
@@ -2106,6 +2295,7 @@ class SessionActor:
             ):
                 await self._switch(_PROFILE, saved.profile)
         except (_SwitchTimeoutError, ObsError) as exc:
+            self._next_restore = self._now() + RESTORE_RETRY_S
             self._banner(
                 BannerKey.RESTORE,
                 BannerLevel.WARNING,
@@ -2123,8 +2313,12 @@ class SessionActor:
         if self._state is AppState.ARMED:
             await self._to_idle()
 
-    async def _to_idle(self) -> None:
-        """Disarm, or undo a failed arm: sources stopped and closed, state ``idle``, OBS restored."""
+    async def _to_idle(self, *, restore: bool = True) -> None:
+        """Disarm, or undo a failed arm: sources stopped and closed, state ``idle``, OBS restored.
+
+        ``restore=False`` after a switch OBS left unanswered: a restore now would only queue behind
+        that request, so it waits for the idle retry (``RESTORE_RETRY_S``).
+        """
         await self._stop_sources()
         self._armed = None
         self._pipeline = None
@@ -2133,7 +2327,10 @@ class SessionActor:
         self._clear(BannerKey.NO_SOURCE, BannerKey.LOW_DISK, BannerKey.OBS_RESTART, START_FAILED_BANNER_KEY)
         if self._state is not AppState.IDLE:
             self._set_state(AppState.IDLE)
-        await self._restore_obs()
+        if restore:
+            await self._restore_obs()
+        else:
+            self._next_restore = self._now() + RESTORE_RETRY_S
 
     # --- text sources (spec 8.1) ----------------------------------------------------------------
 
@@ -2174,7 +2371,7 @@ class SessionActor:
 - [ ] **Step 5: Run them to pass, then lint and type-check**
 
 Run: `cd /home/light/Projects/anki_miner_game/.worktrees/t15-session && .venv/bin/pytest -n0 -p no:cacheprovider tests/session/test_session_actor.py tests/session/test_session_arm.py -q`
-Expected: PASS (37 passed).
+Expected: PASS (40 passed).
 
 Run: `cd /home/light/Projects/anki_miner_game/.worktrees/t15-session && .venv/bin/black --check . && .venv/bin/ruff check . && .venv/bin/mypy anki_miner_game`
 Expected: PASS (black and ruff clean; mypy "Success: no issues found").
@@ -2200,10 +2397,12 @@ cd /home/light/Projects/anki_miner_game/.worktrees/t15-session && git add anki_m
   record types, `incoming_files`, `game_folder`, `reserve_index`, `write_manifest_atomic`,
   `finalise`'s `FinaliseResult` / `FinaliseError` (T06); `Counts.incremented`.
 - Produces: `START`, `STOP`, `TOGGLE`; `STARTED` (ownership rule, manifest, journal, clock, held
-  lines), lines, pause edges, drift samples, `STOPPED` -> finalise -> `armed`; `LineAccepted`,
-  `RecordingStarted`, `RecordingStopped`, `SessionFinalised`. Private names Tasks 5-6 use:
-  `_Session`, `_session`, `_with_flag`, `_end_session`, `_finalise`, `_write_manifest`,
-  `_append`, `_record_status`, `_sample_drift`, `_start_failed`, `_in_incoming`, `_utc_stamp`.
+  lines), lines, pause edges, drift samples, `STOPPING` (the stop), `STOPPED` -> finalise ->
+  `armed`; the start timeout with its `GetRecordStatus` check; quit while recording;
+  `LineAccepted`, `RecordingStarted`, `RecordingStopped`, `SessionFinalised`. Private names Tasks
+  5-6 use: `_Session` (with `stop_journalled`), `_session`, `_with_flag`, `_end_session(stop_ms,
+  flag)`, `_finalise`, `_write_manifest` (async), `_append`, `_record_status`, `_sample_drift`,
+  `_start_failed`, `_start_timed_out`, `_on_pause_edge`, `_in_incoming`, `_utc_stamp`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2260,11 +2459,14 @@ async def test_a_whole_session_leaves_the_pair_in_the_game_folder(h: Harness):
     h.obs.output_duration = 17_400
     await h.send(CommandKind.STOP)
     assert h.gateway.names()[-2:] == ["GetRecordStatus", "StopRecord"]
-    await h.stopped(ZERO + 19.0)
+    await h.stopping(ZERO + 18.1)  # the video ends here (R2 item 9)
+    await h.line("おわり", ZERO + 18.4)  # shown, but past the video's end: not journalled
+    assert h.accepted()[-1] == LineAccepted(h.accepted()[-1].line, None)
+    await h.stopped(ZERO + 18.7)
 
     stem = f"{TITLE} - 01"
     assert (h.game_dir() / f"{stem}.srt").read_bytes() == (
-        "1\n00:00:05,010 --> 00:00:08,660\nこんにちは\n\n2\n00:00:09,010 --> 00:00:18,660\nさようなら\n"
+        "1\n00:00:05,010 --> 00:00:08,660\nこんにちは\n\n2\n00:00:09,010 --> 00:00:17,760\nさようなら\n"
     ).encode()
     assert (h.game_dir() / f"{stem}.mkv").exists()
     assert sorted(p.name for p in h.incoming.iterdir()) == []
@@ -2283,7 +2485,7 @@ async def test_a_whole_session_leaves_the_pair_in_the_game_folder(h: Harness):
             DriftSample(at_ms=18_010, output_duration_ms=17_400),
         ),
     )
-    assert manifest.counts == Counts(received=2, accepted=2)
+    assert manifest.counts == Counts(received=3, accepted=2)  # finalise: accepted = cues
     assert manifest.sources_used == ("textractor",)
     assert h.vad.queued == [h.game_dir() / f"{stem}.session.json"]
     assert h.finalised() == [h.game_dir() / f"{stem}.session.json"]
@@ -2482,10 +2684,21 @@ async def test_no_started_within_the_timeout_is_a_failed_start(h: Harness):
     await h.arm()
     await h.line("はじまり", T0 + 0.2)
     await h.send(CommandKind.START, line=h.accepted()[0].line)
-    await h.tick(h.clock.t + session_mod.START_TIMEOUT_S)
-    assert START_FAILED_BANNER_KEY in h.banners()
+    await h.tick(h.clock.t + session_mod.START_TIMEOUT_S)  # and GetRecordStatus says inactive
+    assert "OBS's window" in h.banners()[START_FAILED_BANNER_KEY]
     await h.send(CommandKind.START)  # may be tried again
     assert h.gateway.names().count("StartRecord") == 2
+
+
+async def test_a_start_still_active_at_the_timeout_waits_for_started(h: Harness):
+    await h.arm()
+    await h.line("はじまり", T0 + 0.2)
+    await h.send(CommandKind.START, line=h.accepted()[0].line)
+    h.obs.record_active = True  # OBS is recording; its STARTED is late
+    await h.tick(h.clock.t + session_mod.START_TIMEOUT_S)
+    assert START_FAILED_BANNER_KEY not in h.banners()
+    await h.started(h.clock.t + 1.0)
+    assert journal(h) == [LineRecord(offset_ms=0, text="はじまり", source="textractor")]
 
 
 async def test_a_stopped_while_starting_is_a_failed_start(h: Harness):
@@ -2561,11 +2774,27 @@ async def test_vad_is_not_queued_when_disabled(h: Harness):
     assert h.finalised() and h.vad.queued == []
 
 
-async def test_quitting_while_recording_leaves_the_session_to_the_next_launch(h: Harness):
+async def test_quitting_while_recording_stops_obs_and_finishes_the_session(h: Harness):
     await h.arm()
     await h.started(ZERO)
     await h.line("まえ", ZERO + 1.0)
+    h.obs.stops_on_request = True
+    h.clock.t = ZERO + 4.0
     await h.stop()
+    assert h.gateway.names().count("StopRecord") == 1
+    srt = (h.game_dir() / f"{TITLE} - 01.srt").read_text(encoding="utf-8")
+    assert srt == "1\n00:00:01,010 --> 00:00:03,660\nまえ\n"  # stop: the reading when StopRecord was answered
+    assert list(h.incoming.iterdir()) == []
+    assert h.sources[0].closed == 1
+    assert (h.obs.profile, h.obs.collection) == ("Untitled", "Untitled")
+    assert not restore_path().exists()
+
+
+async def test_quitting_while_recording_leaves_the_session_to_the_next_launch_when_obs_does_not_stop(h: Harness):
+    await h.arm()
+    await h.started(ZERO)
+    await h.line("まえ", ZERO + 1.0)
+    await h.stop()  # StopRecord is answered, but no STOPPED comes within QUIT_STOP_TIMEOUT_S
     manifest = incoming_manifest(h)
     assert manifest.state is ManifestState.RECORDING
     assert (manifest.counts.accepted, manifest.sources_used) == (1, ("textractor",))
@@ -2725,8 +2954,8 @@ class _Session:
     tail: GameLine | None = None
     """The line behind the journal's last ``LineRecord``, with its latest text."""
     tail_offset: int | None = None
-    split: bool = False
-    """``RecordFileChanged`` came: the journal holds the split's stop; later lines are not journalled."""
+    stop_journalled: bool = False
+    """The journal holds the session's stop (``STOPPING`` or a split); later lines are shown, not journalled."""
     next_anchor: float | None = None
     """While on the ``OutputDurationClock`` (``clock_degraded``): when to re-anchor next."""
 ```
@@ -2801,26 +3030,28 @@ def _with_flag(flags: tuple[Flag, ...], flag: Flag) -> tuple[Flag, ...]:
             await self._stop_sources()
 
     async def _on_tick(self, t: float) -> None:
-        if self._state is AppState.IDLE and self._connected and t >= self._next_restore and restore_path().exists():
+        if self._state is AppState.IDLE and t >= self._next_restore and restore_path().exists():
 ```
 
 **with**:
 
 ```python
     async def _shutdown(self) -> None:
+        if self._state is AppState.RECORDING:
+            await self._stop_for_quit()
         if self._state is AppState.ARMED:
             await self._to_idle()
             return
         await self._stop_sources()
         s = self._session
-        if s is not None:
-            self._write_manifest(s)
+        if s is not None:  # OBS did not stop: the next launch resumes the session (row 4) or finalises it (row 6)
+            await self._write_manifest(s)
             s.journal.close()
 
     async def _on_tick(self, t: float) -> None:
         if self._start_deadline is not None and t >= self._start_deadline:
-            self._start_failed(f"OBS did not start recording within {START_TIMEOUT_S:g} s; check OBS for a message.")
-        if self._state is AppState.IDLE and self._connected and t >= self._next_restore and restore_path().exists():
+            await self._start_timed_out()
+        if self._state is AppState.IDLE and t >= self._next_restore and restore_path().exists():
 ```
 
 **Replace** in `anki_miner_game/session/session.py`:
@@ -2841,6 +3072,8 @@ def _with_flag(flags: tuple[Flag, ...], flag: Flag) -> tuple[Flag, ...]:
                 match ev.data.get("outputState"):
                     case OutputState.STARTED:
                         await self._on_started(ev)
+                    case OutputState.STOPPING:
+                        self._on_stopping(ev)
                     case OutputState.STOPPED:
                         await self._on_stopped(ev)
                     case OutputState.PAUSED:
@@ -2902,6 +3135,17 @@ def _with_flag(flags: tuple[Flag, ...], flag: Flag) -> tuple[Flag, ...]:
         self._held = None
         self._banner(START_FAILED_BANNER_KEY, BannerLevel.ERROR, text)
 
+    async def _start_timed_out(self) -> None:
+        """No ``STARTED`` within ``START_TIMEOUT_S``: a failed start unless OBS reports it recording (R2 item 11)."""
+        try:
+            active = bool((await self._gateway.request("GetRecordStatus")).get("outputActive"))
+        except ObsError:
+            active = False
+        if active:  # still starting: its STARTED is on the way
+            self._start_deadline = self._now() + START_TIMEOUT_S
+            return
+        self._start_failed(f"OBS did not start recording within {START_TIMEOUT_S:g} s; OBS's window says why.")
+
     async def _stop(self) -> None:
         if self._state is not AppState.RECORDING:
             return
@@ -2910,6 +3154,31 @@ def _with_flag(flags: tuple[Flag, ...], flag: Flag) -> tuple[Flag, ...]:
             await self._recorder.stop()
         except ObsError as exc:
             self._banner(BannerKey.STOP_FAILED, BannerLevel.ERROR, f"OBS did not stop recording: {exc}")
+
+    async def _stop_for_quit(self) -> None:
+        """Quit while recording (decision 18): stop OBS and finish the session before the app goes.
+
+        The stop is the reading when ``StopRecord`` is answered: the video ends there within a frame
+        (R2 item 9). Finalise needs ``STOPPED``, awaited up to ``QUIT_STOP_TIMEOUT_S``; without it the
+        session stays in ``_incoming/`` for the next launch.
+        """
+        s = self._session
+        if s is None or not self._connected:
+            return
+        await self._sample_drift()
+        with self._expecting(
+            lambda ev: ev.name == ObsEventName.RECORD_STATE_CHANGED
+            and ev.data.get("outputState") == OutputState.STOPPED
+        ) as stopped:
+            try:
+                await self._recorder.stop()
+                stop_ms = s.clock.reading_ms(self._now())
+                async with asyncio.timeout(QUIT_STOP_TIMEOUT_S):
+                    await stopped
+            except (ObsError, TimeoutError) as exc:
+                log.warning("quit while recording: OBS did not stop (%r); the next launch finishes the session", exc)
+                return
+        await self._end_session(stop_ms)
 
     def _on_line(self, msg: LineReceived) -> None:
         pipeline = self._pipeline
@@ -2927,7 +3196,7 @@ def _with_flag(flags: tuple[Flag, ...], flag: Flag) -> tuple[Flag, ...]:
 
     def _accept(self, line: GameLine) -> None:
         s = self._session
-        if s is not None and not s.split:
+        if s is not None and not s.stop_journalled:
             self._publish(LineAccepted(line, self._journal_line(s, line)))
             return
         if self._held is not None:
@@ -2937,7 +3206,7 @@ def _with_flag(flags: tuple[Flag, ...], flag: Flag) -> tuple[Flag, ...]:
     def _replace(self, line: GameLine) -> None:
         """A typewriter merge (spec 8.2 step 9); see the module docstring for how it is journalled."""
         s = self._session
-        if s is not None and not s.split:
+        if s is not None and not s.stop_journalled:
             if s.tail is not None and _same_line(s.tail, line):
                 self._append(s, ReplaceRecord(text=line.text))
                 s.tail = line
@@ -3013,7 +3282,7 @@ def _with_flag(flags: tuple[Flag, ...], flag: Flag) -> tuple[Flag, ...]:
                 clock=ClockRecord(kind=ClockKind.EVENT, zero_event=ZERO_EVENT, capture_latency_ms=CAPTURE_LATENCY_MS),
                 text_mode=profile.text_mode,
             )
-            write_manifest_atomic(files.manifest, manifest)
+            await asyncio.to_thread(write_manifest_atomic, files.manifest, manifest)  # it fsyncs (decision 26)
             journal = Journal(files.journal)
         except (StoreError, OSError, ValueError) as exc:
             self._banner(
@@ -3044,7 +3313,7 @@ def _with_flag(flags: tuple[Flag, ...], flag: Flag) -> tuple[Flag, ...]:
 
     async def _on_pause_edge(self, ev: ObsEvent, *, paused: bool) -> None:
         s = self._session
-        if s is None or s.clock.paused == paused:
+        if s is None or s.stop_journalled or s.clock.paused == paused:
             return
         record: JournalRecord
         if paused:
@@ -3055,13 +3324,26 @@ def _with_flag(flags: tuple[Flag, ...], flag: Flag) -> tuple[Flag, ...]:
             record = ResumeRecord(offset_ms=s.clock.reading_ms(ev.t_mono))
         self._append(s, record)
         await self._sample_drift()
-        self._write_manifest(s)
+        await self._write_manifest(s)
+
+    def _on_stopping(self, ev: ObsEvent) -> None:
+        """R2 item 9: the video ends at ``STOPPING``; ``STOPPED`` follows 0.6-1.3 s later.
+
+        The stop is journalled here, so a line accepted before ``STOPPED`` is shown but not
+        journalled, and the last cue ends with the video.
+        """
+        s = self._session
+        if s is None or s.stop_journalled:
+            return
+        self._append(s, StopRecord(offset_ms=s.clock.reading_ms(ev.t_mono)))
+        s.stop_journalled = True
 
     async def _on_stopped(self, ev: ObsEvent) -> None:
-        if self._session is not None:
-            await self._end_session(ev.t_mono)
+        s = self._session
+        if s is not None:
+            await self._end_session(s.clock.reading_ms(ev.t_mono))  # the stop, unless STOPPING journalled it
         elif self._start_deadline is not None:
-            self._start_failed("OBS stopped the recording as it started; check OBS for a message.")
+            self._start_failed("OBS stopped the recording as it started; OBS's window says why.")
 
     async def _sample_drift(self) -> None:
         """Spec 7: ``outputDuration`` beside the clock's reading, kept in ``clock.drift_samples``."""
@@ -3081,16 +3363,16 @@ def _with_flag(flags: tuple[Flag, ...], flag: Flag) -> tuple[Flag, ...]:
         status = await self._gateway.request("GetRecordStatus")
         return status, (before + self._now()) / 2
 
-    async def _end_session(self, stop_t: float, flag: Flag | None = None) -> None:
-        """Journal the stop at the clock's reading for ``stop_t``, then finalise and return to ``armed``."""
+    async def _end_session(self, stop_ms: int, flag: Flag | None = None) -> None:
+        """Journal the stop at ``stop_ms`` (unless it is there already), then finalise and return to ``armed``."""
         s, armed = self._session, self._armed
         if s is None or armed is None:
             return
-        if not s.split:
-            self._append(s, StopRecord(offset_ms=s.clock.reading_ms(stop_t)))
+        if not s.stop_journalled:
+            self._append(s, StopRecord(offset_ms=stop_ms))
         s.journal.close()
         flags = s.manifest.flags if flag is None else _with_flag(s.manifest.flags, flag)
-        self._write_manifest(s, stopped_at=self._utc_stamp(), flags=flags)
+        await self._write_manifest(s, stopped_at=self._utc_stamp(), flags=flags)
         self._session = None
         self._clear(BannerKey.NO_SOURCE, BannerKey.STOP_FAILED)
         self._set_state(AppState.FINALISING)
@@ -3129,8 +3411,11 @@ def _with_flag(flags: tuple[Flag, ...], flag: Flag) -> tuple[Flag, ...]:
         if result.queue_vad and self._vad_jobs is not None:
             self._vad_jobs.queue(result.manifest_path)
 
-    def _write_manifest(self, s: _Session, **changes: Any) -> None:
-        """Write the session's manifest with ``changes`` and the live counts, sources and drift samples."""
+    async def _write_manifest(self, s: _Session, **changes: Any) -> None:
+        """Write the session's manifest with ``changes`` and the live counts, sources and drift samples.
+
+        Off the loop (it fsyncs, decision 26), awaited, so writes keep their order.
+        """
         manifest = replace(s.manifest, **changes)
         s.manifest = replace(
             manifest,
@@ -3139,7 +3424,7 @@ def _with_flag(flags: tuple[Flag, ...], flag: Flag) -> tuple[Flag, ...]:
             clock=replace(manifest.clock, drift_samples=tuple(s.samples)),
         )
         try:
-            write_manifest_atomic(s.manifest_path, s.manifest)
+            await asyncio.to_thread(write_manifest_atomic, s.manifest_path, s.manifest)
         except StoreError as exc:
             self._banner(BannerKey.SESSION_FILES, BannerLevel.ERROR, f"Cannot update the session manifest ({exc}).")
 
@@ -3158,7 +3443,7 @@ def _with_flag(flags: tuple[Flag, ...], flag: Flag) -> tuple[Flag, ...]:
 - [ ] **Step 6: Run them to pass, then lint and type-check**
 
 Run: `cd /home/light/Projects/anki_miner_game/.worktrees/t15-session && .venv/bin/pytest -n0 -p no:cacheprovider tests/session/test_session_recording.py tests/session/test_session_actor.py tests/session/test_session_arm.py -q`
-Expected: PASS (64 passed).
+Expected: PASS (69 passed).
 
 Run: `cd /home/light/Projects/anki_miner_game/.worktrees/t15-session && .venv/bin/black --check . && .venv/bin/ruff check . && .venv/bin/mypy anki_miner_game`
 Expected: PASS.
@@ -3178,10 +3463,10 @@ cd /home/light/Projects/anki_miner_game/.worktrees/t15-session && git add anki_m
 - Test: `tests/session/test_session_endings.py`
 
 **Interfaces:**
-- Consumes: Task 4's `_end_session(stop_t, flag)`, `_append`, `_write_manifest`, `_with_flag`;
+- Consumes: Task 4's `_end_session(stop_ms, flag)`, `_append`, `_write_manifest`, `_with_flag`;
   `ObsDiscovery.is_running`; `clock.reading_ms`.
 - Produces: `RecordFileChanged` (split), `ExitStarted`, lost connection + OBS gone (spec 6.4);
-  `_lost_at` and `_obs_gone(stop_t)`, which Task 6's reconcile uses.
+  `_lost_ms` (the reading at the loss) and `_obs_gone(stop_ms)`, which Task 6's reconcile uses.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -3264,13 +3549,14 @@ async def test_obs_gone_after_a_lost_connection_ends_the_session(h: Harness):
     await h.emit(ObsEventName.CONNECTION_LOST, {}, ZERO + 2.0)
     h.discovery.running = False
     await h.line("あと", ZERO + 3.0)
+    await h.line("もっと", ZERO + 4.0)
     await h.tick(ZERO + 2.0 + session_mod.OBS_GONE_CHECK_S)
-    # The stop is the reading when the connection dropped, never below the last line: 3010 here, so
-    # the line journalled after the loss is a click-through (D = 0) and only the first line is a cue.
-    assert srt(h) == "1\n00:00:01,010 --> 00:00:02,660\nまえ\n"
+    # The stop is the reading taken when the connection dropped (2010): both lines journalled after
+    # the loss lie past it, so they are skips and only the first line is a cue.
+    assert srt(h) == "1\n00:00:01,010 --> 00:00:01,660\nまえ\n"
     manifest = load_manifest(h.finalised()[0])
     assert Flag.OBS_EXITED in manifest.flags
-    assert manifest.counts.skip == 1
+    assert manifest.counts.skip == 2
     assert h.actor.state is AppState.ARMED
 ```
 
@@ -3292,8 +3578,8 @@ Expected: FAIL (4 failed).
 
 ```python
         self._obs_versions = ("unknown", "unknown")
-        self._lost_at: float | None = None
-        """While recording: when the connection dropped; the stop offset if OBS turns out gone."""
+        self._lost_ms: int | None = None
+        """While recording: the clock reading when the connection dropped, the stop if OBS turns out gone."""
         self._next_gone_check = 0.0
         self._next_restore = 0.0
 ```
@@ -3314,11 +3600,11 @@ Expected: FAIL (4 failed).
                 self._connected = False
                 self._obs_status(SourceStatus.DISCONNECTED)
                 if self._session is not None:  # spec 17: lines keep being journalled on the EventClock
-                    self._lost_at = ev.t_mono
+                    self._lost_ms = self._session.clock.reading_ms(ev.t_mono)  # decision 7
                     self._next_gone_check = ev.t_mono + OBS_GONE_CHECK_S
             case ObsEventName.EXIT_STARTED:
                 if self._session is not None:
-                    await self._obs_gone(ev.t_mono)
+                    await self._obs_gone(self._session.clock.reading_ms(ev.t_mono))
             case ObsEventName.RECORD_FILE_CHANGED:
                 await self._on_split(ev)
             case ObsEventName.RECORD_STATE_CHANGED:  # keyed on outputState: PAUSED has outputActive false
@@ -3327,18 +3613,18 @@ Expected: FAIL (4 failed).
 **Replace** in `anki_miner_game/session/session.py`:
 
 ```python
-            self._start_failed(f"OBS did not start recording within {START_TIMEOUT_S:g} s; check OBS for a message.")
+            await self._start_timed_out()
 ```
 
 **with**:
 
 ```python
-            self._start_failed(f"OBS did not start recording within {START_TIMEOUT_S:g} s; check OBS for a message.")
+            await self._start_timed_out()
         s = self._session
-        if s is not None and not self._connected and self._lost_at is not None and t >= self._next_gone_check:
+        if s is not None and not self._connected and self._lost_ms is not None and t >= self._next_gone_check:
             self._next_gone_check = t + OBS_GONE_CHECK_S
             if not await asyncio.to_thread(self._discovery.is_running):
-                await self._obs_gone(self._lost_at)  # spec 6.4: reconcile found OBS gone
+                await self._obs_gone(self._lost_ms)  # spec 6.4: reconcile found OBS gone
                 return
 ```
 
@@ -3353,7 +3639,7 @@ Expected: FAIL (4 failed).
 
 ```python
         self._session = None
-        self._lost_at = None
+        self._lost_ms = None
         self._clear(BannerKey.NO_SOURCE, BannerKey.STOP_FAILED)
 ```
 
@@ -3365,22 +3651,22 @@ Expected: FAIL (4 failed).
     async def _on_split(self, ev: ObsEvent) -> None:
         """Spec 7: finalise against the first file; the split's stop is the first stop in the journal."""
         s = self._session
-        if s is None or s.split:
+        if s is None or s.stop_journalled:
             return
         self._append(s, StopRecord(offset_ms=s.clock.reading_ms(ev.t_mono)))
-        s.split = True
+        s.stop_journalled = True
         if self._pipeline is not None:
             self._pipeline.reset()
-        self._write_manifest(s, flags=_with_flag(s.manifest.flags, Flag.SPLIT_UNSUPPORTED))
+        await self._write_manifest(s, flags=_with_flag(s.manifest.flags, Flag.SPLIT_UNSUPPORTED))
         self._banner(
             BannerKey.SPLIT,
             BannerLevel.WARNING,
             "OBS split the recording into a second file: lines from the split on get no subtitle.",
         )
 
-    async def _obs_gone(self, stop_t: float) -> None:
+    async def _obs_gone(self, stop_ms: int) -> None:
         """Spec 6.4: ``ExitStarted``, or OBS gone after a lost connection."""
-        await self._end_session(stop_t, Flag.OBS_EXITED)
+        await self._end_session(stop_ms, Flag.OBS_EXITED)
         self._banner(
             BannerKey.OBS_EXITED,
             BannerLevel.WARNING,
@@ -3391,7 +3677,7 @@ Expected: FAIL (4 failed).
 - [ ] **Step 4: Run them to pass, then lint and type-check**
 
 Run: `cd /home/light/Projects/anki_miner_game/.worktrees/t15-session && .venv/bin/pytest -n0 -p no:cacheprovider tests/session/test_session_endings.py tests/session/test_session_recording.py tests/session/test_session_actor.py tests/session/test_session_arm.py -q`
-Expected: PASS (68 passed).
+Expected: PASS (73 passed).
 
 Run: `cd /home/light/Projects/anki_miner_game/.worktrees/t15-session && .venv/bin/black --check . && .venv/bin/ruff check . && .venv/bin/mypy anki_miner_game`
 Expected: PASS.
@@ -3415,7 +3701,9 @@ cd /home/light/Projects/anki_miner_game/.worktrees/t15-session && git add anki_m
   output_duration_ms)`, `pause`, `resume`, `paused` (T03); `load_manifest`, `MANIFEST_SUFFIX`,
   `incoming_files` (T06); `Journal(path)` appending to an existing journal (T06).
 - Produces: every row of spec 6.3 on each `_Connected`, matching an active recording to its
-  manifest, the degraded clock and its re-anchoring, orphan finalise, the full launch duties.
+  manifest, the degraded clock (`_degrade`) and its re-anchoring, a pause edge that changes
+  nothing (decision 24), orphan finalise with `finalise_pending` at launch only (decision 25), the
+  full launch duties.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -3571,6 +3859,22 @@ async def test_row3_a_missed_pause_switches_to_the_output_duration_clock(h: Harn
     ]
 
 
+async def test_a_pause_edge_that_changes_nothing_switches_to_the_output_duration_clock(h: Harness):
+    await recording(h)
+    h.obs.output_duration = 3_000
+    await h.emit(  # its PAUSED never reached the app (R2 missed_pause)
+        ObsEventName.RECORD_STATE_CHANGED, {"outputState": OutputState.RESUMED, "outputPath": None}, ZERO + 6.0
+    )
+    manifest = load_manifest(h.incoming / f"{OBS_STEM}.session.json")
+    assert manifest.clock.kind is ClockKind.OUTPUT_DURATION and Flag.CLOCK_DEGRADED in manifest.flags
+    assert BannerKey.CLOCK in h.banners()
+    await h.line("あと", ZERO + 7.0)
+    assert read_journal(h.incoming / f"{OBS_STEM}.lines.jsonl")[-2:] == [
+        ResumeRecord(offset_ms=3_000),  # the edge, at the new clock's reading
+        LineRecord(offset_ms=4_000, text="あと", source="textractor"),
+    ]
+
+
 async def test_row4_an_app_restart_resumes_the_running_session(rig: Harness):
     video = leave_session(rig, OBS_STEM, records=(LineRecord(offset_ms=5_000, text="まえ", source="textractor"),))
     rig.obs.record_active = True
@@ -3625,6 +3929,14 @@ async def test_row6_orphans_are_finalised_after_reconcile(rig: Harness):
     )
 
 
+async def test_finalise_pending_is_retried_at_launch_only(h: Harness):
+    leave_session(h, ORPHAN_STEM, state=ManifestState.FINALISE_PENDING)  # after the launch sweep
+    await h.emit(ObsEventName.CONNECTED)  # a reconnect sweeps `recording` orphans only
+    await h.stopped(T0 + 5.0)  # so does a STOPPED with no session
+    assert h.finalised() == []
+    assert (h.incoming / f"{ORPHAN_STEM}.session.json").exists()
+
+
 async def test_orphans_wait_while_obs_runs_but_cannot_be_reached(rig: Harness):
     leave_session(rig, ORPHAN_STEM)
     rig.gateway.connect_error = ObsConnectError("connection refused")
@@ -3656,7 +3968,9 @@ async def test_launch_restores_the_profile_an_unclean_exit_left(rig: Harness):
 - [ ] **Step 2: Run them to fail**
 
 Run: `cd /home/light/Projects/anki_miner_game/.worktrees/t15-session && .venv/bin/pytest -n0 -p no:cacheprovider tests/session/test_session_reconcile.py -q`
-Expected: FAIL (every test except `test_row2_*`, `test_orphans_wait_*` and `test_launch_restores_*`).
+Expected: FAIL (every test except `test_row2_*`, `test_orphans_wait_*`, `test_launch_restores_*` and
+`test_finalise_pending_is_retried_*`, which guards against sweeping too often and so passes before
+any sweep exists).
 
 - [ ] **Step 3: Implement**
 
@@ -3762,46 +4076,91 @@ def _file_name(output_path: str) -> str:
                 self._obs_status(SourceStatus.CONNECTED)
                 self._clear(BannerKey.OBS)
                 await self._reconcile()
-                self._lost_at = None
+                self._lost_ms = None
 ```
 
 **Replace** in `anki_miner_game/session/session.py`:
 
 ```python
     async def _on_stopped(self, ev: ObsEvent) -> None:
-        if self._session is not None:
-            await self._end_session(ev.t_mono)
+        s = self._session
+        if s is not None:
+            await self._end_session(s.clock.reading_ms(ev.t_mono))  # the stop, unless STOPPING journalled it
         elif self._start_deadline is not None:
-            self._start_failed("OBS stopped the recording as it started; check OBS for a message.")
+            self._start_failed("OBS stopped the recording as it started; OBS's window says why.")
 ```
 
 **with**:
 
 ```python
     async def _on_stopped(self, ev: ObsEvent) -> None:
-        if self._session is not None:
-            await self._end_session(ev.t_mono)
+        s = self._session
+        if s is not None:
+            await self._end_session(s.clock.reading_ms(ev.t_mono))  # the stop, unless STOPPING journalled it
             return
         if self._start_deadline is not None:
-            self._start_failed("OBS stopped the recording as it started; check OBS for a message.")
+            self._start_failed("OBS stopped the recording as it started; OBS's window says why.")
         await self._sweep_orphans(exclude=None)  # nothing records now: every _incoming/ session is an orphan
 ```
 
 **Replace** in `anki_miner_game/session/session.py`:
 
 ```python
-                await self._obs_gone(self._lost_at)  # spec 6.4: reconcile found OBS gone
+                await self._obs_gone(self._lost_ms)  # spec 6.4: reconcile found OBS gone
                 return
 ```
 
 **with**:
 
 ```python
-                await self._obs_gone(self._lost_at)  # spec 6.4: reconcile found OBS gone
+                await self._obs_gone(self._lost_ms)  # spec 6.4: reconcile found OBS gone
                 return
         if s is not None and self._connected and s.next_anchor is not None and t >= s.next_anchor:
             s.next_anchor = t + REANCHOR_S
             await self._reanchor(s)
+```
+
+**Replace** in `anki_miner_game/session/session.py`:
+
+```python
+        s = self._session
+        if s is None or s.stop_journalled or s.clock.paused == paused:
+            return
+        record: JournalRecord
+```
+
+**with**:
+
+```python
+        s = self._session
+        if s is None or s.stop_journalled:
+            return
+        if s.clock.paused == paused:  # decision 24: its partner edge was lost, so the pause length is unknown
+            if isinstance(s.clock, EventClock):
+                try:
+                    status, mid = await self._record_status()
+                except ObsError:  # nothing to anchor on
+                    return
+                if status.get("outputActive"):
+                    await self._degrade(s, status, mid)
+            return
+        record: JournalRecord
+```
+
+**Replace** in `anki_miner_game/session/session.py`:
+
+```python
+        self._next_gone_check = 0.0
+        self._next_restore = 0.0
+```
+
+**with**:
+
+```python
+        self._next_gone_check = 0.0
+        self._next_restore = 0.0
+        self._launch_swept = False
+        """The first orphan sweep after launch ran; only it retries ``finalise_pending`` (decision 25)."""
 ```
 
 **Append** to `anki_miner_game/session/session.py`:
@@ -3827,12 +4186,9 @@ def _file_name(output_path: str) -> str:
         if s is not None:
             ours = active and (live_path is None or _file_name(live_path) == _file_name(s.manifest.obs.output_path))
             if not ours:  # row 1 (or it stopped and a new recording started while disconnected)
-                await self._end_session(self._lost_at if self._lost_at is not None else mid)
+                await self._end_session(self._lost_ms if self._lost_ms is not None else s.clock.reading_ms(mid))
             elif bool(status.get("outputPaused")) != s.clock.paused:  # row 3: a pause edge was missed
-                s.clock = self._degraded_clock(status, mid)
-                reading = s.clock.reading_ms(mid)
-                self._append(s, PauseRecord(offset_ms=reading) if s.clock.paused else ResumeRecord(offset_ms=reading))
-                self._mark_degraded(s, mid)
+                await self._degrade(s, status, mid)
             # row 2: continue
         elif active:
             found = self._manifest_for(live_path) if live_path is not None else None
@@ -3907,7 +4263,7 @@ def _file_name(output_path: str) -> str:
         self._held = None
         self._start_deadline = None
         self._counts = manifest.counts
-        self._mark_degraded(s, mid)
+        await self._mark_degraded(s, mid)
         self._start_sources(cfg, profile)
         self._set_state(AppState.RECORDING)
         self._publish(RecordingStarted(files.video.stem))
@@ -3920,9 +4276,19 @@ def _file_name(output_path: str) -> str:
             clock.pause(mid)
         return clock
 
-    def _mark_degraded(self, s: _Session, mid: float) -> None:
+    async def _degrade(self, s: _Session, status: dict[str, Any], mid: float) -> None:
+        """Row 3, or a pause edge whose partner was lost: the ``OutputDurationClock`` from ``mid`` on.
+
+        The edge is journalled at the new clock's reading.
+        """
+        s.clock = self._degraded_clock(status, mid)
+        reading = s.clock.reading_ms(mid)
+        self._append(s, PauseRecord(offset_ms=reading) if s.clock.paused else ResumeRecord(offset_ms=reading))
+        await self._mark_degraded(s, mid)
+
+    async def _mark_degraded(self, s: _Session, mid: float) -> None:
         s.next_anchor = mid + REANCHOR_S
-        self._write_manifest(
+        await self._write_manifest(
             s,
             clock=replace(s.manifest.clock, kind=ClockKind.OUTPUT_DURATION, degraded=True),
             flags=_with_flag(s.manifest.flags, Flag.CLOCK_DEGRADED),
@@ -3954,8 +4320,13 @@ def _file_name(output_path: str) -> str:
         """Finalise every session left in ``_incoming/`` (spec 6.3 last row, 10.3) except ``exclude``.
 
         Called only when no recording can be writing one of them: after reconcile, after a
-        ``STOPPED`` with no session, and at launch with OBS not running.
+        ``STOPPED`` with no session, and at launch with OBS not running. A ``finalise_pending`` one
+        (its video stayed locked) is retried by the first sweep after launch only (decision 25).
         """
+        states = {ManifestState.RECORDING}
+        if not self._launch_swept:
+            states.add(ManifestState.FINALISE_PENDING)
+            self._launch_swept = True
         cfg = self._armed.cfg if self._armed is not None else self._get_config()
         for path in sorted(paths.incoming_dir(cfg).glob(f"*{MANIFEST_SUFFIX}")):
             if path == exclude:
@@ -3965,7 +4336,7 @@ def _file_name(output_path: str) -> str:
             except (FileNotFoundError, StoreError) as exc:
                 log.warning("skipping %s: %s", path.name, exc)
                 continue
-            if manifest.state in (ManifestState.RECORDING, ManifestState.FINALISE_PENDING):
+            if manifest.state in states:
                 await self._finalise(path, cfg)
 ```
 
@@ -4022,8 +4393,8 @@ EOF
 - [ ] **Step 3: Report**
 
 Return `{branch, head_sha, gate_exit, gate_summary, files, contract_change_request, notes}`. In
-`notes` name anything the M0 gate or R2 changed that you applied (decision 4, the provisional
-constants), and repeat the hand-off for T16 from "Interfaces produced".
+`notes` name any M0-gate amendment you applied (decision 4, or a change to the R2 constants), and
+repeat the hand-off for T16 from "Interfaces produced", including the quit duration.
 
 ## Self-review (planner)
 
@@ -4042,4 +4413,21 @@ constants), and repeat the hand-off for T16 from "Interfaces produced".
 - Names: `SessionActor`, `FinaliseWorker`, `BannerKey`, `ObsRestore`, `ObsRecorder` and every
   private method are spelled the same in every task; the verification run applied the steps
   literally.
+
+## Judge notes
+
+Round 1 (`.orchestration/reviews/t15-session-judge-r1.md`): all nine findings accepted, none
+rejected. R2's `docs/m0/obs-behaviour.md` is now an M0 input.
+
+| # | Finding | Applied as |
+|---|---|---|
+| 1 | Stop offset belongs to `STOPPING` | Decision 23: `_on_stopping` journals the stop and sets `stop_journalled` (the old `split` flag, renamed); `STOPPED` alone still works. The whole-session test has a line between the two, and its SRT now ends at 17,760 |
+| 2 | Restart question becomes a timeout, then an undo | Decision 1: `_switch` raises the `obs_question` banner after `RESTART_QUESTION_S` and waits on for the answer; an unanswered timeout skips the immediate restore (`_to_idle(restore=False)`), and a failed restore retries a full `RESTORE_RETRY_S` later. Tests with a fake that never answers and one that answers late |
+| 3 | Quit while recording leaves OBS recording | Decision 18: `_stop_for_quit` (`StopRecord`, `STOPPED` awaited up to `QUIT_STOP_TIMEOUT_S`, finalise, disarm), with the old behaviour as the fallback. Decided here rather than sent for a ruling: spec 16 and 17 are silent, and only stopping keeps a minimised OBS from filling the disk. The orchestrator may overrule |
+| 4 | R2 values left provisional | Constants settled from R2 items 8, 9 and 11; `adv_ffmpeg_output` dropped; the start timeout reads `GetRecordStatus` first (decision 16) |
+| 5 | Decision 7 holds for one post-loss line only | `_lost_ms` is the reading at `_ConnectionLost`; the OBS-gone test now has two post-loss lines, both skips |
+| 6 | Launch restore never runs with OBS closed at launch | Decision 11: the idle tick checks `is_running` off-thread and connects when OBS appears (`test_a_restore_left_at_launch_waits_for_obs_to_open`) |
+| 7 | A pause edge that changes nothing is dropped | Decision 24: on the `EventClock` it degrades like row 3 (`_degrade`, shared with reconcile) |
+| 8 | `finalise_pending` retried at every connect | Decision 25: only the first sweep after launch includes it |
+| 9 | Manifest fsync on the I/O loop | Decision 26: `_write_manifest` and the `STARTED` write go through `asyncio.to_thread`, awaited |
 
