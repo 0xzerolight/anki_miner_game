@@ -1,8 +1,8 @@
 """``addons/vad_addon.py``: the VAD add-on environment (spec 13.1, 17 VAD row).
 
 Every test but the ``network`` + ``vad`` one drives ``VadAddon`` with a fake ``ensure_uv``, a fake
-``uv`` runner that only records its command lines (and creates the venv's interpreter file the way
-``uv venv`` would), and an injected transport serving a small stand-in model with its own pin.
+async ``uv`` runner that only records its command lines (and creates the venv's interpreter file the
+way ``uv venv`` would), and an injected transport serving a small stand-in model with its own pin.
 """
 
 import asyncio
@@ -10,10 +10,9 @@ import contextlib
 import hashlib
 import inspect
 import platform
-import subprocess
 import sys
-import threading
-from collections.abc import Callable, Iterator
+import time
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from pathlib import Path
 
 import pytest
@@ -73,26 +72,39 @@ class FakeTransport:
 
 
 class FakeUv:
-    """Stands in for ``subprocess.run`` on the uv binary: records each call; ``uv venv`` creates the
-    venv's interpreter file. ``fail`` names a subcommand (``venv`` or ``pip``) that exits 2."""
+    """Stands in for ``bootstrap.run_uv``: records each call; ``uv venv`` creates the venv's
+    interpreter file. ``fail`` names a subcommand (``venv`` or ``pip``) that exits 2; ``hang`` one
+    that runs until cancelled (``cancelled`` records it)."""
 
-    def __init__(self, fail: str | None = None, during: Callable[[], None] | None = None) -> None:
+    def __init__(
+        self, fail: str | None = None, during: Callable[[], None] | None = None, hang: str | None = None
+    ) -> None:
         self.fail = fail
         self.during = during
+        self.hang = hang
+        self.hanging = asyncio.Event()
+        self.cancelled = False
         self.calls: list[tuple[list[str], dict]] = []
 
-    def __call__(self, cmd, **kwargs) -> subprocess.CompletedProcess[str]:
-        cmd = [str(part) for part in cmd]
-        self.calls.append((cmd, kwargs))
+    async def __call__(self, argv: Sequence[str], env: Mapping[str, str], cwd: Path | None = None) -> tuple[int, str]:
+        cmd = [str(part) for part in argv]
+        self.calls.append((cmd, {"env": dict(env), "cwd": cwd}))
         if self.during is not None:
             self.during()
+        if cmd[1] == self.hang:
+            self.hanging.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                self.cancelled = True
+                raise
         if cmd[1] == self.fail:
-            return subprocess.CompletedProcess(cmd, 2, stdout="", stderr="error: no route to the index\n")
+            return 2, "error: no route to the index\n"
         if cmd[1] == "venv":
             python = Path(cmd[-1]) / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
             python.parent.mkdir(parents=True)
             python.write_bytes(b"")
-        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        return 0, ""
 
     @property
     def commands(self) -> list[list[str]]:
@@ -125,7 +137,7 @@ def make_addon(
     return VadAddon(
         home,
         model=model,
-        run=uv or FakeUv(),
+        run_uv=uv or FakeUv(),
         ensure_uv=ensure or FakeEnsureUv(),
         transport=transport or FakeTransport({model.url: ok(MODEL_BYTES)}),
     )
@@ -271,7 +283,6 @@ def test_every_uv_call_runs_in_the_addons_own_uv_environment(tmp_path, monkeypat
         assert env.items() >= uv_environment(tmp_path, "vad").items()
         assert env["AMG_TEST_MARKER"] == "kept"  # the rest of the environment passes through
         assert kwargs["cwd"] == addon.root
-        assert kwargs.get("check", False) is False
 
 
 def test_progress_runs_from_the_uv_download_to_the_total_without_going_back(tmp_path):
@@ -324,29 +335,66 @@ def test_status_is_installing_while_an_install_runs(tmp_path):
     assert addon.status() is AddonStatus.READY
 
 
-def test_two_installs_at_once_build_the_environment_once(tmp_path):
-    entered = threading.Event()
-    release = threading.Event()
-
-    def during() -> None:
-        entered.set()
-        release.wait(10)
-
-    uv = FakeUv(during=during)
+async def test_a_second_install_while_one_runs_is_refused(tmp_path):
+    uv = FakeUv(hang="pip")
     addon = make_addon(tmp_path, uv=uv)
+    first = asyncio.create_task(addon.install(lambda d, t: None))
+    async with asyncio.timeout(5):
+        await uv.hanging.wait()
 
-    async def both() -> None:
-        first = asyncio.create_task(addon.install(lambda d, t: None))
-        await asyncio.to_thread(entered.wait, 10)
-        second = asyncio.create_task(addon.install(lambda d, t: None))
-        await asyncio.sleep(0.05)
-        release.set()
-        await asyncio.gather(first, second)
+    with pytest.raises(VadAddonError, match="already"):
+        await addon.install(lambda d, t: None)
 
-    asyncio.run(both())
-
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
     assert [cmd[1] for cmd in uv.commands] == ["venv", "pip"]
-    assert addon.status() is AddonStatus.READY
+
+
+async def test_a_cancelled_install_stops_uv_and_leaves_nothing_behind(tmp_path):
+    uv = FakeUv(hang="pip")
+    addon = make_addon(tmp_path, uv=uv)
+    install_task = asyncio.create_task(addon.install(lambda d, t: None))
+    async with asyncio.timeout(5):
+        await uv.hanging.wait()
+    assert (addon.root / "env").exists()
+
+    install_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await install_task
+
+    assert uv.cancelled
+    assert_nothing_installed(addon)
+
+
+async def test_a_cancelled_model_download_stops_at_its_next_chunk(tmp_path):
+    loop = asyncio.get_running_loop()
+    served: list[int] = []
+    tasks: list[asyncio.Task[None]] = []
+
+    def chunks() -> Iterator[bytes]:
+        for i in range(0, len(MODEL_BYTES), 100):
+            served.append(i)
+            if len(served) == 2:
+                loop.call_soon_threadsafe(tasks[0].cancel)
+                time.sleep(0.5)  # the loop cancels the install meanwhile
+            yield MODEL_BYTES[i : i + 100]
+
+    transport = FakeTransport(
+        {FAKE_MODEL.url: lambda: Reply(status=200, location=None, length=len(MODEL_BYTES), chunks=chunks())}
+    )
+    addon = make_addon(tmp_path, transport=transport)
+    tasks.append(asyncio.create_task(addon.install(lambda d, t: None)))
+
+    with pytest.raises(asyncio.CancelledError):
+        await tasks[0]
+
+    assert len(served) == 2 < len(range(0, len(MODEL_BYTES), 100))
+    assert_nothing_installed(addon)
+
+
+def test_install_errors_are_runtime_errors():
+    assert issubclass(VadAddonError, RuntimeError)
 
 
 # --- install failures: always VadAddonError, nothing left behind -------------
@@ -368,10 +416,10 @@ def test_a_failing_uv_step_names_uv_and_its_error(tmp_path, step):
 
 
 def test_a_uv_that_cannot_start_is_a_vad_addon_error(tmp_path):
-    def run(cmd, **kwargs):
-        raise FileNotFoundError(2, "No such file or directory", str(cmd[0]))
+    async def run_uv(argv, env, cwd=None):
+        raise FileNotFoundError(2, "No such file or directory", str(argv[0]))
 
-    addon = VadAddon(tmp_path, model=FAKE_MODEL, run=run, ensure_uv=FakeEnsureUv(), transport=FakeTransport({}))
+    addon = VadAddon(tmp_path, model=FAKE_MODEL, run_uv=run_uv, ensure_uv=FakeEnsureUv(), transport=FakeTransport({}))
 
     with pytest.raises(VadAddonError, match="No such file"):
         install(addon)
@@ -469,7 +517,7 @@ def test_a_transport_failure_is_a_vad_addon_error(tmp_path):
         raise OSError("connection reset")
         yield  # pragma: no cover
 
-    addon = VadAddon(tmp_path, model=FAKE_MODEL, run=FakeUv(), ensure_uv=FakeEnsureUv(), transport=transport)
+    addon = VadAddon(tmp_path, model=FAKE_MODEL, run_uv=FakeUv(), ensure_uv=FakeEnsureUv(), transport=transport)
 
     with pytest.raises(VadAddonError, match="connection reset"):
         install(addon)

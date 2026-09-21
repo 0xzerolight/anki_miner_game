@@ -7,8 +7,10 @@ folders there (``bootstrap.uv_environment``), and ``env/`` holds what the VAD pa
     env/silero_vad_v6.onnx
 
 ``install`` builds ``env/`` in place and writes the model last, through ``<name>.part``, checked
-against its pinned size and sha256. Any failure removes ``env/`` again, so a failed install leaves
-the add-on missing, never half there. ``status`` is ``ready`` only while the interpreter exists and
+against its pinned size and sha256. Any failure or cancellation removes ``env/`` again, so a failed
+install leaves the add-on missing, never half there: a running ``uv`` is killed
+(``bootstrap.run_uv``), and the uv and model downloads stop at their next chunk
+(``bootstrap.in_worker_thread``). ``status`` is ``ready`` only while the interpreter exists and
 the model's bytes match the pin; an ``env/`` without both is ``broken`` and a reinstall replaces it.
 
 ``VadSettings.enabled`` takes effect only while this add-on is ready: ``vad.trimmer`` checks
@@ -20,10 +22,8 @@ import hashlib
 import os
 import platform
 import shutil
-import subprocess
 import sys
-import threading
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from http.client import HTTPException
 from pathlib import Path
@@ -65,14 +65,11 @@ ENVIRONMENT_BYTES: Final[Mapping[str, int]] = {"linux": 111_000_000, "win32": 77
 20260901, ``install_only_stripped``) plus the pinned wheels, from their release and PyPI sizes on
 2026-09-21. Shown by the wizard as an approximation."""
 
-_NO_WINDOW: Final[int] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-"""Keeps a console window from flashing up on Windows; 0 elsewhere."""
-
-Runner = Callable[..., "subprocess.CompletedProcess[str]"]
-"""``subprocess.run``'s shape; a seam for tests."""
+UvRunner = Callable[[Sequence[str], Mapping[str, str], Path | None], Awaitable[tuple[int, str]]]
+"""``bootstrap.run_uv``'s shape; a seam for tests."""
 
 
-class VadAddonError(Exception):
+class VadAddonError(RuntimeError):
     """The add-on could not be installed; the message says why and is fit for a banner."""
 
 
@@ -84,16 +81,15 @@ class VadAddon:
         home: Path,
         *,
         model: ModelPin = MODEL,
-        run: Runner = subprocess.run,
+        run_uv: UvRunner = bootstrap.run_uv,
         ensure_uv: Callable[..., Path] = bootstrap.ensure_uv,
         transport: Transport | None = None,
     ) -> None:
         self._home = home
         self._model = model
-        self._run = run
+        self._run_uv = run_uv
         self._ensure_uv = ensure_uv
         self._transport = transport or bootstrap.urllib_transport
-        self._lock = threading.Lock()
         self._installing = False
 
     @property
@@ -129,46 +125,49 @@ class VadAddon:
         return AddonStatus.BROKEN
 
     async def install(self, progress: ProgressCallback) -> None:
-        """Build the environment and fetch the model; no-op when ready. Raises ``VadAddonError``.
+        """Build the environment and fetch the model (``AddonService.install``); nothing while ready.
 
-        The work runs on a worker thread, so ``progress(done_bytes, total_bytes)`` is called there;
-        ``total_bytes`` is ``size_bytes`` throughout. A second call while one runs waits for it.
+        ``progress(done_bytes, total_bytes)`` is called on a worker thread during the uv and model
+        downloads and on the loop thread otherwise; ``total_bytes`` is ``size_bytes`` throughout.
+        Raises ``VadAddonError``, also when an install is already running.
         """
-        await asyncio.to_thread(self._install, progress)
+        if self._installing:
+            raise VadAddonError("The VAD add-on is already being installed.")
+        if self.status() is AddonStatus.READY:
+            return
+        self._installing = True
+        try:
+            await self._build(progress)
+        except BaseException as exc:
+            await asyncio.to_thread(shutil.rmtree, self.root / "env", ignore_errors=True)
+            if isinstance(exc, BootstrapError | OSError | HTTPException):
+                raise VadAddonError(f"The VAD add-on could not be installed: {exc}") from exc
+            raise
+        finally:
+            self._installing = False
 
-    def _install(self, progress: ProgressCallback) -> None:
-        with self._lock:
-            if self.status() is AddonStatus.READY:
-                return
-            self._installing = True
-            try:
-                self._build(progress)
-            except BaseException as exc:
-                shutil.rmtree(self.root / "env", ignore_errors=True)
-                if isinstance(exc, BootstrapError | OSError | HTTPException):
-                    raise VadAddonError(f"The VAD add-on could not be installed: {exc}") from exc
-                raise
-            finally:
-                self._installing = False
-
-    def _build(self, progress: ProgressCallback) -> None:
+    async def _build(self, progress: ProgressCallback) -> None:
         uv_share = self._uv_bytes()
         env_share = ENVIRONMENT_BYTES.get(sys.platform, ENVIRONMENT_BYTES["linux"])
         total = uv_share + env_share + self._model.size
 
-        def uv_progress(done: int, uv_total: int) -> None:
-            progress(done * uv_share // uv_total if uv_total else 0, total)
+        def fetch_uv(check: Callable[[], None]) -> Path:
+            def uv_progress(done: int, uv_total: int) -> None:
+                check()
+                progress(done * uv_share // uv_total if uv_total else 0, total)
 
-        uv = self._ensure_uv(self._home, progress=uv_progress)
+            return self._ensure_uv(self._home, progress=uv_progress)
+
+        uv = await bootstrap.in_worker_thread(fetch_uv)
         progress(uv_share, total)
 
         env = self.root / "env"
-        shutil.rmtree(env, ignore_errors=True)
+        await asyncio.to_thread(shutil.rmtree, env, ignore_errors=True)
         if env.exists():
             raise VadAddonError(f"The VAD add-on could not remove its old files in {env}")
         env.mkdir(parents=True)
-        self._uv(uv, "venv", ["--no-project", "--python", PYTHON_VERSION, str(env / "venv")])
-        self._uv(
+        await self._uv(uv, "venv", ["--no-project", "--python", PYTHON_VERSION, str(env / "venv")])
+        await self._uv(
             uv,
             "pip",
             ["install", "--python", str(self.python_path), "--require-hashes", "--only-binary", ":all:"]
@@ -177,24 +176,22 @@ class VadAddon:
         progress(uv_share + env_share, total)
 
         base = uv_share + env_share
-        self._download_model(lambda done: progress(base + done, total))
+
+        def fetch_model(check: Callable[[], None]) -> None:
+            def model_progress(done: int) -> None:
+                check()
+                progress(base + done, total)
+
+            self._download_model(model_progress)
+
+        await bootstrap.in_worker_thread(fetch_model)
         progress(total, total)
 
-    def _uv(self, uv: Path, command: str, args: Sequence[str]) -> None:
+    async def _uv(self, uv: Path, command: str, args: Sequence[str]) -> None:
         env = {**os.environ, **bootstrap.uv_environment(self._home, "vad")}
-        result = self._run(
-            [str(uv), command, *args],
-            cwd=self.root,
-            env=env,
-            capture_output=True,
-            encoding="utf-8",
-            errors="replace",
-            check=False,
-            creationflags=_NO_WINDOW,
-        )
-        if result.returncode != 0:
-            detail = _tail(result.stderr or result.stdout)
-            raise VadAddonError(f"uv {command} failed (exit {result.returncode}): {detail}")
+        code, output = await self._run_uv([str(uv), command, *args], env, self.root)
+        if code != 0:
+            raise VadAddonError(f"uv {command} failed (exit {code}): {_tail(output)}")
 
     def _download_model(self, progress: Callable[[int], None]) -> None:
         pin = self._model
