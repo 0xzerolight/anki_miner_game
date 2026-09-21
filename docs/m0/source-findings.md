@@ -40,7 +40,7 @@ What the source changes in the spec, with the section that holds the evidence.
 | 9 | 11.1 minimum | OBS 30.0.0 (obs-websocket 5.3.3). `SetRecordDirectory` (added in 5.3.0) is the newest of the 26. `RecordFileChanged` needs 30.2.0. (s9) | "Minimum OBS 30.0" |
 | 10 | 11.1 step 3 | obs-websocket reads `config.json` once at start and writes it at start and when the user saves its settings dialog, not at exit. Editing it while OBS runs has no effect until a restart. (s5) | Reword the reason; the behaviour (ask the user, or close OBS and Fix) stands |
 | 11 | 11.1 launch | Flatpak: `flatpak run com.obsproject.Studio --minimize-to-tray`. Until OBS finishes loading, every request gets 207. After a crash, OBS shows a modal unclean-shutdown dialog on the next launch; no flag skips it in 32.2.2. (s4, s5) | `wait_ready` polls `GetVersion` until success; its timeout banner mentions an OBS dialog |
-| 12 | 11.3 window list, 12 auto-stop | Linux `xcomposite_input` uses property `capture_window`, not `window`, with a different value format. On every platform the configured window stays in the list as a disabled item after it closes. (s10) | Per-kind property name; auto-stop tests `itemEnabled`, not presence |
+| 12 | 11.3 window list, 12 auto-stop | Linux `xcomposite_input` uses property `capture_window`, not `window`, with a different value format. On every platform the configured window stays in the list, disabled, when no live window has exactly its stored string. That also happens while the window is open with a changed title (FPS or level in the title), and capture keeps following it by exe or class (Windows) or xid (X11). Neither presence nor the stored item's `itemEnabled` means "closed". (s10) | Per-kind property name; auto-stop counts the window open while an enabled item matches class and exe (Windows) or item 0 is enabled or an enabled item has the stored xid (X11); query the `game_capture` input; R2 and H5 check a retitled window |
 | 13 | 11.3 app audio | `game_capture`, `window_capture` and `wasapi_process_output_capture` build the value with the same function: `title:class:exe`, `#` and `:` escaped. The strings match. (s10) | State it; runtime confirm at H5 |
 | 14 | 6.3 reconcile | `GetOutputSettings` on `simple_file_output` / `adv_file_output` returns the active file's `path`. (s7) | Add it as a 27th required request (5.0.0, floor unchanged), or match by manifest `outputPath` plus `outputBytes` |
 | 15 | 11.3 | If `[Video] AutoRemux` is on, OBS remuxes each finished recording to a sibling `.mp4`. No default is set, so it is off unless the user turns it on in the app's profile. (s7) | Provisioning pins `Video/AutoRemux` = `false` |
@@ -426,13 +426,31 @@ when the Settings dialog saves output settings
   `obs-studio@ba2f32bd libobs/util/windows/window-helpers.c:65-95`; callers at
   `obs-studio@ba2f32bd plugins/win-capture/game-capture.c:2133-2135`,
   `obs-studio@ba2f32bd plugins/win-capture/window-capture.c:498-508`,
-  `obs-studio@ba2f32bd plugins/win-wasapi/win-wasapi.cpp:1571-1573`). Spec 12's "window closed"
-  check must look at `itemEnabled`.
+  `obs-studio@ba2f32bd plugins/win-wasapi/win-wasapi.cpp:1571-1573`). "Lacks it" means no live
+  item is byte-equal to the whole stored `title:class:exe` string (`strcmp`, same cite as above),
+  and the live list holds visible windows only, minus minimized ones for `window_capture`
+  (`obs-studio@ba2f32bd libobs/util/windows/window-helpers.c:292-298`,
+  `obs-studio@ba2f32bd plugins/win-capture/window-capture.c:533`).
 - Matching priority defaults: `game_capture` matches by executable
   (`obs-studio@ba2f32bd plugins/win-capture/game-capture.c:2100-2101`, where the default mode
   `any_fullscreen` is also set); `window_capture` and `wasapi_process_output_capture` set no
   default, so 0, which is `WINDOW_PRIORITY_CLASS`
   (`obs-studio@ba2f32bd libobs/util/windows/window-helpers.h:12-16`).
+- So `itemEnabled: false` on the configured item means "no listed window has exactly this title,
+  class and exe", not "the window closed". It also reads false for a window that is still open
+  but changed its title (an emulator showing FPS, a game showing the level), one hidden to the
+  tray, and, in the `window_capture` list only, a minimized one. Capture does not follow the
+  title: `ms_find_window` requires the exe at exe priority or the class at class priority and
+  uses the title only to rank candidates
+  (`obs-studio@ba2f32bd libobs/util/windows/window-helpers.c:436-460`), and the window it found
+  is kept until it is destroyed or its process exits
+  (`obs-studio@ba2f32bd plugins/win-capture/game-capture.c:1668-1674`,
+  `obs-studio@ba2f32bd plugins/win-capture/game-capture.c:1804-1808`,
+  `obs-studio@ba2f32bd plugins/win-capture/window-capture.c:598`). A retitled game stays
+  captured while its item reads disabled. At class priority, classes containing `Chrome` or
+  `SDL_app` fall back to an exact title match
+  (`obs-studio@ba2f32bd libobs/util/windows/window-helpers.c:469-473`); that matters only when
+  OBS searches again after losing the window.
 - `wasapi_process_output_capture` is registered only on Windows 10 build 19041 or later
   (`obs-studio@ba2f32bd plugins/win-wasapi/plugin-main.cpp:43-56`); `GetInputKindList` detection
   already covers older systems.
@@ -444,6 +462,21 @@ when the Settings dialog saves output settings
   (`obs-studio@ba2f32bd plugins/linux-capture/xcomposite-input.c:720-729`), and disabled when no
   live match exists (`obs-studio@ba2f32bd plugins/linux-capture/xcomposite-input.c:815-817`).
   Spec 11.3 and 12 need `propertyName="capture_window"` on Linux.
+- X11 has the same title problem: a retitled window disables item 0 and is listed again as a
+  separate enabled item with the same xid and its new name
+  (`obs-studio@ba2f32bd plugins/linux-capture/xcomposite-input.c:789-796`), while capture keeps
+  the xid and falls back to name plus class only once that xid is gone
+  (`obs-studio@ba2f32bd plugins/linux-capture/xcomposite-input.c:302-314`,
+  `obs-studio@ba2f32bd plugins/linux-capture/xcomposite-input.c:619-625`).
+- For spec 12, a window-closed rule that follows what capture follows and ignores the title.
+  Windows: open while an item with `itemEnabled: true` has the class and exe of
+  `capture.window` (decode `#3A` and `#22`, compare case-insensitively as `window_rating` does,
+  `obs-studio@ba2f32bd libobs/util/windows/window-helpers.c:436-460`). X11: open while item 0 is
+  enabled or an enabled item has the stored xid. Only enabled items count, because the disabled
+  preserved item always carries the stored value. Query the `game_capture` input, whose list
+  keeps minimized windows, not the `window_capture` fallback. Class alone on X11 would also call
+  a reopened, retitled window open, which OBS no longer captures. A retitled window is checked
+  at R2 (X11) and H5 (Windows) [R2] [H5].
 
 ## 11. obsws-python 1.8.0
 
@@ -577,8 +610,12 @@ when the Settings dialog saves output settings
   user profile; whether a failed output start sends STOPPED; event order for profile and
   collection switches with recording, streaming and replay buffer active, and what a switch does
   to a live output (section 8); `GetOutputSettings` path mid-recording (section 7); Flatpak
-  argument pass-through and config root; the unclean-shutdown dialog after a kill (section 4).
+  argument pass-through and config root; the unclean-shutdown dialog after a kill (section 4);
+  an `xcomposite_input` window retitled mid-recording: item 0 disabled, the same xid listed
+  enabled, capture uninterrupted (section 10).
 - [R3] owocr under a changed `HOME`; stopping the picker run; non-tty stdin; offline start delay.
 - [H4] Picker coordinates on the user's real desktop and games.
 - [H5] Registry key and exe path on a real Windows install; `game_capture` and
-  `wasapi_process_output_capture` strings for one game window; rename-lock timing.
+  `wasapi_process_output_capture` strings for one game window; rename-lock timing; a game that
+  changes its title while recording, read through the `game_capture` list and the class plus exe
+  rule (section 10).
