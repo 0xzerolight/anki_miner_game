@@ -9,7 +9,11 @@ import pytest
 from anki_miner_game.lifecycle.auto import POLL_S, AutoMode, window_open
 from anki_miner_game.models.lines import GameLine
 from anki_miner_game.models.messages import (
+    START_FAILED_BANNER_KEY,
     AppState,
+    Banner,
+    BannerLevel,
+    BannerRaised,
     CommandKind,
     LineAccepted,
     SessionEvent,
@@ -185,6 +189,27 @@ def test_a_repeated_armed_state_does_not_start_twice() -> None:
     rig.state(AppState.ARMED)
     rig.line()
     assert rig.control.commands() == [CommandKind.START]
+
+
+def test_a_failed_start_lets_the_next_line_start_again() -> None:
+    """Spec 17: a failed ``StartRecord`` keeps the state at ``armed``, so no ``StateChanged`` resets the flag."""
+    rig = Rig(make_profile())
+    rig.state(AppState.ARMED)
+    rig.line()
+    rig.control.emit(BannerRaised(Banner("no-source", BannerLevel.WARNING, "No text source")))
+    rig.line()
+    assert rig.control.commands() == [CommandKind.START]
+    rig.control.emit(BannerRaised(Banner(START_FAILED_BANNER_KEY, BannerLevel.ERROR, "StartRecord failed")))
+    rig.line()
+    assert rig.control.commands() == [CommandKind.START, CommandKind.START]
+
+
+def test_a_start_failure_banner_outside_armed_changes_nothing() -> None:
+    rig = Rig(make_profile(idle_min=0, window=None))
+    rig.state(AppState.RECORDING)
+    rig.control.emit(BannerRaised(Banner(START_FAILED_BANNER_KEY, BannerLevel.ERROR, "StartRecord failed")))
+    rig.line(100)
+    assert rig.control.commands() == []
 
 
 def test_start_on_first_line_off_sends_nothing() -> None:

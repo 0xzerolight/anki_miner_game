@@ -41,6 +41,11 @@ OBS_SOURCE_ID: Final = "obs"
 """``SourceStatusChanged.source_id`` of the OBS light in the status row; no text source may use it."""
 
 
+START_FAILED_BANNER_KEY: Final = "start_failed"
+"""``Banner.key`` of the banner the actor raises when ``StartRecord`` fails (spec 17: the state stays
+``armed``). Auto mode listens for it, so the next line may try to start again."""
+
+
 @dataclass(frozen=True)
 class Banner:
     key: str

@@ -9,7 +9,9 @@ starts a new armed period with that game's settings.
 
 - Auto-start: the first ``LineAccepted`` while ``armed`` posts ``start``
   carrying that line (``UserCommand.line``), once per armed period; the
-  actor holds the line and journals it at offset 0 on ``STARTED``.
+  actor holds the line and journals it at offset 0 on ``STARTED``. A
+  ``StartRecord`` failure leaves the state at ``armed``; its banner
+  (``START_FAILED_BANNER_KEY``) lets the next line try again.
 - Auto-stop, idle: while ``recording``, no accepted line for
   ``auto.stop_idle_minutes`` (counted from the recording start when no line
   came yet) posts ``stop``.
@@ -30,7 +32,16 @@ from collections.abc import Awaitable, Callable, Sequence
 from typing import Final, Protocol
 
 from anki_miner_game.interfaces.session import SessionControl
-from anki_miner_game.models.messages import AppState, CommandKind, LineAccepted, SessionEvent, StateChanged, UserCommand
+from anki_miner_game.models.messages import (
+    START_FAILED_BANNER_KEY,
+    AppState,
+    BannerRaised,
+    CommandKind,
+    LineAccepted,
+    SessionEvent,
+    StateChanged,
+    UserCommand,
+)
 from anki_miner_game.models.obs import ObsError
 from anki_miner_game.models.profile import AutoSettings, CaptureKind, GameProfile
 
@@ -136,6 +147,9 @@ class AutoMode:
             self._stop_sent = False
             self._misses = 0
             self._last_activity = self._now()
+        elif isinstance(event, BannerRaised):
+            if event.banner.key == START_FAILED_BANNER_KEY and self._state is AppState.ARMED:
+                self._start_sent = False
         elif isinstance(event, LineAccepted):
             self._last_activity = self._now()
             if self._state is AppState.ARMED and not self._start_sent and self._start_on_first_line():
