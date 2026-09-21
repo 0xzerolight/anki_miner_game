@@ -33,7 +33,8 @@ import shutil
 import subprocess
 import sys
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
+from contextlib import suppress
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
@@ -45,6 +46,7 @@ from obsws_python.util import to_snake_case
 logging.getLogger("obsws_python").setLevel(logging.WARNING)  # it logs the password at INFO
 
 APP_ID = "com.obsproject.Studio"
+OBS_PROCESS = "obs"  # comm of the OBS main process, Flatpak or native
 EVENTS = (
     "RecordStateChanged",
     "RecordFileChanged",
@@ -476,11 +478,20 @@ def read_ws_settings(root: Path) -> WsSettings:
     )
 
 
-def obs_running() -> bool:
-    proc = subprocess.run(
-        ["flatpak", "ps", "--columns=application"], capture_output=True, text=True, check=False, timeout=10
-    )
-    return APP_ID in proc.stdout.split()
+def process_names() -> list[str]:
+    """The ``comm`` of every process on the host, whatever session or sandbox started it."""
+    names = []
+    for entry in Path("/proc").iterdir():
+        if entry.name.isdigit():
+            with suppress(OSError):
+                names.append((entry / "comm").read_text(encoding="utf-8", errors="replace").strip())
+    return names
+
+
+def obs_running(names: Callable[[], Iterable[str]] = process_names) -> bool:
+    """Whether an ``obs`` process runs. Not ``flatpak ps``: an OBS started inside the nested display
+    registers in that display's private runtime dir, which the owner's ``flatpak ps`` never reads."""
+    return OBS_PROCESS in names()
 
 
 def _require_closed(running: Callable[[], bool]) -> None:

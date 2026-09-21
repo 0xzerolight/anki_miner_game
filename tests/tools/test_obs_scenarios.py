@@ -6,7 +6,10 @@ obs-websocket server on loopback port 0.
 
 import asyncio
 import json
+import subprocess
+import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -126,6 +129,29 @@ def test_snapshot_and_restore_refuse_while_obs_runs(tmp_path):
         sc.snapshot_config(root, tmp_path / "snap", running=lambda: True)
     with pytest.raises(sc.ScenarioError, match="running"):
         sc.restore_config(tmp_path / "snap", root, running=lambda: True)
+
+
+def test_obs_running_reads_the_process_table():
+    assert sc.obs_running(lambda: ["bash", "kwin_wayland", "obs"])
+    assert not sc.obs_running(lambda: ["bash", "obs-ffmpeg-mux", "xdg-dbus-proxy", "obsidian"])
+
+
+@pytest.mark.skipif(not Path("/proc/self/comm").exists(), reason="needs Linux /proc")
+def test_obs_running_sees_an_obs_the_owner_session_does_not_know_about():
+    # An OBS inside the nested display registers with Flatpak in the private runtime dir, so
+    # `flatpak ps` in the owner shell misses it. The process table is the same everywhere.
+    rename = "open('/proc/self/comm', 'w').write('obs'); import time; time.sleep(30)"
+    proc = subprocess.Popen([sys.executable, "-c", rename])
+    try:
+        deadline = time.monotonic() + 10
+        while Path(f"/proc/{proc.pid}/comm").read_text(encoding="utf-8").strip() != "obs":
+            assert time.monotonic() < deadline, "the fake obs never renamed itself"
+            time.sleep(0.02)
+        assert "obs" in sc.process_names()
+        assert sc.obs_running()
+    finally:
+        proc.kill()
+        proc.wait()
 
 
 # --- output recipes ----------------------------------------------------------------------------
