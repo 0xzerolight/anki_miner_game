@@ -25,3 +25,15 @@ Changes after W0 go through a `CONTRACT-CHANGE-REQUEST` (see `CLAUDE.md`) and ar
 | `ObsConfigError(ObsConnectError)` | `models/obs.py` | `ObsDiscovery.credentials` raises it when no port is known: OBS's websocket `config.json` is missing or unreadable and `cfg.obs.port` is `None`. `read_ws_config` raises it for a file that exists but cannot be read or parsed (a missing file is still `None`) |
 | `TextSource.set_status_listener(cb)` | `interfaces/text_source.py` | `cb(source_id, status)` (`StatusListener`) on every status transition, after `status` reports it, on the sink's thread; one listener, set before `start`. The session actor registers it and publishes each change as `SourceStatusChanged` |
 | `VadSettings.enabled` (docstring only) | `models/config.py` | Effective value is `enabled and <VAD add-on installed>`, enforced by the VAD add-on; no behaviour change |
+
+## W1 integration (requested, pending the orchestrator's ruling)
+
+Filed by the wave 1 integration fix (`.orchestration/status/wave-1-integration-fix.json`). Not in the
+code yet; the contract agent moves each row up once accepted.
+
+| Name | Where | What it is |
+|---|---|---|
+| `Presenter.vad_progress(manifest_path, done_ms: int, total_ms: int \| None)` | `interfaces/presenter.py` | `None` = indeterminate progress: the worker sends `total_ms: null` for a recording with no duration (a crash-truncated `.mkv`, spec 6.4) |
+| `ObsDiscovery.wait_ready`, `ObsGateway.connect`, `ObsGateway.request` (docstrings) | `interfaces/obs.py` | Ready = `GetVersion` succeeds, not "accepts connections"; `connect` and `request` retry 207 `NotReady` until a timeout, then raise `ObsRequestError` (S1 summary 5 and 11) |
+| `WindowItem.enabled: bool` | `models/obs.py` | `itemEnabled` from `GetInputPropertiesListPropertyItems`; `False` on the configured value OBS keeps listing when no live window matches it (S1 summary 12) |
+| `Replaced` (docstring) | `models/pipeline.py` | The merge's base is the previous line accepted since the last `TextPipeline.reset()`; the actor journals a `ReplaceRecord` only when that line is the journal's last `LineRecord` |
