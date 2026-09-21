@@ -310,6 +310,14 @@ def test_the_addon_note_is_optional_text_shown_beside_the_status():
     assert "status" in (note.__doc__ or "")
 
 
+def test_addon_install_states_its_errors_cancellation_ready_and_thread_rules():
+    from anki_miner_game.interfaces.addons import AddonService
+
+    doc = AddonService.install.__doc__ or ""
+    for rule in ("RuntimeError", "``READY``", "cancellation", "any thread", "already running"):
+        assert rule in doc, rule
+
+
 def test_wait_ready_defaults_to_30_seconds():
     from anki_miner_game.interfaces.obs import ObsDiscovery
 

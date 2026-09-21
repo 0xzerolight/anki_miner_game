@@ -25,7 +25,15 @@ class AddonService(Protocol):
         ...
 
     async def install(self, progress: ProgressCallback) -> None:
-        """Download and verify; raises on failure and leaves no partial install behind."""
+        """Download, verify and install the add-on; a no-op while ``status()`` is ``READY``.
+
+        A ``MISSING`` or ``BROKEN`` add-on is (re)installed.
+        ``progress(done_bytes, total_bytes)`` may be called on any thread. Raises
+        ``RuntimeError`` (the add-on's own subclass) with a message fit for a banner when the
+        install fails, and at once when an install of the add-on is already running. A failure
+        or a cancellation stops the work (a running ``uv`` is killed, a download stops at its next
+        chunk) and removes what the attempt wrote, so no partial install is left behind.
+        """
         ...
 
 

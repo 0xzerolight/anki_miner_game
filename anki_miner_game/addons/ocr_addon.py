@@ -521,7 +521,7 @@ class OcrAddon:
         *,
         platform: str = sys.platform,
         environ: Mapping[str, str] | None = None,
-        ensure_uv: Callable[[Path], Path] = bootstrap.ensure_uv,
+        ensure_uv: Callable[..., Path] = bootstrap.ensure_uv,
         argv0: Sequence[str] | None = None,
     ) -> None:
         self._home = home
@@ -566,21 +566,27 @@ class OcrAddon:
         return None
 
     async def install(self, progress: ProgressCallback) -> None:
-        """``uv tool install`` the pinned owocr into the add-on folder, replacing what was there.
+        """``uv tool install`` the pinned owocr into the add-on folder (``AddonService.install``).
 
+        Nothing happens while the add-on is ``ready``; otherwise what is there is replaced.
         ``progress`` hears ``(0, size_bytes)`` at the start and ``(size_bytes, size_bytes)`` at the
-        end; uv reports nothing finer. A failure after the old install was removed, cancellation
-        included, removes whatever the attempt left, so ``status`` is ``missing`` again. Raises
-        ``BootstrapError`` (no uv) or ``OcrError`` (uv failed, the message ends with its output).
+        end, on the loop thread; uv reports nothing finer. A failure after the old install was
+        removed, cancellation included, removes whatever the attempt left, so ``status`` is
+        ``missing`` again; a cancelled uv download stops at its next chunk. Raises ``OcrError``: no
+        uv, uv failed (the message ends with its output), or an install is already running.
         """
         if self._installing:
             raise OcrError("The OCR add-on is already being installed.")
+        if self.status() is AddonStatus.READY:
+            return
         self._installing = True
         total = self.size_bytes
         touched = False
         try:
             progress(0, total)
-            uv = await asyncio.to_thread(self._ensure_uv, self._home)
+            uv = await bootstrap.in_worker_thread(
+                lambda check: self._ensure_uv(self._home, progress=lambda done, size: check())
+            )
             touched = True
             self._remove_install()
             self._root.mkdir(parents=True, exist_ok=True)
@@ -592,9 +598,11 @@ class OcrAddon:
             await _run_uv([str(uv), *uv_install_args(self._platform, overrides)], env)
             if not self._verified():
                 raise OcrError("owocr was installed but its files do not check out; install it again.")
-        except BaseException:
+        except BaseException as exc:
             if touched:
                 self._remove_install()
+            if isinstance(exc, bootstrap.BootstrapError | OSError):
+                raise OcrError(f"The OCR add-on could not be installed: {exc}") from exc
             raise
         finally:
             self._installing = False

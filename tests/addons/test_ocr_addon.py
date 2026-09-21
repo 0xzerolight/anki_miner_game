@@ -267,7 +267,7 @@ def _addon(home: Path, tmp_path: Path, *, platform: str = "linux", uv_plan: dict
     if uv_plan is not None:
         env["FAKE_UV_PLAN"] = json.dumps(uv_plan)
     uv = _fake_uv(tmp_path) if sys.platform != "win32" else Path("uv-not-used-on-windows")
-    return OcrAddon(home, platform=platform, environ=env, ensure_uv=lambda _home: uv)
+    return OcrAddon(home, platform=platform, environ=env, ensure_uv=lambda _home, **_: uv)
 
 
 def _root(home: Path) -> Path:
@@ -302,7 +302,7 @@ async def test_status_is_installing_while_the_install_runs(tmp_path):
     seen: list[AddonStatus] = []
     uv = _fake_uv(tmp_path)
 
-    def ensure_uv(_home: Path) -> Path:
+    def ensure_uv(_home: Path, **_: object) -> Path:
         seen.append(addon.status())
         return uv
 
@@ -381,24 +381,74 @@ async def test_a_missing_entry_point_or_receipt_is_broken(tmp_path):
     assert addon.status() is AddonStatus.BROKEN
 
 
-async def test_a_failed_uv_bootstrap_keeps_the_previous_install(tmp_path):
+async def test_a_failed_uv_bootstrap_is_an_ocr_error_and_keeps_the_previous_install(tmp_path):
     home = tmp_path / "home"
-    _install_fake(home, "linux")
+    _install_fake(home, "linux", version="1.26.7")
 
-    def no_uv(_home: Path) -> Path:
+    def no_uv(_home: Path, **_: object) -> Path:
         raise BootstrapError("uv could not be installed: offline")
 
     addon = OcrAddon(home, platform="linux", environ={}, ensure_uv=no_uv)
-    with pytest.raises(BootstrapError):
+    with pytest.raises(OcrError, match="offline"):
         await addon.install(Progress())
+    assert addon.status() is AddonStatus.BROKEN
+
+
+async def test_a_uv_that_cannot_start_is_an_ocr_error(tmp_path):
+    home = tmp_path / "home"
+    addon = OcrAddon(home, platform="linux", environ={}, ensure_uv=lambda _home, **_: tmp_path / "no-uv")
+    with pytest.raises(OcrError, match="could not be installed"):
+        await addon.install(Progress())
+    assert addon.status() is AddonStatus.MISSING
+
+
+async def test_install_while_ready_does_nothing(tmp_path):
+    home = tmp_path / "home"
+    _install_fake(home, "linux")
+    calls: list[Path] = []
+    progress = Progress()
+
+    def ensure_uv(home: Path, **_: object) -> Path:
+        calls.append(home)
+        raise AssertionError("no install while ready")
+
+    addon = OcrAddon(home, platform="linux", environ={}, ensure_uv=ensure_uv)
+    await addon.install(progress)
+    assert calls == [] and progress.calls == []
     assert addon.status() is AddonStatus.READY
+
+
+async def test_a_cancelled_uv_download_stops_at_its_next_chunk(tmp_path):
+    started = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    chunks: list[int] = []
+
+    def ensure_uv(_home: Path, *, progress) -> Path:
+        loop.call_soon_threadsafe(started.set)
+        for done in range(1000):
+            progress(done, 1000)
+            chunks.append(done)
+            time.sleep(0.01)
+        raise AssertionError("the download ran to the end")
+
+    addon = OcrAddon(tmp_path / "home", platform="linux", environ={}, ensure_uv=ensure_uv)
+    install = asyncio.create_task(addon.install(Progress()))
+    async with asyncio.timeout(5):
+        await started.wait()
+    install.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await install
+    stopped_at = len(chunks)
+    await asyncio.sleep(0.05)
+    assert len(chunks) == stopped_at < 1000
+    assert addon.status() is AddonStatus.MISSING
 
 
 async def test_a_second_install_while_one_runs_is_refused(tmp_path):
     release = asyncio.Event()
     loop = asyncio.get_running_loop()
 
-    def slow_uv(_home: Path) -> Path:
+    def slow_uv(_home: Path, **_: object) -> Path:
         asyncio.run_coroutine_threadsafe(release.wait(), loop).result()
         raise BootstrapError("stop here")
 
@@ -410,7 +460,7 @@ async def test_a_second_install_while_one_runs_is_refused(tmp_path):
     with pytest.raises(OcrError, match="already"):
         await addon.install(Progress())
     release.set()
-    with pytest.raises(BootstrapError):
+    with pytest.raises(OcrError, match="stop here"):
         await first
     assert addon.status() is AddonStatus.MISSING
 
@@ -440,7 +490,7 @@ def test_the_ocr_addon_conforms_to_the_addon_protocols(protocol_name):
             assert list(inspect.signature(actual).parameters) == list(inspect.signature(expected).parameters), member
 
 
-def test_pick_raises_the_runtime_error_its_protocol_names():
+def test_pick_and_install_raise_the_runtime_error_their_protocols_name():
     assert issubclass(OcrError, RuntimeError)
 
 
