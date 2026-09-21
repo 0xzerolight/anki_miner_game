@@ -28,7 +28,8 @@ Rules:
   with the owner's environment. Start nested displays only through `tools/nested_display.py`.
 - Run `guard` before and after every session. Exit code 3, or any line starting with `CRITICAL`,
   means owner state changed: stop every nested process, report it, and never edit or restore the
-  owner's files yourself.
+  owner's files yourself. Besides the KDE and GTK files and the doc mount, it watches the app's
+  default home and output root, `~/.anki_miner_game` and `~/Videos/Anki Miner Game`.
 - The orchestrator's watchdog flags any nested kwin whose `XDG_CONFIG_HOME` is outside
   `/home/light/Projects/anki_miner_game/.orchestration/m0/data`, or that uses the owner's session
   bus. The tool refuses such a root before starting anything.
@@ -84,13 +85,18 @@ What each run gets:
 ### Rootless or rootful Xwayland
 
 - **Rootless (default).** kwin starts Xwayland and is its window manager, so X11 windows have
-  `_NET_CLIENT_LIST` entries and OBS's `xcomposite_input` source can list and capture them. Use
-  this for OBS, the flasher and E1. A grab of the root window fails here with BadMatch (found
-  by R3), so `mss`-style screen grabs do not work.
+  `_NET_CLIENT_LIST` entries and OBS's `xcomposite_input` source can list them. It cannot capture
+  them on this host: `xcomposite_input` records black with both NVIDIA EGL and Mesa llvmpipe
+  (`docs/m0/clock.md` side finding 1, `docs/m0/obs-behaviour.md` Limits 3). Use this display for
+  window lists: the window picker, a retitled window, auto mode's window-closed stop. A grab of
+  the root window fails here with BadMatch (found by R3), so `mss`-style screen grabs do not work.
 - **Rootful (`--rootful`).** A second Xwayland with a real `WxH` root window runs as a client of
-  the nested kwin, and children get its `DISPLAY`. Root-window grabs work there (owocr, R3), but
-  there is no window manager, so OBS window capture has no window list. S2's smoke test covered
-  rootless mode only.
+  the nested kwin, and children get its `DISPLAY`. Root-window grabs work there: owocr (R3) and
+  OBS's XSHM capture (`xshm_input_v2`, cropped to a window with `cut_*`), which is how R1 got
+  pixels. There is no window manager, and OBS lists X11 windows only from `_NET_CLIENT_LIST`
+  (obs-studio `ba2f32b` `plugins/linux-capture/xcomposite-input.c:229-236`), so the window list
+  holds only the stored item. Anything that needs recorded pixels (the sync probe) runs here, with
+  auto mode off.
 
 ## Flatpak OBS inside the display, without the owner's portals
 
@@ -147,6 +153,28 @@ Consequences:
   unclean shutdown, and the next launch may stop at the unclean-shutdown prompt
   (`frontend/OBSApp.cpp:1139-1153`), which nobody can click in a headless display.
 
+## The app inside the display (E1)
+
+`HOME` is the owner's there, so the app would keep its files in `~/.anki_miner_game` and record to
+`~/Videos/Anki Miner Game` (the guard flags both). Give it a home of its own and an output root
+inside it, and start OBS yourself (in the background) before the app:
+
+```
+D=/home/light/Projects/anki_miner_game/.orchestration/m0/data/e1-linux-exit
+mkdir -p $D/home && printf '{"schema": 1, "output_root": "%s"}\n' $D/recordings > $D/home/config.json
+python tools/nested_display.py exec --env-file $D/nested.json -- \
+  flatpak run --die-with-parent --nosocket=wayland --socket=x11 --no-documents-portal \
+  --no-a11y-bus --env=QT_QPA_PLATFORM=xcb com.obsproject.Studio
+python tools/nested_display.py exec --env-file $D/nested.json \
+  --setenv ANKI_MINER_GAME_HOME=$D/home -- APP-COMMAND
+```
+
+A `config.json` holding only `schema` and `output_root` loads with every other setting at its
+default. Every app command, CLI verbs included, gets the same `--setenv`. With OBS already running,
+`ObsDiscovery.is_running()` is true and the app never starts OBS itself: its own launch is a plain
+`flatpak run com.obsproject.Studio --minimize-to-tray`, without the flags above that keep OBS off
+the owner's portals.
+
 ## Transcript recorder
 
 ```
@@ -178,8 +206,9 @@ It opens a 640x360 black window titled `amg-sync-probe`. At each flash (jittered
 does. Set `--fps` to OBS's frame rate. Flashes before the recording starts are ignored by the
 analyser, so a long `--initial-delay` leaves time to start recording.
 
-R1, `--raw` (no app): record with OBS capturing the window (`xcomposite_input`), drive the
-recording through the recorder proxy (for example
+R1, `--raw` (no app): in a rootful display, record with an XSHM capture of the screen cropped to
+the flasher window (`xcomposite_input` records black on this host; see "Rootless or rootful
+Xwayland"), drive the recording through the recorder proxy (for example
 `python -m tools.m0.obs_scenarios run pause_resume --port 4456 --hold 10 --steps S.jsonl`), then
 
 ```

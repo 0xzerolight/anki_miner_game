@@ -8,8 +8,9 @@ to JSONL with the ``time.monotonic()`` read at the moment it was triggered::
 
     python -m tools.sync_probe.flasher --log FLASHER.jsonl --port 6677 --count 10 --interval 3
 
-Run it inside the nested display (``tools/nested_display.py``) so OBS can capture the window with
-``xcomposite_input``; the window title is ``--title`` (default ``amg-sync-probe``).
+Run it inside a rootful nested display (``tools/nested_display.py --rootful``) and capture it with
+an XSHM screen capture cropped to the window: ``xcomposite_input`` records black on the M0 host
+(``docs/m0/clock.md`` side finding 1). The window title is ``--title`` (default ``amg-sync-probe``).
 
 Log records: ``{"kind": "start", "t_mono", "port", "fps", "frames", "schedule", "title"}``, then
 ``{"kind": "flash", "index", "t_mono", "text", "clients"}`` per flash, then ``{"kind": "end", ...}``.

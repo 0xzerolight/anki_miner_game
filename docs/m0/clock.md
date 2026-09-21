@@ -212,8 +212,9 @@ bitrate only.
    (run `campaign-simple-default-trial2-173143`). EGL is OBS's only X11 backend (`libobs-opengl`
    has `gl-x11-egl.c`, no GLX file), so there is no GLX fallback to try. The rig therefore uses XSHM
    of a rootful Xwayland. E1's card asks for `capture.kind=xcomposite` with this OBS on this host;
-   it will need the same XSHM workaround or a Mesa GL for OBS. Whether real NVIDIA X11 desktops hit
-   this is for H5.
+   it needs the same XSHM workaround. A Mesa GL does not help: R2 forced OBS onto Mesa EGL
+   (llvmpipe) and still recorded black (`docs/m0/obs-behaviour.md` Limits 3). Whether real NVIDIA
+   X11 desktops hit this is for H5.
 2. **Listing windows of an `xcomposite_input` with an empty `capture_window` aborts OBS.**
    `GetInputPropertiesListPropertyItems(inputName, propertyName="capture_window")` on a freshly
    created input killed OBS 32.2.2: `terminate called after throwing an instance of
