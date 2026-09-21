@@ -441,6 +441,17 @@ async def test_quitting_while_recording_stops_obs_and_finishes_the_session(h: Ha
     assert not restore_path().exists()
 
 
+async def test_quitting_right_after_a_stop_waits_for_obs_to_say_inactive_then_restores(h: Harness):
+    """E1: a quit 114 ms after ``STOPPED`` met a ``GetRecordStatus`` still saying active (R2 item 9)."""
+    await h.arm()
+    await h.started(ZERO)
+    await h.stopped(ZERO + 5.0)
+    h.obs.stale_active_reads = 1
+    await h.stop()
+    assert (h.obs.profile, h.obs.collection) == ("Untitled", "Untitled")
+    assert not restore_path().exists()
+
+
 async def test_quitting_while_recording_leaves_the_session_to_the_next_launch_when_obs_does_not_stop(h: Harness):
     await h.arm()
     await h.started(ZERO)

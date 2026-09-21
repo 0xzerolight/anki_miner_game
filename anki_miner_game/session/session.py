@@ -546,6 +546,7 @@ class SessionActor:
         if self._state is AppState.RECORDING:
             await self._stop_for_quit()
         if self._state is AppState.ARMED:
+            await self._await_record_inactive()  # a recording that just stopped, here or before the quit
             await self._to_idle()
             return
         await self._stop_sources()
@@ -1066,13 +1067,13 @@ class SessionActor:
                 )
                 return
         await self._end_session(stop_ms)
-        await self._await_record_inactive()
 
     async def _await_record_inactive(self) -> None:
         """Up to ``RECORD_INACTIVE_WAIT_S`` until ``GetRecordStatus`` says inactive (R2 item 9).
 
         After ``STOPPED`` it still says active for about 170 ms, and a restore in that window would
-        take it for a running recording and leave OBS on the app's profile.
+        take it for a running recording and leave OBS on the app's profile. The quit's restore runs
+        once: E1 quit 114 ms after a ``STOPPED`` and OBS stayed on the app's profile.
         """
         for _ in range(round(RECORD_INACTIVE_WAIT_S / RECORD_INACTIVE_POLL_S)):
             try:
