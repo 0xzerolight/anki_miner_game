@@ -93,6 +93,7 @@ from anki_miner_game.models.obs import (
     ObsRequestError,
     ObsUnsupportedError,
     OutputState,
+    ProvisionResult,
 )
 from anki_miner_game.models.pipeline import DROP_COUNTER, Accepted, Dropped
 from anki_miner_game.models.profile import GameProfile, validate
@@ -265,11 +266,12 @@ class _RestartQuestionError(Exception):
     """OBS switched (``...Changed`` came) but holds the answer behind its modal restart question (R2 item 3).
 
     The switch itself is done (R2 item 5). The unanswered request is cancelled, so the gateway drops
-    the link and reconnects (T12); nothing else can be sent before it.
+    the link and reconnects (T12); nothing else can be sent before it. ``text`` replaces the message
+    when provisioning made the switch and gave up on it (``SessionActor._ensure_profile``).
     """
 
-    def __init__(self) -> None:
-        super().__init__("OBS is asking to restart; answer it in OBS's window")
+    def __init__(self, text: str = "OBS is asking to restart; answer it in OBS's window") -> None:
+        super().__init__(text)
 
 
 @dataclass
@@ -709,8 +711,9 @@ class SessionActor:
             return
         await self._stop_sources()  # arming another game while armed
         try:
-            await self._switch_to_app()
-            result = await self._provisioner.ensure_profile(cfg)
+            collections = await self._save_user_names()
+            result = await self._ensure_profile(cfg)
+            await self._switch_to_app_collection(collections)
             await self._provisioner.ensure_collection(profile)
         except (_SwitchTimeoutError, _RestartQuestionError, ObsError, StoreError) as exc:
             # A request OBS left unanswered was cancelled, so the gateway is dropping the link, and a
@@ -798,12 +801,11 @@ class SessionActor:
                 active.append(label)
         return active
 
-    async def _switch_to_app(self) -> None:
-        """Spec 6.2 steps 2-3: remember the user's names, then switch profile, then collection.
+    async def _save_user_names(self) -> dict[str, Any]:
+        """Spec 6.2 step 2: write the current profile and collection names to ``obs_restore.json``.
 
         An existing ``obs_restore.json`` is kept: it holds the names from before an earlier arm the
-        app never disarmed. A switch to what is already current is skipped (R2 item 4). A profile or
-        collection that does not exist yet is created (and made current) by the provisioner in step 4.
+        app never disarmed. Returns ``GetSceneCollectionList``'s answer for the collection switch.
         """
         profiles = await self._gateway.request("GetProfileList")
         collections = await self._gateway.request("GetSceneCollectionList")
@@ -817,9 +819,58 @@ class SessionActor:
             saved = None
         if saved is None and (current_profile, current_collection) != (OBS_PROFILE_NAME, OBS_COLLECTION_NAME):
             save_restore(path, ObsRestore(profile=current_profile, collection=current_collection))
-        if current_profile != OBS_PROFILE_NAME and OBS_PROFILE_NAME in (profiles.get("profiles") or []):
-            await self._switch(_PROFILE, OBS_PROFILE_NAME)
-        if current_collection != OBS_COLLECTION_NAME and OBS_COLLECTION_NAME in (
+        return collections
+
+    async def _ensure_profile(self, cfg: AppConfig) -> ProvisionResult:
+        """Spec 6.2 step 3's profile switch and spec 11.3's profile rows, both made by ``ensure_profile``.
+
+        It is called while the user's profile is still current, so it copies that profile's audio
+        sample rate and channels into the app's before it leaves it (spec 11.3). Were the app's profile
+        made current first, there would be nothing to copy from, and every switch between two profiles
+        whose values differ stops at OBS's restart question (R2 item 3): arming would fail at each try.
+
+        The switch into the app's profile still asks once when the values differ now. When its
+        ``CurrentProfileChanged`` has come and provisioning has not finished ``RESTART_QUESTION_S``
+        later, a banner points at OBS's window while provisioning waits for the answer up to its own
+        switch timeout. A failure after that raises ``_RestartQuestionError`` with the provisioner's
+        text: the question may still be open, so the restore waits.
+        """
+
+        def to_app(ev: ObsEvent) -> bool:
+            return ev.name == ObsEventName.CURRENT_PROFILE_CHANGED and ev.data.get("profileName") == OBS_PROFILE_NAME
+
+        with self._expecting(to_app) as changed:
+            provisioning = asyncio.ensure_future(self._provisioner.ensure_profile(cfg))
+            try:
+                await asyncio.wait((provisioning, changed), return_when=asyncio.FIRST_COMPLETED)
+                if not provisioning.done():
+                    await asyncio.wait((provisioning,), timeout=RESTART_QUESTION_S)
+                asked = not provisioning.done()
+                if asked:
+                    self._banner(
+                        BannerKey.OBS_QUESTION,
+                        BannerLevel.WARNING,
+                        "OBS is asking to restart: answer it in OBS's window (No keeps OBS running and "
+                        "lets arming go on).",
+                    )
+                try:
+                    result = await provisioning
+                except ObsError as exc:
+                    if asked:
+                        raise _RestartQuestionError(str(exc)) from exc
+                    raise
+            finally:
+                provisioning.cancel()  # only while this arm is itself cancelled
+        self._clear(BannerKey.OBS_QUESTION)
+        return result
+
+    async def _switch_to_app_collection(self, collections: dict[str, Any]) -> None:
+        """Spec 6.2 step 3's collection switch; ``collections`` is ``GetSceneCollectionList``'s answer.
+
+        Skipped when the app's collection is current (R2 item 4) or does not exist yet: then
+        ``ensure_collection`` creates it and makes it current.
+        """
+        if collections.get("currentSceneCollectionName") != OBS_COLLECTION_NAME and OBS_COLLECTION_NAME in (
             collections.get("sceneCollections") or []
         ):
             await self._switch(_COLLECTION, OBS_COLLECTION_NAME)

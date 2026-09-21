@@ -2,6 +2,7 @@
 output, switch timeout, output folder not writable, free space; R2 items 3-6)."""
 
 import asyncio
+from typing import Any
 
 import pytest
 
@@ -9,21 +10,50 @@ from anki_miner_game.models.constants import OBS_COLLECTION_NAME, OBS_PROFILE_NA
 from anki_miner_game.models.messages import (
     OBS_SOURCE_ID,
     AppState,
+    BannerRaised,
     CommandKind,
+    ObsEvent,
     SourceStatus,
     SourceStatusChanged,
     UserCommand,
 )
-from anki_miner_game.models.obs import ObsAuthError, ObsError, ObsUnsupportedError
+from anki_miner_game.models.obs import (
+    REQUIRED_REQUESTS,
+    ObsAuthError,
+    ObsError,
+    ObsEventName,
+    ObsInfo,
+    ObsUnsupportedError,
+)
+from anki_miner_game.obs.provision import ObsProvisioner
 from anki_miner_game.session import session as session_mod
 from anki_miner_game.session.restore import ObsRestore, load_restore, restore_path, save_restore
 from anki_miner_game.session.session import BannerKey
+from tests.gui.obs_listing_fake import ListingObs
+from tests.obs.fake_obs import LINUX_X11_KINDS
 from tests.session.actor_harness import SLUG, T0, FakeSource, Harness, profile
 
 SWITCH_REQUESTS = ["SetCurrentProfile", "SetCurrentSceneCollection"]
 
 
+class ActorObs(ListingObs):
+    """T14's stateful fake OBS (audio values, restart questions, output statuses) as the actor's gateway."""
+
+    async def connect(self) -> ObsInfo:
+        for handler in self.handlers:
+            handler(ObsEvent(ObsEventName.CONNECTED, {}, 0.0))
+        return ObsInfo("32.2.2", "5.7.4", frozenset(REQUIRED_REQUESTS))
+
+    def _GetVersion(self) -> dict[str, Any]:  # noqa: N802
+        return {"obsVersion": "32.2.2", "obsWebSocketVersion": "5.7.4"}
+
+
+async def _no_sleep(_seconds: float) -> None:
+    pass
+
+
 async def test_arm_switches_obs_to_the_app_profile_and_collection(h: Harness):
+    """Spec 6.2 steps 2-3: the names saved, then the profile (by ``ensure_profile``), then the collection."""
     h.gateway.sent.clear()
     await h.arm()
     assert h.gateway.names() == [
@@ -39,10 +69,42 @@ async def test_arm_switches_obs_to_the_app_profile_and_collection(h: Harness):
     assert (h.obs.profile, h.obs.collection) == (OBS_PROFILE_NAME, OBS_COLLECTION_NAME)
     assert load_restore(restore_path()) == ObsRestore(profile="Untitled", collection="Untitled")
     assert h.provisioner.profiles == [h.cfg]
+    assert h.provisioner.started_on == ["Untitled"]  # spec 11.3: it copies the user's audio values
     assert h.provisioner.collections == [h.profiles[SLUG]]
     assert h.sources[0].starts == 1
     assert h.states() == [(AppState.ARMED, SLUG)]
     assert h.banners() == {}
+
+
+async def test_only_the_first_switch_to_the_app_profile_meets_a_sample_rate_it_lacks(tmp_path):
+    """The user arms from a second profile at 44.1 kHz; the app's profile was provisioned at 48 kHz.
+
+    ``ensure_profile`` starts on the user's profile, so it copies the rate into the app's profile
+    (spec 11.3): OBS asks to restart at that first switch only (R2 item 3), never at the disarm or a
+    later arm. The fake OBS answers each question "No".
+    """
+    obs = ActorObs(input_kinds=LINUX_X11_KINDS)
+    provisioner = ObsProvisioner(obs, platform="linux", sleep=_no_sleep)
+    rig = Harness(tmp_path, gateway=obs, provisioner=provisioner)
+    await provisioner.ensure_profile(rig.cfg)  # the wizard, from "Untitled" at OBS's 48 kHz
+    await obs.request("SetCurrentProfile", profileName="Untitled")
+    await obs.request("CreateProfile", profileName="Second")
+    await asyncio.sleep(0)  # OBS lands on the new profile
+    obs.profiles["Second"][("Audio", "SampleRate")] = "44100"
+    assert obs.restart_questions == []
+    await rig.start()
+    try:
+        for _ in range(2):
+            await rig.arm()
+            assert rig.actor.state is AppState.ARMED
+            await rig.send(CommandKind.DISARM)
+            assert rig.actor.state is AppState.IDLE
+    finally:
+        await rig.stop()
+    assert obs.restart_questions == [("Second", OBS_PROFILE_NAME)]
+    assert obs.profiles[OBS_PROFILE_NAME][("Audio", "SampleRate")] == "44100"
+    assert (obs.current_profile, obs.current_collection) == ("Second", "Untitled")
+    assert BannerKey.ARM not in rig.banners()
 
 
 async def test_arm_creates_the_output_folder(h: Harness):
@@ -143,15 +205,24 @@ async def test_authentication_failure_asks_for_the_password(rig: Harness):
     assert SourceStatusChanged(OBS_SOURCE_ID, SourceStatus.DISCONNECTED) in rig.events
 
 
-async def test_a_switch_that_times_out_is_undone(h: Harness, monkeypatch):
+@pytest.mark.parametrize(
+    "home_profile",
+    [
+        "Untitled",  # the profile switch, made by ensure_profile, loses its event
+        OBS_PROFILE_NAME,  # already on the app's profile: the actor's collection switch loses it
+    ],
+)
+async def test_a_switch_that_times_out_is_undone(h: Harness, monkeypatch, home_profile: str):
     monkeypatch.setattr(session_mod, "SWITCH_TIMEOUT_S", 0.05)
-    h.obs.lost_switch_events = 1  # OBS switches and answers, but the CurrentProfileChanged event never comes
+    h.provisioner.switch_timeout_s = 0.05
+    h.obs.profile = home_profile
+    h.obs.lost_switch_events = 1  # OBS switches and answers, but the ...Changed event never comes
     await h.arm()
     assert h.actor.state is AppState.IDLE
     assert "within" in h.banners()[BannerKey.ARM]
-    assert h.obs.profile == "Untitled"
+    assert (h.obs.profile, h.obs.collection) == (home_profile, "Untitled")
     assert not restore_path().exists()
-    assert h.provisioner.profiles == []
+    assert h.provisioner.collections == []
 
 
 async def test_a_switch_whose_answer_comes_first_waits_for_its_event(h: Harness):
@@ -164,14 +235,16 @@ async def test_a_switch_whose_answer_comes_first_waits_for_its_event(h: Harness)
     assert BannerKey.ARM not in h.banners()
 
 
-async def test_obs_asking_to_restart_fails_the_arm_and_restores_at_the_retry(h: Harness, monkeypatch):
+async def test_an_unanswered_restart_question_fails_the_arm_and_restores_at_the_retry(h: Harness, monkeypatch):
     monkeypatch.setattr(session_mod, "RESTART_QUESTION_S", 0.05)
+    h.provisioner.switch_timeout_s = 0.3
     h.obs.restart_question = asyncio.Event()  # nobody answers it
     await h.arm()
     assert h.actor.state is AppState.IDLE
-    assert "OBS is asking to restart" in h.banners()[BannerKey.ARM]
+    assert "OBS is asking to restart" in h.banners()[BannerKey.OBS_QUESTION]
+    assert "within" in h.banners()[BannerKey.ARM]
     assert h.obs.profile == OBS_PROFILE_NAME  # OBS switched before it asked (R2 item 3)
-    assert h.sources[0].starts == 0 and h.provisioner.profiles == []
+    assert h.sources[0].starts == 0 and h.provisioner.collections == []
     assert h.gateway.drops == 1  # the unanswered request was cancelled: the gateway dropped the link
     # Neither the failed arm nor the reconnect restores at once: a switch now would meet the open question.
     assert h.gateway.names().count("SetCurrentProfile") == 1
@@ -180,9 +253,29 @@ async def test_obs_asking_to_restart_fails_the_arm_and_restores_at_the_retry(h: 
     await h.tick(h.clock.t + session_mod.RESTORE_RETRY_S)
     assert (h.obs.profile, h.obs.collection) == ("Untitled", "Untitled")
     assert not restore_path().exists()
+    assert BannerKey.OBS_QUESTION not in h.banners()
 
 
-async def test_an_answer_within_the_question_window_lets_the_arm_go_on(h: Harness, monkeypatch):
+async def test_the_restart_question_is_a_banner_while_provisioning_waits_for_the_answer(h: Harness, monkeypatch):
+    """Spec 6.2 step 3: ``...Changed`` came and the answer did not; the arm goes on once it is answered."""
+    monkeypatch.setattr(session_mod, "RESTART_QUESTION_S", 0.02)
+    question = h.obs.restart_question = asyncio.Event()
+    h.actor.post(UserCommand(CommandKind.ARM, slug=SLUG))
+    async with asyncio.timeout(5):
+        while BannerKey.OBS_QUESTION not in h.banners():
+            await asyncio.sleep(0.005)
+    assert "OBS is asking to restart" in h.banners()[BannerKey.OBS_QUESTION]
+    assert h.actor.state is AppState.IDLE and h.provisioner.collections == []
+    question.set()  # the user answers "No"
+    async with asyncio.timeout(5):
+        while h.actor.state is not AppState.ARMED:
+            await asyncio.sleep(0.005)
+    assert h.gateway.drops == 0
+    assert BannerKey.OBS_QUESTION not in h.banners() and BannerKey.ARM not in h.banners()
+    assert h.provisioner.collections == [h.profiles[SLUG]]
+
+
+async def test_a_quick_answer_raises_no_question_banner(h: Harness, monkeypatch):
     monkeypatch.setattr(session_mod, "RESTART_QUESTION_S", 5.0)
     question = h.obs.restart_question = asyncio.Event()
     asyncio.get_running_loop().call_later(0.02, question.set)  # OBS answers a little late
@@ -191,7 +284,7 @@ async def test_an_answer_within_the_question_window_lets_the_arm_go_on(h: Harnes
         while h.actor.state is not AppState.ARMED:
             await asyncio.sleep(0.01)
     assert h.gateway.drops == 0
-    assert BannerKey.ARM not in h.banners()
+    assert not [e for e in h.events if isinstance(e, BannerRaised)]
 
 
 async def test_a_restore_that_meets_the_restart_question_is_done(h: Harness, monkeypatch):
@@ -236,7 +329,7 @@ async def test_settings_that_apply_at_the_next_arm_are_a_warning(h: Harness):
     assert h.actor.state is AppState.ARMED
     text = h.banners()[BannerKey.OBS_RESTART]
     assert "disarm and arm" in text
-    assert "SetCurrentProfile" in h.gateway.names()  # the arm's own switch; nothing else restarts OBS
+    assert h.gateway.names().count("SetCurrentProfile") == 1  # ensure_profile's switch; nothing restarts OBS
 
 
 async def test_unknown_and_invalid_games_are_refused(h: Harness):

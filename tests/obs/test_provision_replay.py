@@ -276,9 +276,10 @@ def app_requests(records: list[dict[str, Any]]) -> list[tuple[int, dict[str, Any
 def provisioning_starts(records: list[dict[str, Any]]) -> list[int]:
     """Index in ``app_requests`` of each arm's first provisioning request.
 
-    An arm reads ``GetProfileList`` and ``GetSceneCollectionList``, switches to the app's profile and
-    collection where they exist (``SessionActor._switch_to_app``), and then provisioning begins with
-    ``ensure_profile``'s own ``GetProfileList``.
+    An arm of the app that recorded the transcript read ``GetProfileList`` and
+    ``GetSceneCollectionList``, switched to the app's profile and collection where they existed, and
+    then provisioning began with ``ensure_profile``'s own ``GetProfileList``. (The actor now leaves
+    the profile switch to ``ensure_profile``; the recorded arms are replayed as they happened.)
     """
     types = [request["requestType"] for _, request in app_requests(records)]
     starts = []

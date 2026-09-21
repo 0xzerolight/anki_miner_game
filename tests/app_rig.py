@@ -65,7 +65,7 @@ class Rig:
         self.obs = FakeObs()
         self.gateway = FakeGateway(self.obs, FakeClock())
         self.discovery = FakeDiscovery()
-        self.provisioner = FakeProvisioner()
+        self.provisioner = FakeProvisioner(self.gateway)
         self.sources = [Source()]
         self.events: list[tuple[str, tuple[Any, ...]]] = []
         self.app: App | None = None

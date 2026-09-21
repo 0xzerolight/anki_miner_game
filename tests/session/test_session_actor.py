@@ -114,7 +114,7 @@ def test_a_message_posted_after_the_loop_closed_is_dropped():
         loop=loop,
         gateway=gateway,
         discovery=FakeDiscovery(),
-        provisioner=FakeProvisioner(),
+        provisioner=FakeProvisioner(gateway),
         recorder=ObsRecorder(gateway),
         finaliser=finaliser,
         get_config=AppConfig,

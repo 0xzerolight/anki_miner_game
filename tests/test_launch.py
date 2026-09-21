@@ -104,7 +104,7 @@ SMOKE = textwrap.dedent("""
 
     def fake_obs_app(**kwargs):
         gateway = FakeGateway(FakeObs(), FakeClock())
-        services = app_mod.ObsServices(FakeDiscovery(), gateway, FakeProvisioner())
+        services = app_mod.ObsServices(FakeDiscovery(), gateway, FakeProvisioner(gateway))
         return real_app(obs=lambda _config: services, **kwargs)
 
     launch.App = fake_obs_app

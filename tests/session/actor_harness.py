@@ -35,6 +35,7 @@ from anki_miner_game.models.messages import (
 from anki_miner_game.models.obs import (
     REQUIRED_REQUESTS,
     ObsConnectError,
+    ObsError,
     ObsEventName,
     ObsInfo,
     ObsRequestError,
@@ -42,6 +43,7 @@ from anki_miner_game.models.obs import (
     ProvisionResult,
 )
 from anki_miner_game.models.profile import FilterSettings, GameProfile
+from anki_miner_game.obs import provision
 from anki_miner_game.obs.recorder import ObsRecorder
 from anki_miner_game.session.session import FinaliseWorker, SessionActor
 
@@ -260,17 +262,55 @@ class FakeDiscovery:
 
 
 class FakeProvisioner:
-    def __init__(self) -> None:
+    """``Provisioner`` over ``FakeGateway``. ``ensure_profile`` makes the app's profile current itself, as
+    ``obs/provision.py`` does: ``SetCurrentProfile`` through the gateway, done on its answer and its
+    ``CurrentProfileChanged`` within ``switch_timeout_s``, else ``ObsError`` (a request still unanswered
+    then is cancelled, so the gateway drops the link). It skips the switch when the app's profile is
+    current or missing (the real one creates it), and raises ``error`` after it."""
+
+    def __init__(self, gateway: FakeGateway) -> None:
+        self.gateway = gateway
         self.profiles: list[AppConfig] = []
+        self.started_on: list[str] = []
+        """OBS's current profile at each ``ensure_profile``: the one whose audio values it copies (spec 11.3)."""
         self.collections: list[GameProfile] = []
         self.error: Exception | None = None
         self.needs_restart = False
+        self.switch_timeout_s = provision.SWITCH_TIMEOUT_S
 
     async def ensure_profile(self, cfg: AppConfig) -> ProvisionResult:
         self.profiles.append(cfg)
+        obs = self.gateway.obs
+        self.started_on.append(obs.profile)
+        if obs.profile != OBS_PROFILE_NAME and OBS_PROFILE_NAME in obs.profiles:
+            await self._switch_to_app()
         if self.error is not None:
             raise self.error
         return ProvisionResult(changed=False, needs_restart=self.needs_restart)
+
+    async def _switch_to_app(self) -> None:
+        changed: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+
+        def on_event(ev: ObsEvent) -> None:
+            if (
+                ev.name == ObsEventName.CURRENT_PROFILE_CHANGED
+                and ev.data.get("profileName") == OBS_PROFILE_NAME
+                and not changed.done()
+            ):
+                changed.set_result(None)
+
+        self.gateway.handlers.append(on_event)
+        try:
+            async with asyncio.timeout(self.switch_timeout_s):
+                await self.gateway.request("SetCurrentProfile", profileName=OBS_PROFILE_NAME)
+                await changed
+        except TimeoutError:
+            raise ObsError(
+                f"OBS did not finish switching to {OBS_PROFILE_NAME!r} within {self.switch_timeout_s:g} s; "
+                "an OBS dialog may be waiting for an answer"
+            ) from None
+        finally:
+            self.gateway.handlers.remove(on_event)
 
     async def ensure_collection(self, profile: GameProfile) -> ProvisionResult:
         self.collections.append(profile)
@@ -355,16 +395,27 @@ async def _never(_seconds: float) -> None:
 
 
 class Harness:
-    def __init__(self, tmp_path: Path, *, sleep: Callable[[float], Awaitable[None]] | None = None) -> None:
-        """``sleep`` paces the actor's ``Tick`` timer; by default it never fires (tests call ``tick``)."""
+    def __init__(
+        self,
+        tmp_path: Path,
+        *,
+        sleep: Callable[[float], Awaitable[None]] | None = None,
+        gateway: Any = None,
+        provisioner: Any = None,
+    ) -> None:
+        """``sleep`` paces the actor's ``Tick`` timer; by default it never fires (tests call ``tick``).
+
+        ``gateway`` and ``provisioner`` replace ``FakeGateway`` and ``FakeProvisioner`` (both or neither),
+        for a test that runs the real provisioner against T14's stateful fake OBS.
+        """
         self.output_root = tmp_path / "out"
         self.cfg = AppConfig(output_root=str(self.output_root))
         self.incoming = self.output_root / "_incoming"
         self.clock = FakeClock()
         self.obs = FakeObs()
-        self.gateway = FakeGateway(self.obs, self.clock)
+        self.gateway = gateway or FakeGateway(self.obs, self.clock)
         self.discovery = FakeDiscovery()
-        self.provisioner = FakeProvisioner()
+        self.provisioner = provisioner or FakeProvisioner(self.gateway)
         self.vad = FakeVadJobs()
         self.profiles = {SLUG: profile()}
         self.sources = [FakeSource("textractor")]
