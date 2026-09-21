@@ -14,7 +14,7 @@ Spec 20 rows "Sync probe and clock", "Pause" and "Disk rate"; spec 7; spec 18.3.
 | Spread across encoders | **50 ms** between the encoder medians with `STARTED` (-15 to +35). Under 100 ms: one constant ships, no calibration step. With the `StartRecord` response or `STARTING` as the zero it would be about 183 ms |
 | Spread per encoder | 46 to 54 ms within each configuration (all flashes, three sessions each); 128 ms under encoder overload |
 | Pause | On OBS's default profile `PauseRecord` does nothing (success reply, no event, recording continues). With a separate recording encoder, offsets after resume stay within 10 ms (median) of those before |
-| 150 ms bound | **Pass** for every flash of every run, after pause included. Largest residual against 10 ms: 50 ms without overload, 133 ms under encoder overload |
+| 150 ms bound | **Pass** for every flash found in the file, after pause included. Largest residual against 10 ms: 50 ms without overload, 133 ms under encoder overload. Without overload all 222 recorded flashes are in the file. Under overload, flashes lost from the file have no residual: 7 of 51 in the three-session run, 2 of 9 in the `veryslow` probe, 8 of 9 in the `placebo` probe (none in the `slower` probe) |
 | Disk rate, OBS defaults | **2.78 GB/h at 1080p30 and 2.78 GB/h at 720p30** (NVENC or x264, CBR 6000 kb/s video + AAC 160 kb/s). Resolution does not change it |
 
 Two findings need spec changes beyond the constants (sections "OutputDurationClock" and "Side
@@ -61,8 +61,8 @@ All numbers are Linux. The Windows zero event and latency stay provisional until
   predicts; `capture_latency_ms` is the constant that best centres it.
 - **Encoder overload.** Advanced output with x264 `veryslow` and a looping 1080p30 source of
   `testsrc2` plus temporal noise (with pink-noise audio) under the flasher window. OBS logged 13.3,
-  14.4 and 55.4 % of frames skipped due to encoding lag in the three sessions. A one-session probe
-  with `slower` gave 1.6 %, one with `placebo` 91.3 %.
+  14.4 and 55.4 % of frames skipped due to encoding lag in the three sessions. One-session probes
+  gave 1.6 % with `slower`, 22.6 % with `veryslow` and 91.3 % with `placebo`.
 
 Throwaway driver and aggregator (not in the repo): `.orchestration/m0/data/r1-clock-sync/driver/`
 (`r1_driver.py`, `aggregate.py`, `run_all.sh`). Raw data, recordings, OBS logs and transcripts:
@@ -120,6 +120,8 @@ changes is that a flash rendered while the cache is full is lost, and the first 
 file is a later one.
 
 - At 13-14 % skipped, errors run from +20 to +143 ms (two flashes above 100 ms).
+- At 22.6 % skipped (`veryslow` probe), 2 of 9 recorded flashes did not appear; the other seven
+  came at +24 to +113 ms.
 - At 55 % skipped, 7 of 17 recorded flashes did not appear in the file at all.
 - At 91 % skipped (`placebo` probe), 1 of 9 recorded flashes appeared, at +4 ms.
 
