@@ -63,3 +63,10 @@ the integration fixer on `integration/wave-2a`.
 | `AddonService.install` (docstring) | `interfaces/addons.py` | No-op while `READY`; raises `RuntimeError`, also when an install is already running; failure or cancellation stops the work and removes the attempt; `progress` may come on any thread |
 | `VadJobs`, `Presenter` (docstrings) | `interfaces/addons.py`, `interfaces/presenter.py` | Every job that starts ends with `vad_finished`; skipped and shutdown-dropped jobs get no call. A manifest found at launch `vad_running` or `vad.state` `queued` is not live: the app passes it to `rerun` once |
 
+## T14 provisioning (accepted by the orchestrator)
+
+Filed by T14 (`.orchestration/status/t14-provision.json`), applied by C3.
+
+| Name | Where | What it is |
+|---|---|---|
+| `REQUIRED_REQUESTS` | `models/obs.py` | 31 names: the 26 of W0 plus `GetSceneList`, `SetCurrentProgramScene`, `GetInputSettings`, `GetInputMute`, `RemoveInput` (all obs-websocket 5.0.0; OBS 30.0 floor unchanged). Provisioning diffs scenes, inputs and mute state, makes `Game` the program scene, and removes app inputs a game no longer uses |
