@@ -23,7 +23,7 @@ from anki_miner_game import paths
 from anki_miner_game.interfaces.obs import ObsGateway
 from anki_miner_game.models.config import AppConfig
 from anki_miner_game.models.constants import OBS_COLLECTION_NAME, OBS_PROFILE_NAME, OBS_SCENE_NAME
-from anki_miner_game.models.obs import ObsError, ObsRequestError, ProvisionResult
+from anki_miner_game.models.obs import ObsError, ObsRequestError, ProvisionResult, WindowItem
 from anki_miner_game.models.profile import AudioMode, CaptureKind, GameProfile
 
 log = logging.getLogger(__name__)
@@ -302,6 +302,47 @@ class ObsProvisioner:
         changed |= await self._apply_inputs(plan)
         changed |= await self._mute_special_inputs()
         return ProvisionResult(changed=changed, needs_restart=False)
+
+    async def list_windows(self) -> list[WindowItem]:
+        """The window list of the app's scene (``Provisioner.list_windows``).
+
+        Windows reads ``game_capture``'s ``window``, whose list keeps minimized windows; X11 reads
+        ``xcomposite_input``'s ``capture_window``, and only when that value is set, since listing an
+        empty one aborts OBS (R1 side finding 2). Items without a string value (``game_capture``'s
+        empty first item) are left out, so X11 item 0 stays the configured window.
+        """
+        if _is_windows(self._current_platform()):
+            name, prop = GAME_CAPTURE_INPUT, "window"
+        else:
+            name, prop = XCOMPOSITE_INPUT, "capture_window"
+            found = await self._input_settings(name)
+            if found is None or found[0] != XCOMPOSITE or not found[1].get("capture_window"):
+                return []
+        try:
+            data = await self._request("GetInputPropertiesListPropertyItems", inputName=name, propertyName=prop)
+        except ObsRequestError as exc:
+            if exc.code == RESOURCE_NOT_FOUND:
+                return []
+            raise
+        raw = data.get("propertyItems")
+        if not isinstance(raw, list):
+            raise ObsError(f"GetInputPropertiesListPropertyItems returned no propertyItems list for {name!r}")
+        items: list[WindowItem] = []
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            value = item.get("itemValue")
+            if not isinstance(value, str) or not value:
+                continue
+            label = item.get("itemName")
+            items.append(
+                WindowItem(
+                    name=label if isinstance(label, str) and label else value,
+                    value=value,
+                    enabled=item.get("itemEnabled") is True,
+                )
+            )
+        return items
 
     def _current_platform(self) -> str:
         return self._platform or sys.platform
