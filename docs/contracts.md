@@ -45,3 +45,21 @@ Filed by T24 (`.orchestration/status/t24-ocr-addon.json`), applied by C2.
 |---|---|---|
 | `AddonService.note -> str \| None` | `interfaces/addons.py` | Property: a platform limitation shown beside the status, or `None`. The OCR add-on on Linux says OCR needs an X11 session; the VAD add-on returns `None` |
 | `OcrAreaPicker.pick` (docstring) | `interfaces/addons.py` | Raises `RuntimeError` (the add-on's `OcrError`) with a message fit for the dialog when owocr cannot run or exits without an answer |
+
+## W2a integration (fix round 1)
+
+Found by the wave 2a cross-task reviews (`.orchestration/reviews/wave-2a-cross-*.md`), applied by
+the integration fixer on `integration/wave-2a`.
+
+| Name | Where | What it is |
+|---|---|---|
+| `TextSource.wait_closed()` | `interfaces/text_source.py` | Async; returns once what the last `stop` began has finished (owocr's tree dead). The actor awaits it at disarm, shutdown before the I/O loop stops. `ClipboardSource` returns at once |
+| `TextSource` (docstring) | `interfaces/text_source.py` | `start`, `stop` and `wait_closed` are called on the actor's thread; a source living elsewhere moves the call there itself (the clipboard source, to the Qt main thread) |
+| `UserCommand.line: GameLine \| None` | `models/messages.py` | `START` from auto mode only: the line that triggered it, journalled at offset 0 on `STARTED`; a `START` without it holds nothing |
+| `StateChanged.slug: str \| None` | `models/messages.py` | The armed game in every state but `idle`; a re-arm to another game publishes `StateChanged(ARMED, <new slug>)`. Required field |
+| `Presenter.state_changed(state, slug)` | `interfaces/presenter.py` | Forwards `StateChanged.slug`, so the game dropdown follows a CLI `--arm` |
+| `START_FAILED_BANNER_KEY` | `models/messages.py` | `"start_failed"`: `Banner.key` of the `StartRecord` failure banner; auto mode lets the next line start again on it |
+| `Provisioner.list_windows` (docstring) | `interfaces/obs.py` | Windows reads the `game_capture` input's `window` (never `window_capture`, which drops minimized windows), X11 `xcomposite_input` `capture_window`; `[]` with no such input; raises only `ObsError` |
+| `AddonService.install` (docstring) | `interfaces/addons.py` | No-op while `READY`; raises `RuntimeError`, also when an install is already running; failure or cancellation stops the work and removes the attempt; `progress` may come on any thread |
+| `VadJobs`, `Presenter` (docstrings) | `interfaces/addons.py`, `interfaces/presenter.py` | Every job that starts ends with `vad_finished`; skipped and shutdown-dropped jobs get no call. A manifest found at launch `vad_running` or `vad.state` `queued` is not live: the app passes it to `rerun` once |
+

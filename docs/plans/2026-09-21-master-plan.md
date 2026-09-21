@@ -566,6 +566,15 @@ case in that row of the spec's unit-test table.
 - Finalise runs on one dedicated worker shared by every caller under the output root (a
   single-thread executor or a lock), one call at a time, never the default `run_in_executor` pool:
   its NN bump is check-then-act (`session/finalise.py` docstring).
+- Wave 2a integration contracts: publish `StateChanged(state, slug)` with the armed game's slug in
+  every state but `idle`, and again as `StateChanged(ARMED, <new slug>)` when arming another game
+  while armed. A `START` carrying `UserCommand.line` holds that line; lines accepted after that
+  START and before `STARTED` are held too, and a `Replaced` of a held line replaces it. On
+  `STARTED` the held lines are journalled in order at offset 0 (the clamp), with no pipeline reset;
+  a failed `StartRecord` drops them. A `START` without `line` (button, tray, hotkey, CLI) holds
+  nothing. The `StartRecord` failure banner uses `START_FAILED_BANNER_KEY`; auto mode relies on it.
+  Text sources' `start`/`stop` run on the actor's thread; disarm awaits `wait_closed()` for every
+  source it stopped.
 - Tests with injected `now`, fake gateway/provisioner/discovery, deterministic.
 
 ### T16 runtime, composition, CLI verbs (Opus xhigh, judge, W2, after T12-T15)
@@ -576,6 +585,8 @@ case in that row of the spec's unit-test table.
 - Any `OSError` from `FeedServer.start()` means feed off + banner (`FeedPortInUseError` names the
   port; a missing `page.html` or another bind error gives its text). Launch-time orphan finalises go
   through T15's single finalise worker, never a shared pool.
+- Quit awaits `TextSource.wait_closed()` for every started source before the I/O loop stops: on
+  Linux owocr leads its own session, and nothing else ends it.
 - Tests: verbs reach the running instance; launch restores `obs_restore.json` and hands orphan
   handling to reconcile; feed port in use -> banner and feed off; offscreen launch with an isolated
   home writes `config.json` and the log.
@@ -640,6 +651,9 @@ case in that row of the spec's unit-test table.
   OCR, VAD; recent sessions refresh after finalise; offscreen launch smoke.
 - Wire T19's launch-time hand-off of interrupted VAD passes (`vad_running` or `vad.state` `queued`)
   to `VadJobs.rerun`, once per launch, before the first `queue` from a finalise.
+- Build `AutoMode` at launch, before the actor's first `StateChanged`, with `profile_for` a lookup
+  over the profiles already loaded (it runs on the actor's thread: no disk reads); the GUI keeps
+  that cache current when a profile is saved.
 
 ### T27 PyInstaller + bundle smoke (Opus xhigh, W4)
 - `anki_miner_game.spec` (one-folder, data files `page.html`, `vad_worker.py`, `requirements.txt`,
@@ -661,7 +675,8 @@ case in that row of the spec's unit-test table.
 
 ### T30 user guide + README (Opus high, W4)
 - `docs/user-guide.md`: quick start per hooker, OBS, Anki Miner hand-off and settings (Appendix A),
-  troubleshooting from section 17, disk rate from R1, owocr `0.0.0.0` and cloud-OCR notes. README
+  troubleshooting from section 17, disk rate from R1, owocr `0.0.0.0` and cloud-OCR notes, and on
+  Linux how to end an owocr left running by an app crash (spec 14, accepted risk). README
   minimal per the global README rule. `docs/qa/h5-checklist.md`: spec 18.4 plus every D2 Windows
   item, the PipeWire capture row and the Wayland clipboard check.
 

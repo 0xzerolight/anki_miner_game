@@ -736,7 +736,10 @@ owocr -r screencapture -w websocket -wp <free port> -t False -l <lang> -e <engin
   are why OCR lines arrive late, which the -1000 ms start shift and the VAD start snap compensate.
 - Supervisor: start at arm, stop at disarm; restart on crash with backoff, three attempts, then a
   banner. The whole process tree is killed through a job object with kill-on-close on Windows and a
-  process group on POSIX, because `uv tool` launches through a shim.
+  process group on POSIX, because `uv tool` launches through a shim. Disarm and quit wait for the
+  kill (`TextSource.wait_closed`). A crash of the app itself is covered on Windows by the job
+  object; on Linux owocr leads its own session and keeps running, still capturing and serving on
+  `0.0.0.0`, until the user ends it. Accepted risk for v1; the user guide says how to end it.
 - owocr binds `0.0.0.0`. The user guide mentions the Windows firewall prompt and that the OCR text
   is reachable from the local network while it runs.
 - Cloud engines (`glens`, `bing`) are selectable per game and off by default. Both are free and
