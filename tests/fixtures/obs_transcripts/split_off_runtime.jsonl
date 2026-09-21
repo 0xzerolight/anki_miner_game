@@ -1,0 +1,26 @@
+{"t_mono": 217384.417699738, "conn": 1, "event": "open", "subprotocol": null, "upstream": "ws://127.0.0.1:4455"}
+{"t_mono": 217384.417858407, "conn": 1, "dir": "obs->client", "msg": {"d": {"authentication": {"challenge": "<redacted>", "salt": "<redacted>"}, "obsStudioVersion": "32.2.2", "obsWebSocketVersion": "5.7.4", "rpcVersion": 1}, "op": 0}}
+{"t_mono": 217384.418599412, "conn": 1, "dir": "client->obs", "msg": {"op": 1, "d": {"rpcVersion": 1, "eventSubscriptions": 0, "authentication": "<redacted>"}}}
+{"t_mono": 217384.419082471, "conn": 1, "dir": "obs->client", "msg": {"d": {"negotiatedRpcVersion": 1}, "op": 2}}
+{"t_mono": 217384.420244098, "conn": 2, "event": "open", "subprotocol": null, "upstream": "ws://127.0.0.1:4455"}
+{"t_mono": 217384.420297959, "conn": 2, "dir": "obs->client", "msg": {"d": {"authentication": {"challenge": "<redacted>", "salt": "<redacted>"}, "obsStudioVersion": "32.2.2", "obsWebSocketVersion": "5.7.4", "rpcVersion": 1}, "op": 0}}
+{"t_mono": 217384.421008687, "conn": 2, "dir": "client->obs", "msg": {"op": 1, "d": {"rpcVersion": 1, "eventSubscriptions": 2047, "authentication": "<redacted>"}}}
+{"t_mono": 217384.421199026, "conn": 2, "dir": "obs->client", "msg": {"d": {"negotiatedRpcVersion": 1}, "op": 2}}
+{"t_mono": 217384.422009742, "conn": 1, "dir": "client->obs", "msg": {"op": 6, "d": {"requestType": "GetProfileParameter", "requestId": 237, "requestData": {"parameterCategory": "AdvOut", "parameterName": "RecSplitFile"}}}}
+{"t_mono": 217384.422197094, "conn": 1, "dir": "obs->client", "msg": {"d": {"requestId": 237, "requestStatus": {"code": 100, "result": true}, "requestType": "GetProfileParameter", "responseData": {"defaultParameterValue": null, "parameterValue": "true"}}, "op": 7}}
+{"t_mono": 217384.422371543, "conn": 1, "dir": "client->obs", "msg": {"op": 6, "d": {"requestType": "SetProfileParameter", "requestId": 922, "requestData": {"parameterCategory": "AdvOut", "parameterName": "RecSplitFile", "parameterValue": "false"}}}}
+{"t_mono": 217384.42271024, "conn": 1, "dir": "obs->client", "msg": {"d": {"requestId": 922, "requestStatus": {"code": 100, "result": true}, "requestType": "SetProfileParameter"}, "op": 7}}
+{"t_mono": 217384.422834955, "conn": 1, "dir": "client->obs", "msg": {"op": 6, "d": {"requestType": "GetProfileParameter", "requestId": 482, "requestData": {"parameterCategory": "AdvOut", "parameterName": "RecSplitFile"}}}}
+{"t_mono": 217384.422931948, "conn": 1, "dir": "obs->client", "msg": {"d": {"requestId": 482, "requestStatus": {"code": 100, "result": true}, "requestType": "GetProfileParameter", "responseData": {"defaultParameterValue": null, "parameterValue": "false"}}, "op": 7}}
+{"t_mono": 217384.423184844, "conn": 1, "dir": "client->obs", "msg": {"op": 6, "d": {"requestType": "StartRecord", "requestId": 331}}}
+{"t_mono": 217384.423435766, "conn": 1, "dir": "obs->client", "msg": {"d": {"requestId": 331, "requestStatus": {"code": 100, "result": true}, "requestType": "StartRecord"}, "op": 7}}
+{"t_mono": 217384.46225399, "conn": 2, "dir": "obs->client", "msg": {"d": {"eventData": {"outputActive": false, "outputPath": null, "outputState": "OBS_WEBSOCKET_OUTPUT_STARTING"}, "eventIntent": 64, "eventType": "RecordStateChanged"}, "op": 5}}
+{"t_mono": 217384.462406638, "conn": 2, "dir": "obs->client", "msg": {"d": {"eventData": {"outputActive": true, "outputPath": "/home/user/Videos/Anki Miner Game/_incoming/2026-09-21 21-35-18.mkv", "outputState": "OBS_WEBSOCKET_OUTPUT_STARTED"}, "eventIntent": 64, "eventType": "RecordStateChanged"}, "op": 5}}
+{"t_mono": 217386.464565024, "conn": 1, "dir": "client->obs", "msg": {"op": 6, "d": {"requestType": "SplitRecordFile", "requestId": 182}}}
+{"t_mono": 217386.465043735, "conn": 1, "dir": "obs->client", "msg": {"d": {"requestId": 182, "requestStatus": {"code": 702, "comment": "Verify that file splitting is enabled in the output settings.", "result": false}, "requestType": "SplitRecordFile"}, "op": 7}}
+{"t_mono": 217394.477160868, "conn": 1, "dir": "client->obs", "msg": {"op": 6, "d": {"requestType": "StopRecord", "requestId": 912}}}
+{"t_mono": 217394.477779363, "conn": 1, "dir": "obs->client", "msg": {"d": {"requestId": 912, "requestStatus": {"code": 100, "result": true}, "requestType": "StopRecord", "responseData": {"outputPath": "/home/user/Videos/Anki Miner Game/_incoming/2026-09-21 21-35-18.mkv"}}, "op": 7}}
+{"t_mono": 217394.477970683, "conn": 2, "dir": "obs->client", "msg": {"d": {"eventData": {"outputActive": false, "outputPath": null, "outputState": "OBS_WEBSOCKET_OUTPUT_STOPPING"}, "eventIntent": 64, "eventType": "RecordStateChanged"}, "op": 5}}
+{"t_mono": 217395.732074343, "conn": 2, "dir": "obs->client", "msg": {"d": {"eventData": {"outputActive": false, "outputPath": "/home/user/Videos/Anki Miner Game/_incoming/2026-09-21 21-35-18.mkv", "outputState": "OBS_WEBSOCKET_OUTPUT_STOPPED"}, "eventIntent": 64, "eventType": "RecordStateChanged"}, "op": 5}}
+{"t_mono": 217396.734965792, "conn": 1, "event": "close", "by": "client", "code": 1000, "reason": ""}
+{"t_mono": 217396.735285274, "conn": 2, "event": "close", "by": "client", "code": 1000, "reason": ""}

@@ -1,0 +1,46 @@
+{"t_mono": 216783.948648074, "conn": 1, "event": "open", "subprotocol": null, "upstream": "ws://127.0.0.1:4455"}
+{"t_mono": 216783.948838321, "conn": 1, "dir": "obs->client", "msg": {"d": {"authentication": {"challenge": "<redacted>", "salt": "<redacted>"}, "obsStudioVersion": "32.2.2", "obsWebSocketVersion": "5.7.4", "rpcVersion": 1}, "op": 0}}
+{"t_mono": 216783.949427527, "conn": 1, "dir": "client->obs", "msg": {"op": 1, "d": {"rpcVersion": 1, "eventSubscriptions": 0, "authentication": "<redacted>"}}}
+{"t_mono": 216783.949728973, "conn": 1, "dir": "obs->client", "msg": {"d": {"negotiatedRpcVersion": 1}, "op": 2}}
+{"t_mono": 216783.950829269, "conn": 2, "event": "open", "subprotocol": null, "upstream": "ws://127.0.0.1:4455"}
+{"t_mono": 216783.95088298, "conn": 2, "dir": "obs->client", "msg": {"d": {"authentication": {"challenge": "<redacted>", "salt": "<redacted>"}, "obsStudioVersion": "32.2.2", "obsWebSocketVersion": "5.7.4", "rpcVersion": 1}, "op": 0}}
+{"t_mono": 216783.951248616, "conn": 2, "dir": "client->obs", "msg": {"op": 1, "d": {"rpcVersion": 1, "eventSubscriptions": 2047, "authentication": "<redacted>"}}}
+{"t_mono": 216783.9514851, "conn": 2, "dir": "obs->client", "msg": {"d": {"negotiatedRpcVersion": 1}, "op": 2}}
+{"t_mono": 216783.952933279, "conn": 3, "event": "open", "subprotocol": null, "upstream": "ws://127.0.0.1:4455"}
+{"t_mono": 216783.952981209, "conn": 3, "dir": "obs->client", "msg": {"d": {"authentication": {"challenge": "<redacted>", "salt": "<redacted>"}, "obsStudioVersion": "32.2.2", "obsWebSocketVersion": "5.7.4", "rpcVersion": 1}, "op": 0}}
+{"t_mono": 216783.953330144, "conn": 3, "dir": "client->obs", "msg": {"op": 1, "d": {"rpcVersion": 1, "eventSubscriptions": 0, "authentication": "<redacted>"}}}
+{"t_mono": 216783.953458415, "conn": 3, "dir": "obs->client", "msg": {"d": {"negotiatedRpcVersion": 1}, "op": 2}}
+{"t_mono": 216783.953573441, "conn": 3, "dir": "client->obs", "msg": {"op": 6, "d": {"requestType": "SetCurrentProfile", "requestId": 213, "requestData": {"profileName": "Anki Miner Game"}}}}
+{"t_mono": 216783.977867143, "conn": 3, "dir": "obs->client", "msg": {"d": {"requestId": 213, "requestStatus": {"code": 100, "result": true}, "requestType": "SetCurrentProfile"}, "op": 7}}
+{"t_mono": 216783.978305136, "conn": 3, "event": "close", "by": "client", "code": 1000, "reason": ""}
+{"t_mono": 216783.992098463, "conn": 2, "dir": "obs->client", "msg": {"d": {"eventData": {"profileName": "Untitled"}, "eventIntent": 2, "eventType": "CurrentProfileChanging"}, "op": 5}}
+{"t_mono": 216783.992194854, "conn": 2, "dir": "obs->client", "msg": {"d": {"eventData": {"profileName": "Anki Miner Game"}, "eventIntent": 2, "eventType": "CurrentProfileChanged"}, "op": 5}}
+{"t_mono": 216784.997565871, "conn": 4, "event": "open", "subprotocol": null, "upstream": "ws://127.0.0.1:4455"}
+{"t_mono": 216784.997672942, "conn": 4, "dir": "obs->client", "msg": {"d": {"authentication": {"challenge": "<redacted>", "salt": "<redacted>"}, "obsStudioVersion": "32.2.2", "obsWebSocketVersion": "5.7.4", "rpcVersion": 1}, "op": 0}}
+{"t_mono": 216784.998409175, "conn": 4, "dir": "client->obs", "msg": {"op": 1, "d": {"rpcVersion": 1, "eventSubscriptions": 0, "authentication": "<redacted>"}}}
+{"t_mono": 216784.998671798, "conn": 4, "dir": "obs->client", "msg": {"d": {"negotiatedRpcVersion": 1}, "op": 2}}
+{"t_mono": 216784.99882224, "conn": 4, "dir": "client->obs", "msg": {"op": 6, "d": {"requestType": "SetCurrentProfile", "requestId": 173, "requestData": {"profileName": "Untitled"}}}}
+{"t_mono": 216784.999531482, "conn": 2, "dir": "obs->client", "msg": {"d": {"eventData": {"profileName": "Anki Miner Game"}, "eventIntent": 2, "eventType": "CurrentProfileChanging"}, "op": 5}}
+{"t_mono": 216785.026617577, "conn": 2, "dir": "obs->client", "msg": {"d": {"eventData": {"profileName": "Untitled"}, "eventIntent": 2, "eventType": "CurrentProfileChanged"}, "op": 5}}
+{"t_mono": 216785.026737031, "conn": 4, "dir": "obs->client", "msg": {"d": {"requestId": 173, "requestStatus": {"code": 100, "result": true}, "requestType": "SetCurrentProfile"}, "op": 7}}
+{"t_mono": 216785.027714416, "conn": 4, "event": "close", "by": "client", "code": 1000, "reason": ""}
+{"t_mono": 216786.031101819, "conn": 5, "event": "open", "subprotocol": null, "upstream": "ws://127.0.0.1:4455"}
+{"t_mono": 216786.031297877, "conn": 5, "dir": "obs->client", "msg": {"d": {"authentication": {"challenge": "<redacted>", "salt": "<redacted>"}, "obsStudioVersion": "32.2.2", "obsWebSocketVersion": "5.7.4", "rpcVersion": 1}, "op": 0}}
+{"t_mono": 216786.031997781, "conn": 5, "dir": "client->obs", "msg": {"op": 1, "d": {"rpcVersion": 1, "eventSubscriptions": 0, "authentication": "<redacted>"}}}
+{"t_mono": 216786.032386922, "conn": 5, "dir": "obs->client", "msg": {"d": {"negotiatedRpcVersion": 1}, "op": 2}}
+{"t_mono": 216786.03262021, "conn": 5, "dir": "client->obs", "msg": {"op": 6, "d": {"requestType": "SetCurrentProfile", "requestId": 220, "requestData": {"profileName": "Anki Miner Game"}}}}
+{"t_mono": 216786.033073441, "conn": 2, "dir": "obs->client", "msg": {"d": {"eventData": {"profileName": "Untitled"}, "eventIntent": 2, "eventType": "CurrentProfileChanging"}, "op": 5}}
+{"t_mono": 216786.074788342, "conn": 2, "dir": "obs->client", "msg": {"d": {"eventData": {"profileName": "Anki Miner Game"}, "eventIntent": 2, "eventType": "CurrentProfileChanged"}, "op": 5}}
+{"t_mono": 216786.074907746, "conn": 5, "dir": "obs->client", "msg": {"d": {"requestId": 220, "requestStatus": {"code": 100, "result": true}, "requestType": "SetCurrentProfile"}, "op": 7}}
+{"t_mono": 216786.075727836, "conn": 5, "event": "close", "by": "client", "code": 1000, "reason": ""}
+{"t_mono": 216787.078958037, "conn": 6, "event": "open", "subprotocol": null, "upstream": "ws://127.0.0.1:4455"}
+{"t_mono": 216787.079073294, "conn": 6, "dir": "obs->client", "msg": {"d": {"authentication": {"challenge": "<redacted>", "salt": "<redacted>"}, "obsStudioVersion": "32.2.2", "obsWebSocketVersion": "5.7.4", "rpcVersion": 1}, "op": 0}}
+{"t_mono": 216787.079791997, "conn": 6, "dir": "client->obs", "msg": {"op": 1, "d": {"rpcVersion": 1, "eventSubscriptions": 0, "authentication": "<redacted>"}}}
+{"t_mono": 216787.079969461, "conn": 6, "dir": "obs->client", "msg": {"d": {"negotiatedRpcVersion": 1}, "op": 2}}
+{"t_mono": 216787.080162795, "conn": 6, "dir": "client->obs", "msg": {"op": 6, "d": {"requestType": "SetCurrentProfile", "requestId": 961, "requestData": {"profileName": "Untitled"}}}}
+{"t_mono": 216787.080540827, "conn": 2, "dir": "obs->client", "msg": {"d": {"eventData": {"profileName": "Anki Miner Game"}, "eventIntent": 2, "eventType": "CurrentProfileChanging"}, "op": 5}}
+{"t_mono": 216787.123621806, "conn": 2, "dir": "obs->client", "msg": {"d": {"eventData": {"profileName": "Untitled"}, "eventIntent": 2, "eventType": "CurrentProfileChanged"}, "op": 5}}
+{"t_mono": 216787.123794371, "conn": 6, "dir": "obs->client", "msg": {"d": {"requestId": 961, "requestStatus": {"code": 100, "result": true}, "requestType": "SetCurrentProfile"}, "op": 7}}
+{"t_mono": 216787.124699635, "conn": 6, "event": "close", "by": "client", "code": 1000, "reason": ""}
+{"t_mono": 216788.126920473, "conn": 1, "event": "close", "by": "client", "code": 1000, "reason": ""}
+{"t_mono": 216788.127320125, "conn": 2, "event": "close", "by": "client", "code": 1000, "reason": ""}
