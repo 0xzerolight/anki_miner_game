@@ -85,11 +85,14 @@ NO_CUE_RECORDS: list[JournalRecord] = [
 ]
 
 
-def _session(root: Path, records: list[JournalRecord] | None, **changes) -> Path:
+def _session(root: Path, records: list[JournalRecord] | None, *, taken: tuple[str, ...] = (), **changes) -> Path:
     """A stopped session in ``root/_incoming`` as the actor leaves it; returns the manifest path.
 
-    ``records=None``: the journal was never created.
+    ``records=None``: the journal was never created. ``taken``: files already in the game folder.
     """
+    for name in taken:
+        (root / TITLE).mkdir(parents=True, exist_ok=True)
+        (root / TITLE / name).write_bytes(b"the user's own file")
     manifest = replace(RECORDED, **changes)
     files = incoming_files(root / "_incoming", manifest.obs.output_path)
     files.video.parent.mkdir(parents=True)
@@ -262,10 +265,14 @@ class _FileOps:
         return op
 
 
-@pytest.mark.parametrize(("records", "steps"), [(RECORDS, 8), (NO_CUE_RECORDS, 6)], ids=["cues", "no-cues"])
-def test_a_crash_between_any_two_steps_is_repaired_by_running_again(tmp_path, monkeypatch, records, steps):
+@pytest.mark.parametrize(
+    ("records", "taken", "steps"),
+    [(RECORDS, (), 8), (NO_CUE_RECORDS, (), 6), (RECORDS, ("Steins;Gate - 03.srt",), 9)],
+    ids=["cues", "no-cues", "nn-taken"],
+)
+def test_a_crash_between_any_two_steps_is_repaired_by_running_again(tmp_path, monkeypatch, records, taken, steps):
     ops = _FileOps(monkeypatch)
-    reference = _session(tmp_path / "reference", records)
+    reference = _session(tmp_path / "reference", records, taken=taken)
     ops.count = 0
     finalise(reference, CFG)
     assert ops.count == steps
@@ -273,7 +280,7 @@ def test_a_crash_between_any_two_steps_is_repaired_by_running_again(tmp_path, mo
 
     for crash_at in range(steps):
         root = tmp_path / f"crash-{crash_at}"
-        path = _session(root, records)
+        path = _session(root, records, taken=taken)
         ops.count, ops.crash_at = 0, crash_at
         with pytest.raises(_Crash):
             finalise(path, CFG)
@@ -353,3 +360,17 @@ def test_a_video_that_cannot_move_for_another_reason_is_reported_at_once(tmp_pat
         finalise(path, CFG, sleep=waits.append)
     assert waits == []  # only a lock is worth waiting for
     assert load_manifest(path).state is ManifestState.FINALISE_PENDING
+
+
+def test_a_session_never_overwrites_a_file_already_in_the_game_folder(tmp_path):
+    result = finalise(_session(tmp_path, RECORDS, taken=("Steins;Gate - 03.srt", "Steins;Gate - 04.mkv")), CFG)
+
+    assert result.manifest.index == 5
+    assert result.manifest.files == FilesRecord(video="Steins;Gate - 05.mkv", subtitle="Steins;Gate - 05.srt")
+    assert _tree(tmp_path / TITLE) == {
+        "Steins;Gate - 03.srt": b"the user's own file",
+        "Steins;Gate - 04.mkv": b"the user's own file",
+        "Steins;Gate - 05.mkv": VIDEO_BYTES,
+        "Steins;Gate - 05.srt": SRT.encode("utf-8"),
+        "Steins;Gate - 05.session.json": (tmp_path / TITLE / "Steins;Gate - 05.session.json").read_bytes(),
+    }

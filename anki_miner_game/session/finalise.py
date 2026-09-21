@@ -140,6 +140,13 @@ def _place(
 ) -> FinaliseResult:
     """Steps 4-5: video, subtitle and manifest to ``<Game>/<Game> - NN.*``; ``_incoming/`` emptied."""
     folder = game_folder(manifest_path.parent, manifest.game.title)
+    if files.video.exists():  # nothing has moved yet, so NN can still change
+        index = manifest.index
+        while any(path.exists() for path in _targets(folder, manifest.game.title, index, files.video.suffix)):
+            index += 1  # never overwrite a file that is already there
+        if index != manifest.index:
+            manifest = replace(manifest, index=index)
+            write_manifest_atomic(manifest_path, manifest)
     video, subtitle, placed = _targets(folder, manifest.game.title, manifest.index, files.video.suffix)
     if files.video.exists():
         folder.mkdir(parents=True, exist_ok=True)
