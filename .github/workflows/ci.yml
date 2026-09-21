@@ -56,10 +56,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libegl1 libpulse0 libxkbcommon0
       - run: uv sync --locked --no-install-project --extra dev
-      # windows_only tests (e.g. RegisterHotKey) run only on the Windows runner.
+      # The marker deselect lives in pyproject addopts. Only the Windows step
+      # overrides it (a CLI -m replaces addopts), to also run windows_only tests
+      # (e.g. RegisterHotKey).
       - name: Test (Linux)
         if: runner.os != 'Windows'
-        run: uv run --no-sync pytest -m "not vad and not obs_live and not network and not windows_only"
+        run: uv run --no-sync pytest
       - name: Test (Windows)
         if: runner.os == 'Windows'
         run: uv run --no-sync pytest -m "not vad and not obs_live and not network"
