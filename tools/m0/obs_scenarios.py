@@ -359,7 +359,13 @@ class ScenarioRunner:
         self.write({"kind": "scenario", "name": name, "t_mono": self.now()})
         ok = True
         try:
-            self._proxy = self.connect_proxy()
+            try:
+                self._proxy = self.connect_proxy()
+            except Exception as exc:  # OBS or the proxy is not there
+                self.write(
+                    {"kind": "error", "index": None, "error": f"{type(exc).__name__}: {exc}", "t_mono": self.now()}
+                )
+                steps, ok = (), False
             for index, step in enumerate(steps):
                 t_start = self.now()
                 try:

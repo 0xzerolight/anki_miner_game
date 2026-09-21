@@ -390,3 +390,14 @@ def test_cli_lists_the_scenarios(capsys):
     out = capsys.readouterr().out
     for name in sc.SCENARIOS:
         assert name in out
+
+
+def test_a_proxy_that_cannot_be_reached_ends_the_scenario_with_an_error():
+    def refuse():
+        raise ConnectionRefusedError("proxy down")
+
+    log = []
+    ok = sc.ScenarioRunner(refuse, None, log.append, sleep=lambda s: None).run("t", [sc.Sleep(1)])
+    assert not ok
+    assert [r["kind"] for r in log] == ["scenario", "error", "end"]
+    assert "proxy down" in log[1]["error"]
