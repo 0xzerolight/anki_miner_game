@@ -99,9 +99,10 @@ Orchestrator rulings (recorded in the ledger; not owner calls):
   by nothing else, so spikes and E1 use it directly (no isolated root). Spikes snapshot and restore it
   between scenarios. This also exercises the real Flatpak discovery path.
 - Spikes run OBS and probe windows as X11 clients inside a nested `kwin_wayland --virtual --xwayland`
-  display (`xcomposite_input` capture). Portal-based capture (PipeWire source, owocr on Wayland)
-  opens on the user's real desktop, so it is not automated: PipeWire capture goes to H5, owocr's
-  interactive picker to H4.
+  display (`xcomposite_input` window lists; recorded pixels come from XSHM of a rootful display,
+  since `xcomposite_input` records black on this host, R1 and R2). Portal-based capture (PipeWire
+  source, owocr on Wayland) opens on the user's real desktop, so it is not automated: PipeWire
+  capture goes to H5, owocr's interactive picker to H4.
 - Empty lines (pipeline step 5) count under `no_letters`, since the manifest has no `empty` counter.
 - VAD Re-run / Restore live in a recent-session row's context menu; **Open folder** stays the one
   visible action (reconciles spec 16 with 13.3).
@@ -575,6 +576,17 @@ case in that row of the spec's unit-test table.
   nothing. The `StartRecord` failure banner uses `START_FAILED_BANNER_KEY`; auto mode relies on it.
   Text sources' `start`/`stop` run on the actor's thread; disarm awaits `wait_closed()` for every
   source it stopped.
+- Wave 2b-early integration (provisioning and clock): `ensure_profile` started on the user's
+  profile copies that profile's `[Audio] SampleRate`/`ChannelSetup` and re-activates the app's
+  profile itself (spec 11.3 as amended); started on the app's profile (step 3 already switched
+  there) it has nowhere to switch to, and `needs_restart=True` then means a container, output-mode
+  or recording-encoder change applies at the next disarm and arm: a warning banner says so, text
+  only. Nothing restarts OBS. The fallback clock anchors on `outputDuration + lag`, the lag from
+  the latest drift sample with `output_duration_ms > 0`, and without one the banner says the timing
+  may be off by seconds (spec 7 as amended). Drift samples: at `STARTED`, 10 s after it, at
+  `RESUMED` and at stop, only on the `EventClock` with the recording unpaused, each written to the
+  manifest. `ObsDiscovery.is_running()` answers `True` when it cannot tell; "OBS gone" still needs
+  two `False` answers in a row.
 - Tests with injected `now`, fake gateway/provisioner/discovery, deterministic.
 
 ### T16 runtime, composition, CLI verbs (Opus xhigh, judge, W2, after T12-T15)
@@ -592,11 +604,36 @@ case in that row of the spec's unit-test table.
   home writes `config.json` and the log.
 
 ### E1 Linux M1 exit probe (Opus xhigh, after W2 integration)
-- Files: `tools/handoff_probe.py`, `docs/m0/m1-exit-linux.md`.
+- Files: `tools/handoff_probe.py`, `docs/m0/m1-exit-linux.md`; the provisioning transcript below
+  with its row in `tests/fixtures/obs_transcripts/README.md`, its `EXPECTED` entry in
+  `tests/test_obs_transcript_fixtures.py` and its replay test under `tests/obs/`.
 - Real Flatpak OBS in the nested display, a game profile with `capture.kind=xcomposite`,
   FakeHookerServer + flasher; drive a session with the CLI verbs; then the hand-off probe with Anki
   Miner's venv (read-only, isolated `ANKI_MINER_HOME`): same-stem auto-fill, batch pairing over three
   sessions, subtitle parse, audio clips for three cues; sync probe `--app` under 150 ms.
+- The app never runs with the owner's home: `ANKI_MINER_GAME_HOME` and `output_root` under
+  `.orchestration/m0/data/e1-linux-exit/`, and OBS started first with
+  `nested_display.flatpak_x11_argv(...)`, so the app never launches OBS itself (its launch lacks the
+  isolating flags). `guard` before and after every run, which also watches `~/.anki_miner_game`
+  and `~/Videos/Anki Miner Game` (`tools/m0/README.md`, "The app inside the display").
+- Two displays. `xcomposite_input` records black on this host with NVIDIA EGL and with Mesa (R1
+  side finding 1, R2 Limits 3), and recorded pixels need XSHM of a rootful display, which has no
+  window manager, so OBS lists no windows there. Sync probe and hand-off sessions: rootful display,
+  `capture.window` unpinned (or set by hand from `xwininfo`), auto mode off, sessions started and
+  stopped by hand; once armed, a direct client (not the app) adds an `xshm_input_v2` cropped to the
+  flasher window to scene `Game` (provisioning leaves inputs that are not the app's alone). Window
+  pick, `list_windows` and auto mode's window-closed stop: a rootless display without the sync
+  probe.
+- E1-PROVISION-REPLAY (T14's follow-up): point `cfg.obs.port` at a
+  `tools/obs_transcript_recorder.py` proxy in front of OBS (the password still comes from OBS's
+  `config.json`). Record the app's first arm on an OBS without the app's profile and collection,
+  and a second arm that has to remove and re-create an app input (a direct client replaces
+  `Window Capture (X11)` with an `xshm_input_v2` of that name between the arms). Commit the
+  redacted transcript, replay its provisioning requests against `ObsProvisioner` (the second arm's
+  provisioning sends no other mutating request), and set `INPUT_RELEASE_TIMEOUT_S` from the delay
+  measured between `RemoveInput` and the name's release. It covers `RemoveInput`, `GetInputMute`,
+  `SetCurrentProgramScene`, `GetProfileParameter` on a fresh profile, the audio copy and the
+  profile re-activation, which no R2 transcript has.
 
 ### T17 auto mode (Opus high, W2)
 - `lifecycle/auto.py`; spec 12; subscribes to `SessionEvent`, sends `UserCommand`s; tests with fake
@@ -636,15 +673,34 @@ case in that row of the spec's unit-test table.
 - `gui/game_profile_dialog.py`, `gui/settings_dialog.py`; spec 5 tables, 11.3 window picker, 12
   settings texts, 14 area selection through `OcrAreaPicker`, cloud-OCR privacy text. The window
   picker offers enabled items only.
+- `list_windows` reads the current collection (`Provisioner` docstrings). While armed, list at
+  once. While idle, run spec 6.2 step 1's output check (an active output: the picker says which
+  and stays empty), read the current collection name, `ensure_collection(profile)`,
+  `list_windows`, then switch back through `ObsGateway` (`SetCurrentSceneCollection`, done on
+  `CurrentSceneCollectionChanged`; no switch when already current, R2 items 4-5). Never list the
+  user's collection.
 
 ### T21 first-run wizard (Opus xhigh, W3)
-- `gui/wizard.py`; spec 16 wizard, 11.1 (incl. restarting OBS when `needs_restart`), Wayland clipboard
-  note, add-on sizes and installs through `AddonService`.
+- `gui/wizard.py`; spec 16 wizard, 11.1, Wayland clipboard note, add-on sizes and installs through
+  `AddonService`.
+- Provisioning step: spec 6.2 step 1's output check first (`ensure_profile` and
+  `ensure_collection` need every output inactive); read the user's profile and collection names;
+  call `ensure_profile(cfg)` and `ensure_collection(profile)` with the user's profile still
+  current, so provisioning copies its audio values and re-activates the app's profile itself;
+  then switch both back through `ObsGateway`, each done on its `...Changed` event. No OBS restart
+  (spec 11.3 as amended): `needs_restart` cannot come from the user's profile, and if it does, show
+  its text.
 
 ### T25 integration tests (Opus xhigh, W3)
 - `tests/integration/test_scripted_sessions.py`: one run per R2 transcript through the real
   composition with FakeObsServer + FakeHookerServer + injected `now`; byte-exact `.srt`, manifest
   counts, final names.
+- R2's driver provisioned the OBS in those transcripts (other input names, its own request order;
+  `tests/fixtures/obs_transcripts/README.md`), so they cannot answer the provisioner request by
+  request. Run the actor and `ObsProvisioner` against `FakeObsServer` in live mode with its replies
+  routed to T14's `FakeObs`, and play from each transcript only its recording, pause, split, exit
+  and switch frames and events. E1's transcript of the app's own provisioning is the one replayed
+  request by request.
 
 ### T26 GUI wiring (Opus xhigh, W3, after T19-T21)
 - `app.py`, `gui/main_window.py` connections: dialogs, wizard, tray, hotkey, auto mode, clipboard,
