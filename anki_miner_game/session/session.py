@@ -152,6 +152,12 @@ DRIFT_SAMPLE_AFTER_S: Final = 10.0
 # This module's own timers.
 TICK_S: Final = 1.0
 """How often ``run`` posts a ``Tick``; the resolution of every timer below."""
+OBS_GONE_CHECK_S: Final = 5.0
+"""While recording with the connection lost: how often to ask whether OBS still runs (spec 6.4)."""
+OBS_GONE_ANSWERS: Final = 2
+"""How many "not running" answers in a row make OBS gone; ``is_running`` answers ``True`` when it
+cannot tell, so one ``False`` is a confident answer, and two keep a process-list blip from ending a
+recording OBS still writes."""
 RESTORE_RETRY_S: Final = 10.0
 """While idle with ``obs_restore.json`` still present: how often to try the restore (or, with no
 connection, to look for a running OBS) again."""
@@ -377,6 +383,11 @@ class SessionActor:
 
         self._connected = False
         self._obs_versions = ("unknown", "unknown")
+        self._lost_ms: int | None = None
+        """While recording: the clock reading when the connection dropped, the stop if OBS turns out gone."""
+        self._next_gone_check = 0.0
+        self._gone_answers = 0
+        """Consecutive ``is_running() == False`` answers since the connection dropped."""
         self._next_restore = 0.0
         """The earliest ``now()`` for the next restore of ``obs_restore.json``: after a failed try, or
         after a switch OBS left unanswered (its question may still be open)."""
@@ -495,6 +506,15 @@ class SessionActor:
         if self._start_deadline is not None and t >= self._start_deadline:
             await self._start_timed_out()
         s = self._session
+        if s is not None and not self._connected and self._lost_ms is not None and t >= self._next_gone_check:
+            self._next_gone_check = t + OBS_GONE_CHECK_S
+            if await asyncio.to_thread(self._discovery.is_running):
+                self._gone_answers = 0
+            else:
+                self._gone_answers += 1
+                if self._gone_answers >= OBS_GONE_ANSWERS:
+                    await self._obs_gone(self._lost_ms)  # spec 6.4: OBS gone after a lost connection
+                    return
         if s is not None and s.next_sample is not None and t >= s.next_sample:
             s.next_sample = None
             await self._sample_drift()
@@ -548,6 +568,17 @@ class SessionActor:
             case ObsEventName.CONNECTION_LOST:
                 self._connected = False
                 self._obs_status(SourceStatus.DISCONNECTED)
+                if self._session is not None:  # spec 17: lines keep being journalled on the EventClock
+                    # Taken now, before any later line raises the clock's floor: every line journalled
+                    # after the loss lies past this stop, so no cue runs past a crashed OBS's video.
+                    self._lost_ms = self._session.clock.reading_ms(ev.t_mono)
+                    self._next_gone_check = ev.t_mono + OBS_GONE_CHECK_S
+                    self._gone_answers = 0
+            case ObsEventName.EXIT_STARTED:  # R2 item 12: a clean exit; no STOPPED follows
+                if self._session is not None:
+                    await self._obs_gone(self._session.clock.reading_ms(ev.t_mono))
+            case ObsEventName.RECORD_FILE_CHANGED:
+                await self._on_split(ev)
             case ObsEventName.RECORD_STATE_CHANGED:  # keyed on outputState: PAUSED has outputActive false
                 match ev.data.get("outputState"):
                     case OutputState.STARTED:
@@ -1191,6 +1222,8 @@ class SessionActor:
         flags = s.manifest.flags if flag is None else _with_flag(s.manifest.flags, flag)
         await self._write_manifest(s, stopped_at=self._utc_stamp(), flags=flags)
         self._session = None
+        self._lost_ms = None
+        self._gone_answers = 0
         self._clear(BannerKey.NO_SOURCE, BannerKey.STOP_FAILED)
         self._set_state(AppState.FINALISING)
         self._publish(RecordingStopped(s.files.video.stem))
@@ -1256,3 +1289,34 @@ class SessionActor:
 
     def _utc_stamp(self) -> str:
         return self._utc_now().astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    # --- ending without STOPPED (spec 6.4, 7) ---------------------------------------------------
+
+    async def _on_split(self, ev: ObsEvent) -> None:
+        """Spec 7: finalise against the first file; the split's stop is the first stop in the journal.
+
+        Only ``RecordFileChanged`` names the new file; ``STOPPED`` later still names the first one
+        (R2 item 10), and the manifest keeps the first file's path.
+        """
+        s = self._session
+        if s is None or s.stop_journalled:
+            return
+        self._append(s, StopRecord(offset_ms=s.clock.reading_ms(ev.t_mono)))
+        s.stop_journalled = True
+        if self._pipeline is not None:
+            self._pipeline.reset()
+        await self._write_manifest(s, flags=_with_flag(s.manifest.flags, Flag.SPLIT_UNSUPPORTED))
+        self._banner(
+            BannerKey.SPLIT,
+            BannerLevel.WARNING,
+            "OBS split the recording into a second file: lines from the split on get no subtitle.",
+        )
+
+    async def _obs_gone(self, stop_ms: int) -> None:
+        """Spec 6.4: ``ExitStarted``, or OBS gone after a lost connection."""
+        await self._end_session(stop_ms, Flag.OBS_EXITED)
+        self._banner(
+            BannerKey.OBS_EXITED,
+            BannerLevel.WARNING,
+            "OBS closed during the recording; the session was saved up to that moment.",
+        )
