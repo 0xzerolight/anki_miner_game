@@ -3,8 +3,10 @@
 #   faster_whisper/audio.py  decode_audio, _ignore_invalid_frames
 # Changed for this app: the audio is streamed through the model and the segmenter instead of being
 # decoded into one array, so a region is emitted as soon as it closes and memory stays flat over a
-# long session. Invalid data is skipped per packet, so decoding goes on after a bad one. The
-# max_speech_duration_s split is left out: the app never limits speech length.
+# long session. A packet the decoder rejects is skipped instead of ending the decode, and audio the
+# demuxer or decoder lost is replaced by silence up to the next frame's time, so later regions keep
+# their place on the file's timeline. The max_speech_duration_s split is left out: the app never
+# limits speech length.
 #
 # MIT License. Copyright (c) 2023 SYSTRAN.
 #
@@ -248,19 +250,41 @@ def run(video: str, model_path: str, track: int, emit: Callable[[dict[str, Any]]
             done = min(windows_done * WINDOW_SAMPLES, audio_length)
             emit({"t": "progress", "done_ms": offset_ms + done * 1000 // SAMPLING_RATE, "total_ms": total_ms})
 
-        for frame in itertools.chain([first] if first is not None else [], frames, [None]):
-            if frame is not None:
-                frame.pts = None  # as faster-whisper: timestamps play no part once decoded
+        def append(samples: Any) -> None:
+            nonlocal chunks, buffered, audio_length
+            chunks.append(samples)
+            buffered += len(samples)
+            audio_length += len(samples)
+            if buffered >= BATCH_WINDOWS * WINDOW_SAMPLES:
+                data = np.concatenate(chunks)
+                whole = len(data) - len(data) % WINDOW_SAMPLES
+                process(data[:whole])
+                chunks, buffered = [data[whole:]], len(data) - whole
+
+        def resample(frame: Any) -> None:
             for resampled in resampler.resample(frame):
-                chunk = resampled.to_ndarray().reshape(-1).astype(np.float32) / 32768.0
-                chunks.append(chunk)
-                buffered += len(chunk)
-                audio_length += len(chunk)
-                if buffered >= BATCH_WINDOWS * WINDOW_SAMPLES:
-                    data = np.concatenate(chunks)
-                    whole = len(data) - len(data) % WINDOW_SAMPLES
-                    process(data[:whole])
-                    chunks, buffered = [data[whole:]], len(data) - whole
+                append(resampled.to_ndarray().reshape(-1).astype(np.float32) / 32768.0)
+
+        # A span the demuxer or decoder lost (a bad packet, a resync to the next cluster) would pull
+        # every later sample early, so it is filled with silence up to the next frame's own time.
+        # Smaller gaps add up until the drift passes one window.
+        track_start_s = first.time if first is not None else None
+        expected_s = track_start_s
+        for frame in itertools.chain([first] if first is not None else [], frames):
+            if expected_s is not None:
+                if frame.time is not None and frame.time - expected_s > WINDOW_SAMPLES / SAMPLING_RATE:
+                    resample(None)  # flush, so the samples before the gap stay before it
+                    resampler = av.AudioResampler(format="s16", layout="mono", rate=SAMPLING_RATE)
+                    silence = round((frame.time - track_start_s) * SAMPLING_RATE) - audio_length
+                    while silence > 0:  # a batch at a time, so a long gap cannot grow memory
+                        size = min(silence, BATCH_WINDOWS * WINDOW_SAMPLES)
+                        append(np.zeros(size, dtype=np.float32))
+                        silence -= size
+                    expected_s = frame.time
+                expected_s += frame.samples / frame.sample_rate
+            frame.pts = None  # as faster-whisper: timestamps play no part once decoded
+            resample(frame)
+        resample(None)
 
         # faster-whisper pads the track with 512 - len % 512 zeros, a whole window when it divides.
         data = np.concatenate(chunks) if chunks else np.zeros(0, dtype=np.float32)

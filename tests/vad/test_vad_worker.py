@@ -170,6 +170,19 @@ def test_a_recording_cut_off_mid_write_still_finishes(vad_python, model, recordi
     _assert_done(_run(vad_python, cut, model, "--track", "1"))
 
 
+def test_a_lost_span_keeps_later_regions_on_the_file_timeline(vad_python, model, tmp_path):
+    clean, damaged = tmp_path / "clean.mkv", tmp_path / "damaged.mkv"
+    subprocess.run([vad_python, HERE / "_make_damaged_mkv.py", SPEECH_CLIP, clean, damaged], check=True, timeout=120)
+    expected = _run(vad_python, clean, model)
+    _assert_done(expected)
+    assert len(expected.regions) == 2  # the clip, 5 s of silence, the clip again
+
+    result = _run(vad_python, damaged, model)
+    _assert_done(result)
+    assert result.regions[0][1] < expected.regions[0][1] - 500  # the damage cut the first line short
+    assert _near(result.regions[-1], expected.regions[1]), result.regions
+
+
 @pytest.mark.skipif(not hasattr(os, "wait4"), reason="peak RSS of one child needs os.wait4")
 def test_three_hour_track_stays_under_the_rss_ceiling(vad_python, model, tmp_path):
     hours = 3
