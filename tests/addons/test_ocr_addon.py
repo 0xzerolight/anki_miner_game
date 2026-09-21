@@ -527,8 +527,10 @@ async def _gone(pid: int) -> bool:
             os.kill(pid, 0)
         except ProcessLookupError:
             return True
-        stat = Path(f"/proc/{pid}/stat")
-        if stat.exists() and stat.read_text().rsplit(")", 1)[1].split()[0] == "Z":
+        try:  # a zombie waiting for its new parent to reap it is already dead
+            if Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] == "Z":
+                return True
+        except OSError:
             return True
         await asyncio.sleep(0.02)
     return False
