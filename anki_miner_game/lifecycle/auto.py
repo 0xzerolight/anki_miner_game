@@ -44,6 +44,7 @@ from anki_miner_game.models.messages import (
 )
 from anki_miner_game.models.obs import ObsError
 from anki_miner_game.models.profile import AutoSettings, CaptureKind, GameProfile
+from anki_miner_game.obs.provision import window_class_exe
 
 log = logging.getLogger(__name__)
 
@@ -70,18 +71,6 @@ class ListedWindow(Protocol):
 ListWindows = Callable[[], Awaitable[Sequence[ListedWindow]]]
 
 
-def _decode(part: str) -> str:
-    # OBS's own order (libobs/util/windows/window-helpers.c): "#3A" first, then "#22".
-    return part.replace("#3A", ":").replace("#22", "#")
-
-
-def _class_exe(value: str) -> tuple[str, str] | None:
-    parts = value.split(":")
-    if len(parts) != 3:
-        return None
-    return _decode(parts[1]).casefold(), _decode(parts[2]).casefold()
-
-
 def window_open(items: Sequence[ListedWindow], stored: str) -> bool | None:
     """Whether the window pinned as ``stored`` is still open; ``None`` when the list cannot tell.
 
@@ -102,10 +91,10 @@ def window_open(items: Sequence[ListedWindow], stored: str) -> bool | None:
     if _X11_SEP in stored:
         xid = stored.split(_X11_SEP, 1)[0]
         return items[0].enabled or any(i.enabled and i.value.split(_X11_SEP, 1)[0] == xid for i in items)
-    wanted = _class_exe(stored)
+    wanted = window_class_exe(stored)
     if wanted is None:
         return None
-    return any(i.enabled and _class_exe(i.value) == wanted for i in items)
+    return any(i.enabled and window_class_exe(i.value) == wanted for i in items)
 
 
 class AutoMode:
