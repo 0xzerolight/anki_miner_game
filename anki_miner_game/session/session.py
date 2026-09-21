@@ -33,20 +33,30 @@ import tempfile
 import time
 from collections.abc import Awaitable, Callable, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Final
+from typing import Any, Final
 
-from anki_miner_game import paths
+from anki_miner_game import __version__, paths
 from anki_miner_game.interfaces.addons import VadJobs
 from anki_miner_game.interfaces.obs import ObsDiscovery, ObsGateway, Provisioner, Recorder
 from anki_miner_game.interfaces.text_source import TextSource
 from anki_miner_game.models.config import AppConfig
 from anki_miner_game.models.constants import OBS_COLLECTION_NAME, OBS_PROFILE_NAME
 from anki_miner_game.models.lines import GameLine
-from anki_miner_game.models.manifest import Counts
+from anki_miner_game.models.manifest import (
+    ClockKind,
+    ClockRecord,
+    Counts,
+    DriftSample,
+    Flag,
+    GameRef,
+    ManifestState,
+    ObsRecord,
+    SessionManifest,
+)
 from anki_miner_game.models.messages import (
     OBS_SOURCE_ID,
     START_FAILED_BANNER_KEY,
@@ -56,9 +66,13 @@ from anki_miner_game.models.messages import (
     BannerLevel,
     BannerRaised,
     CommandKind,
+    LineAccepted,
     LineReceived,
     ObsEvent,
+    RecordingStarted,
+    RecordingStopped,
     SessionEvent,
+    SessionFinalised,
     SessionInput,
     SourceStatus,
     SourceStatusChanged,
@@ -74,9 +88,28 @@ from anki_miner_game.models.obs import (
     ObsEventName,
     ObsRequestError,
     ObsUnsupportedError,
+    OutputState,
 )
+from anki_miner_game.models.pipeline import DROP_COUNTER, Accepted, Dropped
 from anki_miner_game.models.profile import GameProfile, validate
-from anki_miner_game.session.finalise import FinaliseResult, finalise
+from anki_miner_game.session.clock import EventClock, OutputDurationClock
+from anki_miner_game.session.finalise import FinaliseError, FinaliseResult, finalise
+from anki_miner_game.session.journal import (
+    Journal,
+    JournalRecord,
+    LineRecord,
+    PauseRecord,
+    ReplaceRecord,
+    ResumeRecord,
+    StopRecord,
+)
+from anki_miner_game.session.manifest import (
+    IncomingFiles,
+    game_folder,
+    incoming_files,
+    reserve_index,
+    write_manifest_atomic,
+)
 from anki_miner_game.session.restore import ObsRestore, delete_restore, load_restore, restore_path, save_restore
 from anki_miner_game.store import StoreError
 from anki_miner_game.text.pipeline import TextPipeline
@@ -90,10 +123,20 @@ ZERO_EVENT: Final = "STARTED"
 CAPTURE_LATENCY_MS: Final = 10
 
 # Measured by R2 (docs/m0/obs-behaviour.md, summary items).
+START_TIMEOUT_S: Final = 10.0
+"""R2 item 11: a failed start answers ``StartRecord`` 100, shows its reason in an OBS modal and sends
+no ``STARTED``; no ``STARTED`` within 10 s and ``GetRecordStatus`` inactive is the failure. R1 saw
+``STARTED`` 7-184 ms after the request."""
 RESTART_QUESTION_S: Final = 3.0
 """R2 items 3 and 5: ``SetCurrentProfile`` answers within a millisecond of its ``...Changed`` event, or
 not at all while OBS's modal restart question is open. No answer this long after the event is that
 question."""
+QUIT_STOP_TIMEOUT_S: Final = 5.0
+"""Quit while recording: how long to wait for ``STOPPED`` after ``StopRecord`` (R2 item 9: 0.6-1.3 s)."""
+RECORD_INACTIVE_WAIT_S: Final = 1.0
+"""Quit, after ``STOPPED``: how long to wait for ``GetRecordStatus`` to say inactive before the restore
+(R2 item 9: it still says active for about 170 ms)."""
+RECORD_INACTIVE_POLL_S: Final = 0.05
 
 # Fixed by the spec.
 SWITCH_TIMEOUT_S: Final = 15.0
@@ -102,6 +145,9 @@ OBS_LAUNCH_TIMEOUT_S: Final = 30.0
 """Spec 17: Arm launches OBS and waits up to 30 s for it to answer."""
 FREE_SPACE_WARN_BYTES: Final = 5 * 10**9
 """Spec 17: under 5 GB free at Arm, arm anyway with a warning."""
+DRIFT_SAMPLE_AFTER_S: Final = 10.0
+"""Spec 7 as amended: ``outputDuration`` is sampled at ``STARTED``, this long after it, at each
+``RESUMED`` and at stop."""
 
 # This module's own timers.
 TICK_S: Final = 1.0
@@ -211,6 +257,27 @@ class _Armed:
     cfg: AppConfig
 
 
+@dataclass
+class _Session:
+    manifest_path: Path
+    manifest: SessionManifest
+    """As last written, apart from the fields ``_write_manifest`` fills from the live state."""
+    files: IncomingFiles
+    journal: Journal
+    clock: EventClock | OutputDurationClock
+    """``EventClock`` from ``STARTED``; ``OutputDurationClock`` after reconcile rows 3 and 4."""
+    samples: list[DriftSample] = field(default_factory=list)
+    sources_used: list[str] = field(default_factory=list)
+    tail: GameLine | None = None
+    """The line behind the journal's last ``LineRecord``, with its latest text."""
+    tail_offset: int | None = None
+    stop_journalled: bool = False
+    """The journal holds the session's stop (``STOPPING``, a quit or a split); later lines are shown,
+    not journalled."""
+    next_sample: float | None = None
+    """``now()`` of the drift sample due ``DRIFT_SAMPLE_AFTER_S`` after ``STARTED``."""
+
+
 @dataclass(frozen=True)
 class _Shutdown:
     done: "asyncio.Future[None]"
@@ -233,6 +300,15 @@ def _writable(folder: Path) -> bool:
     except OSError:
         return False
     return True
+
+
+def _same_line(a: GameLine, b: GameLine) -> bool:
+    """A typewriter merge keeps its base line's ``t_mono`` and ``source_id`` (``TextPipeline``)."""
+    return a.t_mono == b.t_mono and a.source_id == b.source_id
+
+
+def _with_flag(flags: tuple[Flag, ...], flag: Flag) -> tuple[Flag, ...]:
+    return flags if flag in flags else (*flags, flag)
 
 
 class SessionActor:
@@ -292,6 +368,7 @@ class SessionActor:
         self._pipeline: TextPipeline | None = None
         self._sources: list[TextSource] = []
         self._source_status: dict[str, SourceStatus] = {}
+        self._session: _Session | None = None
         self._counts = Counts()
         self._held: list[GameLine] | None = None
         """Auto-start: lines accepted between a ``START`` carrying a line and ``STARTED``."""
@@ -355,7 +432,12 @@ class SessionActor:
         """Quit at the next message boundary; call it on the I/O loop while ``run`` runs.
 
         Stops every text source and awaits ``wait_closed``. While armed it disarms (OBS goes back
-        to the user's profile).
+        to the user's profile). While recording it first stops OBS and finalises the session, then
+        disarms; if OBS cannot be stopped, the journal is closed and the next launch resumes the
+        session (reconcile row 4) or finalises it (last row). At most about ``QUIT_STOP_TIMEOUT_S``
+        plus one finalise (up to 10 s of rename retries on Windows) plus ``RECORD_INACTIVE_WAIT_S``
+        plus the restore's two switches (up to ``SWITCH_TIMEOUT_S`` each, plus
+        ``RESTART_QUESTION_S`` when OBS asks to restart).
         """
         done: asyncio.Future[None] = self._loop.create_future()
         self._queue.put_nowait(_Shutdown(done))
@@ -368,6 +450,8 @@ class SessionActor:
 
     async def _handle(self, msg: SessionInput) -> None:
         match msg:
+            case LineReceived():
+                self._on_line(msg)
             case ObsEvent():
                 await self._on_obs_event(msg)
             case UserCommand():
@@ -396,12 +480,24 @@ class SessionActor:
             self.post(Tick(self._now()))
 
     async def _shutdown(self) -> None:
+        if self._state is AppState.RECORDING:
+            await self._stop_for_quit()
         if self._state is AppState.ARMED:
             await self._to_idle()
-        else:
-            await self._stop_sources()
+            return
+        await self._stop_sources()
+        s = self._session
+        if s is not None:  # OBS did not stop: the next launch resumes the session (row 4) or finalises it (row 6)
+            await self._write_manifest(s)
+            s.journal.close()
 
     async def _on_tick(self, t: float) -> None:
+        if self._start_deadline is not None and t >= self._start_deadline:
+            await self._start_timed_out()
+        s = self._session
+        if s is not None and s.next_sample is not None and t >= s.next_sample:
+            s.next_sample = None
+            await self._sample_drift()
         if self._state is AppState.IDLE and restore_path().exists():
             if self._connected:
                 if t >= self._next_restore:
@@ -452,6 +548,18 @@ class SessionActor:
             case ObsEventName.CONNECTION_LOST:
                 self._connected = False
                 self._obs_status(SourceStatus.DISCONNECTED)
+            case ObsEventName.RECORD_STATE_CHANGED:  # keyed on outputState: PAUSED has outputActive false
+                match ev.data.get("outputState"):
+                    case OutputState.STARTED:
+                        await self._on_started(ev)
+                    case OutputState.STOPPING:
+                        self._on_stopping(ev)
+                    case OutputState.STOPPED:
+                        await self._on_stopped(ev)
+                    case OutputState.PAUSED:
+                        await self._on_pause_edge(ev, paused=True)
+                    case OutputState.RESUMED:
+                        await self._on_pause_edge(ev, paused=False)
 
     # --- commands -------------------------------------------------------------------------------
 
@@ -462,6 +570,15 @@ class SessionActor:
                     await self._arm(cmd.slug)
             case CommandKind.DISARM:
                 await self._disarm()
+            case CommandKind.START:
+                await self._start(cmd.line)
+            case CommandKind.STOP:
+                await self._stop()
+            case CommandKind.TOGGLE:
+                if self._state is AppState.RECORDING:
+                    await self._stop()
+                elif self._state is AppState.ARMED:
+                    await self._start(None)
 
     # --- arming (spec 6.2) ----------------------------------------------------------------------
 
@@ -767,3 +884,375 @@ class SessionActor:
         self._publish(SourceStatusChanged(source_id, status))
         if status in _LIVE:
             self._clear(BannerKey.NO_SOURCE)
+
+    # --- recording ------------------------------------------------------------------------------
+
+    def _count(self, name: str) -> None:
+        self._counts = self._counts.incremented(name)
+
+    async def _start(self, line: GameLine | None) -> None:
+        """``StartRecord`` while armed (spec 11.4); the session begins at ``STARTED``, whoever starts it."""
+        if self._state is not AppState.ARMED or self._start_deadline is not None:
+            return
+        if line is not None:  # auto mode: the session's counts start with the line that started it
+            self._held = [line]
+            self._counts = Counts(received=1, accepted=1)
+        try:
+            await self._recorder.start()
+        except ObsError as exc:
+            self._start_failed(f"OBS did not start recording: {exc}")
+            return
+        self._start_deadline = self._now() + START_TIMEOUT_S
+
+    def _start_failed(self, text: str) -> None:
+        """Spec 17: banner, state stays ``armed``; held lines are dropped."""
+        self._start_deadline = None
+        self._held = None
+        self._banner(START_FAILED_BANNER_KEY, BannerLevel.ERROR, text)
+
+    async def _start_timed_out(self) -> None:
+        """No ``STARTED`` within ``START_TIMEOUT_S``: a failed start unless OBS reports it recording (R2 item 11).
+
+        OBS shows why in a modal of its own and says nothing on the websocket, so the banner points
+        at OBS's window.
+        """
+        try:
+            active = bool((await self._gateway.request("GetRecordStatus")).get("outputActive"))
+        except ObsError:
+            active = False
+        if active:  # still starting: its STARTED is on the way
+            self._start_deadline = self._now() + START_TIMEOUT_S
+            return
+        self._start_failed(f"OBS did not start recording within {START_TIMEOUT_S:g} s; OBS's window says why.")
+
+    async def _stop(self) -> None:
+        if self._state is not AppState.RECORDING:
+            return
+        await self._sample_drift()  # spec 7: outputDuration sampled at stop
+        try:
+            await self._recorder.stop()
+        except ObsError as exc:
+            self._banner(BannerKey.STOP_FAILED, BannerLevel.ERROR, f"OBS did not stop recording: {exc}")
+
+    async def _stop_for_quit(self) -> None:
+        """Quit while recording: stop OBS and finish the session before the app goes.
+
+        The stop is journalled at the reading when ``StopRecord`` is answered: the video ends there
+        within a frame (R2 item 9). Finalise needs ``STOPPED``, awaited up to ``QUIT_STOP_TIMEOUT_S``;
+        without it the session stays in ``_incoming/`` for the next launch, stop included.
+        """
+        s = self._session
+        if s is None or not self._connected:
+            return
+        await self._sample_drift()
+        stopping = self._expecting(
+            lambda ev: ev.name == ObsEventName.RECORD_STATE_CHANGED
+            and ev.data.get("outputState") == OutputState.STOPPED
+        )
+        with stopping as stopped:
+            try:
+                await self._recorder.stop()
+            except ObsError as exc:
+                log.warning("quit while recording: OBS did not stop (%s); the next launch finishes the session", exc)
+                return
+            stop_ms = s.clock.reading_ms(self._now())
+            if not s.stop_journalled:
+                self._append(s, StopRecord(offset_ms=stop_ms))
+                s.stop_journalled = True
+            try:
+                async with asyncio.timeout(QUIT_STOP_TIMEOUT_S):
+                    await stopped
+            except TimeoutError:
+                log.warning(
+                    "quit while recording: no STOPPED within %g s; the next launch finishes the session",
+                    QUIT_STOP_TIMEOUT_S,
+                )
+                return
+        await self._end_session(stop_ms)
+        await self._await_record_inactive()
+
+    async def _await_record_inactive(self) -> None:
+        """Up to ``RECORD_INACTIVE_WAIT_S`` until ``GetRecordStatus`` says inactive (R2 item 9).
+
+        After ``STOPPED`` it still says active for about 170 ms, and a restore in that window would
+        take it for a running recording and leave OBS on the app's profile.
+        """
+        for _ in range(round(RECORD_INACTIVE_WAIT_S / RECORD_INACTIVE_POLL_S)):
+            try:
+                status = await self._gateway.request("GetRecordStatus")
+            except ObsError:
+                return
+            if not status.get("outputActive"):
+                return
+            await asyncio.sleep(RECORD_INACTIVE_POLL_S)
+
+    def _on_line(self, msg: LineReceived) -> None:
+        pipeline = self._pipeline
+        if pipeline is None:  # idle: a late frame from a source that was stopped
+            return
+        self._count("received")
+        result = pipeline.process(msg)
+        if isinstance(result, Dropped):
+            self._count(DROP_COUNTER[result.reason])
+        elif isinstance(result, Accepted):
+            self._count("accepted")
+            self._accept(result.line)
+        else:
+            self._replace(result.line)
+
+    def _accept(self, line: GameLine) -> None:
+        s = self._session
+        if s is not None and not s.stop_journalled:
+            self._publish(LineAccepted(line, self._journal_line(s, line)))
+            return
+        if self._held is not None:
+            self._held.append(line)
+        self._publish(LineAccepted(line, None))
+
+    def _replace(self, line: GameLine) -> None:
+        """A typewriter merge (spec 8.2 step 9); see the module docstring for how it is journalled."""
+        s = self._session
+        if s is not None and not s.stop_journalled:
+            if s.tail is not None and _same_line(s.tail, line):
+                self._append(s, ReplaceRecord(text=line.text))
+                s.tail = line
+                offset = s.tail_offset
+            else:
+                offset = self._journal_line(s, line)
+            self._publish(LineAccepted(line, offset, replaces_previous=True))
+            return
+        if self._held is not None:
+            if self._held and _same_line(self._held[-1], line):
+                self._held[-1] = line
+            else:
+                self._held.append(line)
+        self._publish(LineAccepted(line, None, replaces_previous=True))
+
+    def _journal_line(self, s: _Session, line: GameLine) -> int | None:
+        """A ``LineRecord`` at the line's offset; ``None`` (dropped, counted ``paused``) while paused."""
+        offset = s.clock.offset_ms(line.t_mono)
+        if offset is None:
+            self._count("paused")
+            if self._pipeline is not None:
+                self._pipeline.reset()  # this line is not journalled, so it is no "previous line"
+            return None
+        self._append(s, LineRecord(offset_ms=offset, text=line.text, source=line.source_id))
+        s.tail, s.tail_offset = line, offset
+        if line.source_id not in s.sources_used:
+            s.sources_used.append(line.source_id)
+        return offset
+
+    def _append(self, s: _Session, record: JournalRecord) -> None:
+        try:
+            s.journal.append(record)
+        except OSError as exc:
+            self._banner(
+                BannerKey.SESSION_FILES,
+                BannerLevel.ERROR,
+                f"Cannot write the session journal ({exc.strerror or exc}); lines are being lost.",
+            )
+
+    async def _on_started(self, ev: ObsEvent) -> None:
+        """Ownership rule (spec 6.2): only a recording that starts while armed, into ``_incoming/``, is a session."""
+        armed = self._armed
+        if self._state is not AppState.ARMED or armed is None or self._pipeline is None:
+            return
+        self._start_deadline = None
+        held, self._held = self._held, None
+        output_path = ev.data.get("outputPath")
+        if not isinstance(output_path, str) or not self._in_incoming(output_path):
+            self._banner(
+                BannerKey.FOREIGN_RECORDING,
+                BannerLevel.WARNING,
+                f"OBS is recording to {output_path or 'an unknown file'}, outside the app's folder, so this "
+                "recording gets no subtitle. Arm the game again to put OBS back on the app's profile.",
+            )
+            return
+        incoming = paths.incoming_dir(armed.cfg)
+        profile = armed.profile
+        try:
+            files = incoming_files(incoming, output_path)
+            manifest = SessionManifest(
+                app_version=__version__,
+                game=GameRef(slug=profile.slug, title=profile.title),
+                index=reserve_index(game_folder(incoming, profile.title), incoming, profile.slug),
+                state=ManifestState.RECORDING,
+                started_at=self._utc_stamp(),
+                obs=ObsRecord(
+                    version=self._obs_versions[0],
+                    websocket=self._obs_versions[1],
+                    profile=OBS_PROFILE_NAME,
+                    collection=OBS_COLLECTION_NAME,
+                    output_path=output_path,
+                ),
+                clock=ClockRecord(kind=ClockKind.EVENT, zero_event=ZERO_EVENT, capture_latency_ms=CAPTURE_LATENCY_MS),
+                text_mode=profile.text_mode,
+            )
+            await asyncio.to_thread(write_manifest_atomic, files.manifest, manifest)  # it fsyncs: off the loop
+            journal = Journal(files.journal)
+        except (StoreError, OSError, ValueError) as exc:
+            self._banner(
+                BannerKey.SESSION_FILES,
+                BannerLevel.ERROR,
+                f"Cannot write the session files in {incoming} ({exc}), so this recording gets no subtitle.",
+            )
+            return
+        clock = EventClock(CAPTURE_LATENCY_MS, now=self._now)
+        clock.start(ev.t_mono)
+        s = self._session = _Session(
+            files.manifest, manifest, files, journal, clock, next_sample=ev.t_mono + DRIFT_SAMPLE_AFTER_S
+        )
+        self._clear(START_FAILED_BANNER_KEY, BannerKey.FOREIGN_RECORDING, BannerKey.SESSION_FILES)
+        if held:
+            for line in held:
+                self._journal_line(s, line)
+        else:
+            self._counts = Counts()
+            self._pipeline.reset()
+        self._set_state(AppState.RECORDING)
+        self._publish(RecordingStarted(files.video.stem))
+        if not any(status in _LIVE for status in self._source_status.values()):
+            self._banner(
+                BannerKey.NO_SOURCE,
+                BannerLevel.WARNING,
+                "No text source is connected: the recording gets no lines until one connects.",
+            )
+        await self._sample_drift()
+
+    async def _on_pause_edge(self, ev: ObsEvent, *, paused: bool) -> None:
+        s = self._session
+        if s is None or s.stop_journalled or s.clock.paused == paused:
+            return
+        record: JournalRecord
+        if paused:
+            s.clock.pause(ev.t_mono)
+            record = PauseRecord(offset_ms=s.clock.reading_ms(ev.t_mono))
+        else:
+            s.clock.resume(ev.t_mono)
+            record = ResumeRecord(offset_ms=s.clock.reading_ms(ev.t_mono))
+        self._append(s, record)
+        await self._write_manifest(s)
+        if not paused:
+            await self._sample_drift()  # spec 7: at each resume
+
+    def _on_stopping(self, ev: ObsEvent) -> None:
+        """R2 item 9: the video ends at ``STOPPING``; ``STOPPED`` follows 0.6-1.3 s later.
+
+        The stop is journalled here, so a line accepted before ``STOPPED`` is shown but not
+        journalled, and the last cue ends with the video.
+        """
+        s = self._session
+        if s is None or s.stop_journalled:
+            return
+        self._append(s, StopRecord(offset_ms=s.clock.reading_ms(ev.t_mono)))
+        s.stop_journalled = True
+
+    async def _on_stopped(self, ev: ObsEvent) -> None:
+        s = self._session
+        if s is not None:
+            await self._end_session(s.clock.reading_ms(ev.t_mono))  # the stop, unless STOPPING journalled it
+        elif self._start_deadline is not None:
+            self._start_failed("OBS stopped the recording as it started; OBS's window says why.")
+
+    async def _sample_drift(self) -> None:
+        """Spec 7 as amended: ``outputDuration`` beside the clock's reading, written to the manifest.
+
+        Only on the ``EventClock`` with the recording running unpaused and its stop not yet
+        journalled: the samples give the ``OutputDurationClock`` its lag.
+        """
+        s = self._session
+        if s is None or not self._connected or s.stop_journalled or not isinstance(s.clock, EventClock):
+            return
+        if s.clock.paused:
+            return
+        try:
+            status, mid = await self._record_status()
+        except ObsError:
+            return
+        if s is not self._session or not status.get("outputActive") or status.get("outputPaused"):
+            return
+        s.samples.append(s.clock.drift_sample(int(status.get("outputDuration") or 0), mid))
+        await self._write_manifest(s)
+
+    async def _record_status(self) -> tuple[dict[str, Any], float]:
+        """``GetRecordStatus`` and the monotonic midpoint of its round trip."""
+        before = self._now()
+        status = await self._gateway.request("GetRecordStatus")
+        return status, (before + self._now()) / 2
+
+    async def _end_session(self, stop_ms: int, flag: Flag | None = None) -> None:
+        """Journal the stop at ``stop_ms`` (unless it is there already), then finalise and return to ``armed``."""
+        s, armed = self._session, self._armed
+        if s is None or armed is None:
+            return
+        if not s.stop_journalled:
+            self._append(s, StopRecord(offset_ms=stop_ms))
+        s.journal.close()
+        flags = s.manifest.flags if flag is None else _with_flag(s.manifest.flags, flag)
+        await self._write_manifest(s, stopped_at=self._utc_stamp(), flags=flags)
+        self._session = None
+        self._clear(BannerKey.NO_SOURCE, BannerKey.STOP_FAILED)
+        self._set_state(AppState.FINALISING)
+        self._publish(RecordingStopped(s.files.video.stem))
+        await self._finalise(s.manifest_path, armed.cfg)
+        if self._pipeline is not None:
+            self._pipeline.reset()
+        self._counts = Counts()
+        self._set_state(AppState.ARMED)
+
+    async def _finalise(self, manifest_path: Path, cfg: AppConfig) -> None:
+        try:
+            result = await self._finaliser.run(manifest_path, cfg)
+        except FinaliseError as exc:
+            self._banner(
+                BannerKey.FINALISE,
+                BannerLevel.ERROR,
+                f"Could not finish the session {manifest_path.name} ({exc}); the app tries again at next launch.",
+            )
+            return
+        self._publish(SessionFinalised(result.manifest_path))
+        manifest = result.manifest
+        if manifest.state is ManifestState.FINALISE_PENDING:
+            self._banner(
+                BannerKey.FINALISE,
+                BannerLevel.WARNING,
+                f"{manifest.game.title}: the video is still in use, so the session could not be moved; "
+                "the app tries again at next launch.",
+            )
+        if Flag.NO_CUES in manifest.flags:
+            self._banner(
+                BannerKey.NO_CUES,
+                BannerLevel.WARNING,
+                f"{manifest.game.title}: no lines were recorded, so the video was kept without a subtitle.",
+            )
+        if result.queue_vad and self._vad_jobs is not None:
+            self._vad_jobs.queue(result.manifest_path)
+
+    async def _write_manifest(self, s: _Session, **changes: Any) -> None:
+        """Write the session's manifest with ``changes`` and the live counts, sources and drift samples.
+
+        Off the loop (it fsyncs, and the loop stamps text frames at receipt), awaited, so writes keep
+        their order.
+        """
+        manifest = replace(s.manifest, **changes)
+        s.manifest = replace(
+            manifest,
+            counts=self._counts,
+            sources_used=tuple(s.sources_used),
+            clock=replace(manifest.clock, drift_samples=tuple(s.samples)),
+        )
+        try:
+            await asyncio.to_thread(write_manifest_atomic, s.manifest_path, s.manifest)
+        except StoreError as exc:
+            self._banner(BannerKey.SESSION_FILES, BannerLevel.ERROR, f"Cannot update the session manifest ({exc}).")
+
+    def _in_incoming(self, output_path: str) -> bool:
+        """Whether OBS's ``output_path`` lies directly in the configured ``_incoming/`` (symlinks resolved)."""
+        cfg = self._armed.cfg if self._armed is not None else self._get_config()
+        try:
+            return Path(output_path).parent.samefile(paths.incoming_dir(cfg))
+        except OSError:
+            return False
+
+    def _utc_stamp(self) -> str:
+        return self._utc_now().astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
