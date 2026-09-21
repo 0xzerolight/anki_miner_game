@@ -57,7 +57,10 @@ class ObsDiscovery(Protocol):
         ...
 
     def read_ws_config(self) -> WsConfig | None:
-        """``plugin_config/obs-websocket/config.json``; ``None`` when the file does not exist."""
+        """``plugin_config/obs-websocket/config.json``; ``None`` when the file does not exist.
+
+        Raises ``ObsConfigError`` when the file exists but cannot be read or parsed.
+        """
         ...
 
     def ensure_server_enabled(self) -> bool:
@@ -80,7 +83,14 @@ class ObsDiscovery(Protocol):
         ...
 
     def credentials(self, cfg: AppConfig) -> ObsCredentials:
-        """Host, port and password for the next connect, read from OBS's config each call; ``cfg.obs`` overrides."""
+        """Host, port and password for the next connect, read from OBS's config each call; ``cfg.obs`` overrides.
+
+        Raises ``ObsConfigError`` (an ``ObsConnectError``, so the gateway's
+        ``connect`` passes it on unchanged) when no port is known: OBS's
+        websocket ``config.json`` is missing or unreadable and
+        ``cfg.obs.port`` is ``None``. With a port override and no readable
+        file, the password is ``cfg.obs.password_override`` (possibly ``None``).
+        """
         ...
 
 

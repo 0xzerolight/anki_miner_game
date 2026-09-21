@@ -3,21 +3,47 @@
 Every write goes to a temporary file in the same folder and is moved into place
 with ``os.replace``. A file that does not describe its model raises
 ``CorruptFileError``; one written by a newer app raises ``FutureSchemaError``;
-one that cannot be read at all raises ``StoreError``. Callers turn all three into
-banners.
+one that cannot be read at all raises ``StoreError``; a save that cannot be
+written raises ``StoreWriteError``. All are ``StoreError``s, which callers turn
+into banners.
 """
 
 import contextlib
 import os
+import sys
 import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Final
 
 from anki_miner_game import paths
 from anki_miner_game.models.codec import DecodeError, UnsupportedSchemaError, dump_document, load_document
 from anki_miner_game.models.config import AppConfig
-from anki_miner_game.models.profile import GameProfile, validate
+from anki_miner_game.models.profile import GameProfile, is_safe_slug, validate
+
+
+def _read_umask() -> int:
+    """The process umask.
+
+    Linux reports it in ``/proc/self/status``, which reads it without changing
+    it. Elsewhere it is set and restored, safe only while no other thread
+    creates files, which holds at import.
+    """
+    try:
+        with open("/proc/self/status", encoding="ascii") as fh:
+            for line in fh:
+                if line.startswith("Umask:"):
+                    return int(line.split()[1], 8)
+    except (OSError, ValueError, IndexError):
+        pass
+    current = os.umask(0o077)
+    os.umask(current)
+    return current
+
+
+_UMASK: Final = 0 if sys.platform == "win32" else _read_umask()
+"""Read once at import."""
 
 
 class StoreError(Exception):
@@ -38,6 +64,10 @@ class FutureSchemaError(StoreError):
     def __init__(self, path: Path, found: int) -> None:
         super().__init__(path, f"schema {found} is newer than this app supports")
         self.found = found
+
+
+class StoreWriteError(StoreError):
+    """The file could not be written (folder not writable, disk full, ...); the old file is kept."""
 
 
 class InvalidProfileError(ValueError):
@@ -65,15 +95,17 @@ def load_config() -> AppConfig:
 
 
 def save_config(cfg: AppConfig) -> Path:
+    """Write ``<home>/config.json``; raises ``StoreWriteError`` when it cannot be written."""
     path = paths.config_path()
-    write_text_atomic(path, dump_document(cfg))
+    _write(path, dump_document(cfg), mode=0o600)  # may hold the OBS password override
     return path
 
 
 def load_profiles() -> LoadedProfiles:
     """Every ``<home>/games/*.json``; a file that fails to load is reported in ``errors``, not raised.
 
-    A profile whose ``slug`` differs from its file name is reported as corrupt.
+    A profile whose ``slug`` differs from its file name, or cannot be a file name
+    (so ``save_profile`` would refuse it), is reported as corrupt.
     """
     profiles: dict[str, GameProfile] = {}
     errors: list[StoreError] = []
@@ -89,32 +121,42 @@ def load_profiles() -> LoadedProfiles:
                 continue
             if profile.slug != path.stem:
                 errors.append(CorruptFileError(path, f"slug {profile.slug!r} does not match the file name"))
+            elif not is_safe_slug(profile.slug):
+                errors.append(CorruptFileError(path, f"slug {profile.slug!r} cannot be a file name"))
             else:
                 profiles[profile.slug] = profile
     return LoadedProfiles(profiles=profiles, errors=tuple(errors))
 
 
 def save_profile(profile: GameProfile) -> Path:
-    """Write ``<home>/games/<slug>.json``; raises ``InvalidProfileError`` when ``validate`` finds problems."""
+    """Write ``<home>/games/<slug>.json``.
+
+    Raises ``InvalidProfileError`` when ``validate`` finds problems and
+    ``StoreWriteError`` when the file cannot be written.
+    """
     problems = validate(profile)
     if problems:
         raise InvalidProfileError(problems)
     path = paths.profile_path(profile.slug)
-    write_text_atomic(path, dump_document(profile))
+    _write(path, dump_document(profile))
     return path
 
 
-def write_text_atomic(path: Path, text: str) -> None:
+def write_text_atomic(path: Path, text: str, *, mode: int = 0o666) -> None:
     """Write ``text`` as UTF-8 (no BOM) with ``\\n`` line ends, all or nothing.
 
     The text goes to ``.<name>.*.tmp`` in the target folder (created when
     missing), is fsynced, then ``os.replace``-d onto ``path``. On any failure the
-    temporary file is removed and an existing ``path`` is left untouched.
+    temporary file is removed and an existing ``path`` is left untouched. On
+    POSIX the file gets ``mode & ~umask``, as a plain ``open`` would give it
+    (``mkstemp`` alone leaves 0600); Windows ignores ``mode``.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
+            if sys.platform != "win32":
+                os.fchmod(fh.fileno(), mode & ~_UMASK)
             fh.write(text)
             fh.flush()
             os.fsync(fh.fileno())
@@ -125,10 +167,17 @@ def write_text_atomic(path: Path, text: str) -> None:
         raise
 
 
+def _write(path: Path, text: str, *, mode: int = 0o666) -> None:
+    try:
+        write_text_atomic(path, text, mode=mode)
+    except OSError as exc:
+        raise StoreWriteError(path, f"cannot be written ({exc.strerror or exc})") from exc
+
+
 def _read[T](cls: type[T], path: Path) -> T:
     """Load one document; ``FileNotFoundError`` passes through, every other failure is a ``StoreError``."""
     try:
-        text = path.read_text(encoding="utf-8")
+        text = path.read_text(encoding="utf-8-sig")  # a BOM (Windows Notepad) is not corruption
     except FileNotFoundError:
         raise
     except UnicodeDecodeError as exc:

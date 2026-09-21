@@ -67,9 +67,11 @@ git -C /home/light/Projects/anki_miner_game worktree add \
 ln -sfn /home/light/Projects/anki_miner_game/.venv <worktree>/.venv
 ```
 
-Merge to `main` and remove the worktree once green. Use absolute paths in
-every command; `cd` into the worktree inside each shell call rather than
-relying on a persisted working directory.
+Implementers commit on their own branch only. The orchestrator alone merges
+to `main`, pushes and removes worktrees (this overrides the global rule to
+merge and remove once green). Use absolute paths in every command; `cd` into
+the worktree inside each shell call rather than relying on a persisted
+working directory.
 
 ## Gate command
 
@@ -79,8 +81,11 @@ PYTEST_XDIST_AUTO_NUM_WORKERS=4 bash scripts/health.sh
 ```
 
 `scripts/health.sh` runs black --check, ruff check, mypy `anki_miner_game`,
-then `pytest -m "not vad and not obs_live and not network and not
-windows_only"`. It never stops at the first failure, prints `PASS <step>` /
+then plain `pytest`, all from `./.venv/bin/` (it exits 2 when `.venv` is
+missing: symlink the shared one). The marker deselect (`not vad and not
+obs_live and not network and not windows_only`) lives only in
+`pyproject.toml` `addopts`; a command-line `-m` replaces it, so never pass
+one to the gate. It never stops at the first failure, prints `PASS <step>` /
 `FAIL <step>` per step and a `SUMMARY` block, and exits nonzero if any step
 failed. This is the Definition-of-Done gate; never claim a task complete or
 merge on a red or unrun gate. Send output to `<worktree>/gate.log` (never pipe
@@ -113,9 +118,11 @@ through `tail`) and keep the file as evidence. Set
 - Tests reach no network beyond loopback (`tests/_network_tripwire.py`); mark
   a genuinely networked test `network`, and a real-OBS test `obs_live`.
 - Every top-level `QWidget` a Qt test constructs goes through
-  `qtbot.addWidget`; the suite runs offscreen (`QT_QPA_PLATFORM=offscreen`)
-  with an isolated `ANKI_MINER_GAME_HOME` per test (autouse in
-  `tests/conftest.py`).
+  `qtbot.addWidget`; use pytest-qt's `qapp`, never construct a
+  `QApplication`. The suite runs offscreen (`QT_QPA_PLATFORM=offscreen`)
+  with an isolated `ANKI_MINER_GAME_HOME`, `HOME`/`USERPROFILE` and
+  platform config/data dirs per test (autouse in `tests/conftest.py`), so
+  `~` never reaches the real home.
 
 ## Commit rules
 
@@ -134,6 +141,8 @@ that needs a change there does not make it: it writes a
 under `.orchestration/status/<slug>.json` and returns without touching those
 packages. The orchestrator rules on it; a single dedicated agent edits
 `models/`/`interfaces/`, and dependent tasks rebase onto the result.
+Accepted additions beyond master plan section 4 are listed in
+[`docs/contracts.md`](docs/contracts.md); read it with section 4.
 
 ## Release notes
 
