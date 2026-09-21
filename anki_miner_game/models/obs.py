@@ -120,7 +120,10 @@ class WindowItem:
 class ProvisionResult:
     changed: bool
     needs_restart: bool
-    """A changed setting takes effect only after OBS restarts (spec 11.3)."""
+    """A changed setting takes effect only once OBS re-activates the app's profile (a switch to
+    another profile and back, which the next disarm and arm do) or restarts. Text for the user only:
+    the app never restarts OBS, and provisioning re-activates the profile itself whenever it
+    switched from another one (spec 11.3)."""
 
 
 class ObsError(Exception):

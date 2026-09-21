@@ -84,11 +84,22 @@ OFF_KEYS: Final = (("AdvOut", "RecSplitFile"), ("Video", "AutoRemux"))
 and auto-remux, which would race finalise's rename with a second video (source findings 1 and 7,
 summary item 15). Provisional until R2 reads a real ``basic.ini``."""
 
-REBUILD_CONTAINERS: Final = frozenset({"hybrid_mp4", "hybrid_mov"})
-"""Containers whose muxer OBS fixes when it builds the output handler: leaving one takes effect only
-after the profile is re-activated or OBS restarts, so it sets ``needs_restart``. Every other row
-applies at the next ``StartRecord`` (source findings section 2). Provisional until R2 checks the
-file with ffprobe."""
+REACTIVATE_KEYS: Final = frozenset(
+    {*CONTAINER_KEYS, ("Output", "Mode"), ("SimpleOutput", "RecQuality"), ("AdvOut", "RecEncoder")}
+)
+"""Keys OBS reads only when it builds its output handler, at launch and at each profile activation
+(source findings section 2): the muxer from the container, the handler type from the output mode,
+and whether recording has its own encoder (and so can pause) from the recording quality or encoder.
+The first recording after provisioning was MP4 data under a ``.mkv`` name until the profile was
+activated again (``docs/m0/obs-behaviour.md`` item 2). After writing one of them provisioning
+switches to the profile it came from and back; OBS is never restarted. Every other row applies at
+the next ``StartRecord``."""
+
+AUDIO_KEYS: Final = (("Audio", "SampleRate"), ("Audio", "ChannelSetup"))
+"""Copied from the profile provisioning starts on into the app's profile: a profile switch between
+profiles where they differ stops at OBS's modal "Restart" question, and the switch's answer never
+comes (``docs/m0/obs-behaviour.md`` item 3). They are copied before anything leaves the app's
+profile, since ``SetProfileParameter`` writes the running profile, the side OBS compares."""
 
 PROFILE_SWITCH_TIMEOUT_S: Final = 15.0
 """How long to wait for OBS to switch to a profile ``CreateProfile`` made (spec 6.2's switch timeout)."""
@@ -277,24 +288,43 @@ class ObsProvisioner:
     async def ensure_profile(self, cfg: AppConfig) -> ProvisionResult:
         """Make the app's profile current (creating it when missing) and apply spec 11.3's profile rows.
 
-        A switch here is not undone; arming has already switched (spec 6.2), and any other caller
-        restores the user's profile itself.
+        Started on another profile (the user's), it copies that profile's ``AUDIO_KEYS`` into the
+        app's, and after writing any of ``REACTIVATE_KEYS`` switches to it and back so OBS rebuilds
+        its outputs. Started on the app's profile it has nowhere to switch to, so such a write sets
+        ``needs_restart``. The switch into the app's profile is not undone: the caller restores the
+        user's profile itself.
         """
-        changed = await self._use_profile()
+        listing = await self._request("GetProfileList")
+        home = listing.get("currentProfileName")
+        if not isinstance(home, str) or not home or home == OBS_PROFILE_NAME:
+            home = None
+        audio = {key: await self._profile_parameter(*key) for key in AUDIO_KEYS} if home else {}
+        changed = await self._use_profile(listing)
+        written: list[tuple[str, str]] = []
+        for key, value in audio.items():
+            if value is not None and await self._profile_parameter(*key) != value:
+                await self._set_profile_parameter(*key, value)
+                written.append(key)
         changed |= await self._ensure_record_directory(cfg)
         changed |= await self._ensure_video(cfg)
+        for key in CONTAINER_KEYS:
+            if await self._profile_parameter(*key) != CONTAINER:
+                await self._set_profile_parameter(*key, CONTAINER)
+                written.append(key)
+        for key in OFF_KEYS:
+            if _config_bool(await self._profile_parameter(*key)):
+                await self._set_profile_parameter(*key, "false")
+                written.append(key)
         needs_restart = False
-        for section, key in CONTAINER_KEYS:
-            current = await self._profile_parameter(section, key)
-            if current != CONTAINER:
-                await self._set_profile_parameter(section, key, CONTAINER)
-                changed = True
-                needs_restart |= current is None or current in REBUILD_CONTAINERS
-        for section, key in OFF_KEYS:
-            if _config_bool(await self._profile_parameter(section, key)):
-                await self._set_profile_parameter(section, key, "false")
-                changed = True
-        return ProvisionResult(changed=changed, needs_restart=needs_restart)
+        if REACTIVATE_KEYS.intersection(written):
+            if home is None:
+                log.info("OBS applies the app profile's new recording settings at its next activation")
+                needs_restart = True
+            else:
+                # Both answers come once the switch is done (source findings 8).
+                await self._request("SetCurrentProfile", profileName=home)
+                await self._request("SetCurrentProfile", profileName=OBS_PROFILE_NAME)
+        return ProvisionResult(changed=changed or bool(written), needs_restart=needs_restart)
 
     async def ensure_collection(self, profile: GameProfile) -> ProvisionResult:
         """Make the app's scene collection current (creating it when missing), make ``Game`` its
@@ -472,8 +502,8 @@ class ObsProvisioner:
                 changed = True
         return changed
 
-    async def _use_profile(self) -> bool:
-        listing = await self._request("GetProfileList")
+    async def _use_profile(self, listing: Mapping[str, Any]) -> bool:
+        """Make the app's profile current; ``listing`` is ``GetProfileList``'s answer from just before."""
         if listing.get("currentProfileName") == OBS_PROFILE_NAME:
             return False
         if OBS_PROFILE_NAME in (listing.get("profiles") or []):

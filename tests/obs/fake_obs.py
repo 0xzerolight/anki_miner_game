@@ -7,7 +7,16 @@ obs-websocket 5.7.4 uses (``docs/m0/source-findings.md``; ``RequestHandler_Confi
 ``RequestHandler_Inputs.cpp`` at ``obs-websocket@1ef34bf4``):
 
 - ``GetProfileParameter`` returns the effective value when the key has a default, else the user
-  value, else ``null``; ``RecFormat2`` defaults to ``hybrid_mp4``.
+  value, else ``null``; ``RecFormat2`` defaults to ``hybrid_mp4``, ``[Audio] SampleRate`` to
+  ``48000`` and ``ChannelSetup`` to ``Stereo``.
+- A profile switch between profiles whose audio values differ is OBS's modal "Restart" question
+  (``docs/m0/obs-behaviour.md`` item 3): the running profile's effective values against the values
+  saved in the target's file, skipping a key the target lacks, so ``CreateProfile`` never asks. OBS
+  saves both values into a profile's file when it leaves it. The fake records each question in
+  ``restart_questions`` and completes the switch, as if the user answered "No".
+- The recording format is fixed when OBS builds its output handler, at launch and at each profile
+  activation (source findings section 2, R2 item 2): ``recording_format`` is the running profile's
+  ``[SimpleOutput] RecFormat2`` as it was when the profile was last activated.
 - ``CreateProfile`` answers before the profile exists; the switch lands ``create_profile_delay``
   ``GetProfileList`` calls later (``CurrentProfileChanged`` has no ordering guarantee).
 - A profile's default output size is its base scaled down to at most 1280x720 pixels
@@ -41,7 +50,13 @@ RESOURCE_NOT_FOUND = 600
 RESOURCE_ALREADY_EXISTS = 601
 INVALID_INPUT_KIND = 605
 
-PROFILE_DEFAULTS = {("SimpleOutput", "RecFormat2"): "hybrid_mp4", ("AdvOut", "RecFormat2"): "hybrid_mp4"}
+PROFILE_DEFAULTS = {
+    ("SimpleOutput", "RecFormat2"): "hybrid_mp4",
+    ("AdvOut", "RecFormat2"): "hybrid_mp4",
+    ("Audio", "SampleRate"): "48000",
+    ("Audio", "ChannelSetup"): "Stereo",
+}
+AUDIO_KEYS = (("Audio", "SampleRate"), ("Audio", "ChannelSetup"))
 
 DEFAULT_OUTPUT_SCALES = (1.0, 1.25, 1.0 / 0.75, 1.5, 1.0 / 0.6, 1.75, 2.0, 2.25, 2.5, 2.75, 3.0)
 """OBS's ``scaled_vals``: the first one that brings the base to at most 1280x720 pixels gives the
@@ -118,6 +133,9 @@ class FakeObs:
         self.collections: dict[str, FakeCollection] = {"Untitled": FakeCollection()}
         self.current_collection = "Untitled"
         self.crashed = False
+        self.restart_questions: list[tuple[str, str]] = []
+        """``(from, to)`` of every profile switch at which OBS asked to restart."""
+        self.recording_format = self._effective("Untitled", ("SimpleOutput", "RecFormat2"))
         self._base_size = base_size
         self._pending_profile: str | None = None
         self._pending_polls = 0
@@ -171,6 +189,22 @@ class FakeObs:
         self.collection.inputs[name] = FakeInput(kind, {}, muted)
         self.collection.special[slot] = name
 
+    def _effective(self, profile: str, key: tuple[str, str]) -> str | None:
+        return self.profiles[profile].get(key, PROFILE_DEFAULTS.get(key))
+
+    def _activate(self, target: str) -> None:
+        """Leave the running profile for ``target`` (``OBSBasic_Profiles.cpp:663-748``)."""
+        left = self.current_profile
+        running = {key: self._effective(left, key) for key in AUDIO_KEYS}
+        saved = self.profiles[target]
+        if any(key in saved and saved[key] != running[key] for key in AUDIO_KEYS):
+            self.restart_questions.append((left, target))
+        for key, value in running.items():
+            if value is not None:
+                self.profiles[left].setdefault(key, value)
+        self.current_profile = target
+        self.recording_format = self._effective(target, ("SimpleOutput", "RecFormat2"))
+
     def _default_video(self, base_w: int, base_h: int) -> dict[str, int]:
         out_w, out_h = base_w, base_h
         for scale in DEFAULT_OUTPUT_SCALES:
@@ -213,7 +247,8 @@ class FakeObs:
         if self._pending_profile is not None:
             self._pending_polls -= 1
             if self._pending_polls <= 0:
-                self.current_profile, self._pending_profile = self._pending_profile, None
+                target, self._pending_profile = self._pending_profile, None
+                self._activate(target)
         return {"currentProfileName": self.current_profile, "profiles": list(self.profiles)}
 
     def _CreateProfile(self, profileName: str) -> None:
@@ -228,7 +263,8 @@ class FakeObs:
     def _SetCurrentProfile(self, profileName: str) -> None:
         if profileName not in self.profiles:
             raise self._fail("SetCurrentProfile", RESOURCE_NOT_FOUND)
-        self.current_profile = profileName
+        if profileName != self.current_profile:  # the current one answers at once (R2 item 4)
+            self._activate(profileName)
 
     def _GetProfileParameter(self, parameterCategory: str, parameterName: str) -> dict[str, Any]:
         key = (parameterCategory, parameterName)
