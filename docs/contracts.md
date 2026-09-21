@@ -26,10 +26,9 @@ Changes after W0 go through a `CONTRACT-CHANGE-REQUEST` (see `CLAUDE.md`) and ar
 | `TextSource.set_status_listener(cb)` | `interfaces/text_source.py` | `cb(source_id, status)` (`StatusListener`) on every status transition, after `status` reports it, on the sink's thread; one listener, set before `start`. The session actor registers it and publishes each change as `SourceStatusChanged` |
 | `VadSettings.enabled` (docstring only) | `models/config.py` | Effective value is `enabled and <VAD add-on installed>`, enforced by the VAD add-on; no behaviour change |
 
-## W1 integration (requested, pending the orchestrator's ruling)
+## W1 integration (accepted by the orchestrator)
 
-Filed by the wave 1 integration fix (`.orchestration/status/wave-1-integration-fix.json`). Not in the
-code yet; the contract agent moves each row up once accepted.
+Filed by the wave 1 integration fix (`.orchestration/status/wave-1-integration-fix.json`), applied by C1.
 
 | Name | Where | What it is |
 |---|---|---|
