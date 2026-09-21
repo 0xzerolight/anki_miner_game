@@ -36,7 +36,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import StrEnum
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any, Final
 
 from anki_miner_game import __version__, paths
@@ -104,9 +104,11 @@ from anki_miner_game.session.journal import (
     StopRecord,
 )
 from anki_miner_game.session.manifest import (
+    MANIFEST_SUFFIX,
     IncomingFiles,
     game_folder,
     incoming_files,
+    load_manifest,
     reserve_index,
     write_manifest_atomic,
 )
@@ -127,6 +129,11 @@ START_TIMEOUT_S: Final = 10.0
 """R2 item 11: a failed start answers ``StartRecord`` 100, shows its reason in an OBS modal and sends
 no ``STARTED``; no ``STARTED`` within 10 s and ``GetRecordStatus`` inactive is the failure. R1 saw
 ``STARTED`` 7-184 ms after the request."""
+RECORD_OUTPUT_NAMES: Final = ("simple_file_output", "adv_file_output")
+"""R2 item 8: the file output of ``[Output] Mode`` (Simple, Advanced); its ``GetOutputSettings``
+``path`` is the file being recorded, the first file even after a split (item 10). Both are asked: a
+running output keeps its handler through a profile switch (source findings section 8), so the
+current profile's mode need not be the recording's; the absent one answers 600."""
 RESTART_QUESTION_S: Final = 3.0
 """R2 items 3 and 5: ``SetCurrentProfile`` answers within a millisecond of its ``...Changed`` event, or
 not at all while OBS's modal restart question is open. No answer this long after the event is that
@@ -145,6 +152,8 @@ OBS_LAUNCH_TIMEOUT_S: Final = 30.0
 """Spec 17: Arm launches OBS and waits up to 30 s for it to answer."""
 FREE_SPACE_WARN_BYTES: Final = 5 * 10**9
 """Spec 17: under 5 GB free at Arm, arm anyway with a warning."""
+REANCHOR_S: Final = 10.0
+"""Spec 7: the ``OutputDurationClock`` re-anchors every 10 s."""
 DRIFT_SAMPLE_AFTER_S: Final = 10.0
 """Spec 7 as amended: ``outputDuration`` is sampled at ``STARTED``, this long after it, at each
 ``RESUMED`` and at stop."""
@@ -282,6 +291,10 @@ class _Session:
     not journalled."""
     next_sample: float | None = None
     """``now()`` of the drift sample due ``DRIFT_SAMPLE_AFTER_S`` after ``STARTED``."""
+    lag_ms: int | None = None
+    """On the ``OutputDurationClock``: the encoder lag added to ``outputDuration`` (``_lag_ms``)."""
+    next_anchor: float | None = None
+    """On the ``OutputDurationClock`` (``clock_degraded``): when to re-anchor next."""
 
 
 @dataclass(frozen=True)
@@ -315,6 +328,21 @@ def _same_line(a: GameLine, b: GameLine) -> bool:
 
 def _with_flag(flags: tuple[Flag, ...], flag: Flag) -> tuple[Flag, ...]:
     return flags if flag in flags else (*flags, flag)
+
+
+def _file_name(output_path: str) -> str:
+    return PureWindowsPath(output_path).name  # both separators, like session.manifest.incoming_files
+
+
+def _lag_ms(samples: Sequence[DriftSample]) -> int | None:
+    """Spec 7 as amended: ``at_ms - output_duration_ms`` of the latest sample whose duration is above 0.
+
+    ``None`` without one (the sample at ``STARTED`` reads 0: no frame has reached the output yet).
+    """
+    for sample in reversed(samples):
+        if sample.output_duration_ms > 0:
+            return sample.at_ms - sample.output_duration_ms
+    return None
 
 
 class SessionActor:
@@ -393,6 +421,8 @@ class SessionActor:
         after a switch OBS left unanswered (its question may still be open)."""
         self._next_connect = 0.0
         """While idle, not connected and with ``obs_restore.json``: the next look for a running OBS."""
+        self._launch_swept = False
+        """The first orphan sweep after launch ran; only it retries ``finalise_pending`` (spec 10.3, 17)."""
 
         gateway.subscribe(self.post)
 
@@ -455,9 +485,17 @@ class SessionActor:
         await done
 
     async def _launch(self) -> None:
-        """With OBS running, connect; the ``_Connected`` event does the rest."""
+        """Launch duties (spec 6.2, 6.3, 10.3, 17 "Unclean previous exit").
+
+        OBS running: connect; the ``_Connected`` event reconciles, restores ``obs_restore.json``
+        and finalises orphans. OBS not running (a confident answer: ``is_running`` says ``True``
+        when it cannot tell): nothing can be recording, so every session left in ``_incoming/`` is
+        finalised now; the restore waits for the next connection.
+        """
         if await asyncio.to_thread(self._discovery.is_running):
             await self._ensure_connected()
+        else:
+            await self._sweep_orphans(exclude=None)
 
     async def _handle(self, msg: SessionInput) -> None:
         match msg:
@@ -515,6 +553,9 @@ class SessionActor:
                 if self._gone_answers >= OBS_GONE_ANSWERS:
                     await self._obs_gone(self._lost_ms)  # spec 6.4: OBS gone after a lost connection
                     return
+        if s is not None and self._connected and s.next_anchor is not None and t >= s.next_anchor:
+            s.next_anchor = t + REANCHOR_S
+            await self._reanchor(s)
         if s is not None and s.next_sample is not None and t >= s.next_sample:
             s.next_sample = None
             await self._sample_drift()
@@ -563,8 +604,8 @@ class SessionActor:
                 self._connected = True
                 self._obs_status(SourceStatus.CONNECTED)
                 self._clear(BannerKey.OBS)
-                if self._state is AppState.IDLE and self._now() >= self._next_restore:
-                    await self._restore_obs()
+                await self._reconcile()
+                self._lost_ms = None
             case ObsEventName.CONNECTION_LOST:
                 self._connected = False
                 self._obs_status(SourceStatus.DISCONNECTED)
@@ -1152,8 +1193,17 @@ class SessionActor:
 
     async def _on_pause_edge(self, ev: ObsEvent, *, paused: bool) -> None:
         s = self._session
-        if s is None or s.stop_journalled or s.clock.paused == paused:
+        if s is None or s.stop_journalled:
             return
+        if s.clock.paused == paused:  # its partner edge was lost (R2 missed_pause), so the pause length is unknown
+            if isinstance(s.clock, EventClock):
+                try:
+                    status, mid = await self._record_status()
+                except ObsError:  # nothing to anchor on
+                    return
+                if status.get("outputActive"):
+                    await self._degrade(s, status, mid)
+            return  # on the OutputDurationClock the re-anchor follows OBS's pause flag
         record: JournalRecord
         if paused:
             s.clock.pause(ev.t_mono)
@@ -1182,8 +1232,10 @@ class SessionActor:
         s = self._session
         if s is not None:
             await self._end_session(s.clock.reading_ms(ev.t_mono))  # the stop, unless STOPPING journalled it
-        elif self._start_deadline is not None:
+            return
+        if self._start_deadline is not None:
             self._start_failed("OBS stopped the recording as it started; OBS's window says why.")
+        await self._sweep_orphans(exclude=None)  # nothing records now: every _incoming/ session is an orphan
 
     async def _sample_drift(self) -> None:
         """Spec 7 as amended: ``outputDuration`` beside the clock's reading, written to the manifest.
@@ -1320,3 +1372,192 @@ class SessionActor:
             BannerLevel.WARNING,
             "OBS closed during the recording; the session was saved up to that moment.",
         )
+
+    # --- reconcile (spec 6.3) and orphans (spec 10.3) -------------------------------------------
+
+    async def _reconcile(self) -> None:
+        """Every row of spec 6.3, run on each ``_Connected`` before any later event is handled."""
+        try:
+            version = await self._gateway.request("GetVersion")
+            status, mid = await self._record_status()
+            active = bool(status.get("outputActive"))
+            live_path = await self._live_output_path() if active else None
+        except ObsError as exc:  # the link dropped again: the next _Connected reconciles
+            log.info("reconcile postponed: %s", exc)
+            return
+        self._obs_versions = (
+            str(version.get("obsVersion") or "unknown"),
+            str(version.get("obsWebSocketVersion") or "unknown"),
+        )
+        s = self._session
+        if s is not None:
+            ours = active and (live_path is None or _file_name(live_path) == _file_name(s.manifest.obs.output_path))
+            if not ours:  # row 1 (or it stopped and a new recording started while disconnected)
+                await self._end_session(self._lost_ms if self._lost_ms is not None else s.clock.reading_ms(mid))
+            elif bool(status.get("outputPaused")) != s.clock.paused:  # row 3: a pause edge was missed
+                await self._degrade(s, status, mid)
+            # row 2: continue
+        elif active:
+            found = self._manifest_for(live_path) if live_path is not None else None
+            if found is not None:  # row 4: the app restarted mid-session
+                await self._resume(found, status, mid)
+            elif live_path is None:  # row 5, and which _incoming/ session is live is unknown: sweep nothing
+                await self._restore_if_due()
+                return
+            # row 5: not ours; arming refuses while it runs (spec 6.2 step 1)
+        live = self._session.manifest_path if self._session is not None else None
+        await self._sweep_orphans(exclude=live)  # row 6
+        await self._restore_if_due()
+
+    async def _restore_if_due(self) -> None:
+        """While idle: the restore, unless a failed try or an unanswered switch put it off (``_next_restore``)."""
+        if self._state is AppState.IDLE and self._now() >= self._next_restore:
+            await self._restore_obs()
+
+    async def _live_output_path(self) -> str | None:
+        """The file the active recording writes: ``GetOutputSettings`` ``path`` (R2 item 8).
+
+        ``None`` when no output in ``RECORD_OUTPUT_NAMES`` answers with a path. A split does not
+        change it: the path stays the first file's (R2 item 10). File size against ``outputBytes``
+        cannot tell (R2 section 5).
+        """
+        for name in RECORD_OUTPUT_NAMES:
+            try:
+                data = await self._gateway.request("GetOutputSettings", outputName=name)
+            except ObsRequestError:
+                continue
+            settings = data.get("outputSettings")
+            path = settings.get("path") if isinstance(settings, dict) else None
+            if isinstance(path, str) and path:
+                return path
+        return None
+
+    def _manifest_for(self, output_path: str) -> Path | None:
+        """Spec 6.3: the ``_incoming/`` manifest of ``output_path`` in state ``recording``, if any."""
+        if not self._in_incoming(output_path):
+            return None
+        cfg = self._armed.cfg if self._armed is not None else self._get_config()
+        try:
+            path = incoming_files(paths.incoming_dir(cfg), output_path).manifest
+            manifest = load_manifest(path)
+        except (FileNotFoundError, StoreError, ValueError):
+            return None
+        return path if manifest.state is ManifestState.RECORDING else None
+
+    async def _resume(self, manifest_path: Path, status: dict[str, Any], mid: float) -> None:
+        """Row 4: continue the session's journal on the ``OutputDurationClock``, flag ``clock_degraded``.
+
+        The lag comes from the drift samples the earlier run wrote to the manifest.
+        """
+        try:
+            manifest = load_manifest(manifest_path)
+            files = incoming_files(manifest_path.parent, manifest.obs.output_path)
+            journal = Journal(files.journal)
+        except (FileNotFoundError, StoreError, OSError, ValueError) as exc:
+            self._banner(
+                BannerKey.SESSION_FILES,
+                BannerLevel.ERROR,
+                f"Cannot resume the session {manifest_path.name} ({exc}).",
+            )
+            return
+        await self._stop_sources()
+        cfg = self._get_config()
+        profile = self._get_profile(manifest.game.slug) or GameProfile(
+            slug=manifest.game.slug, title=manifest.game.title, text_mode=manifest.text_mode
+        )
+        lag = _lag_ms(manifest.clock.drift_samples)
+        s = self._session = _Session(
+            manifest_path,
+            manifest,
+            files,
+            journal,
+            self._degraded_clock(status, mid, lag),
+            samples=list(manifest.clock.drift_samples),
+            sources_used=list(manifest.sources_used),
+            lag_ms=lag,
+        )
+        self._armed = _Armed(profile=profile, cfg=cfg)
+        self._pipeline = TextPipeline(profile.filters)
+        self._held = None
+        self._start_deadline = None
+        self._counts = manifest.counts
+        await self._mark_degraded(s, mid)
+        self._start_sources(cfg, profile)
+        self._set_state(AppState.RECORDING)
+        self._publish(RecordingStarted(files.video.stem))
+
+    def _degraded_clock(self, status: dict[str, Any], mid: float, lag_ms: int | None) -> OutputDurationClock:
+        """Spec 7 fallback, anchored on ``outputDuration + lag`` of this ``GetRecordStatus``; paused when OBS says so."""
+        clock = OutputDurationClock(now=self._now)
+        clock.anchor(mid, int(status.get("outputDuration") or 0) + (lag_ms or 0))
+        if status.get("outputPaused"):
+            clock.pause(mid)
+        return clock
+
+    async def _degrade(self, s: _Session, status: dict[str, Any], mid: float) -> None:
+        """Row 3, or a pause edge whose partner was lost: the ``OutputDurationClock`` from ``mid`` on.
+
+        The lag is the session's own (its drift samples); the edge is journalled at the new
+        clock's reading.
+        """
+        s.lag_ms = _lag_ms(s.samples)
+        s.clock = self._degraded_clock(status, mid, s.lag_ms)
+        s.next_sample = None
+        reading = s.clock.reading_ms(mid)
+        self._append(s, PauseRecord(offset_ms=reading) if s.clock.paused else ResumeRecord(offset_ms=reading))
+        await self._mark_degraded(s, mid)
+
+    async def _mark_degraded(self, s: _Session, mid: float) -> None:
+        s.next_anchor = mid + REANCHOR_S
+        await self._write_manifest(
+            s,
+            clock=replace(s.manifest.clock, kind=ClockKind.OUTPUT_DURATION, degraded=True),
+            flags=_with_flag(s.manifest.flags, Flag.CLOCK_DEGRADED),
+        )
+        if s.lag_ms is None:  # spec 7: no sample to take the encoder's lag from
+            self._banner(
+                BannerKey.CLOCK,
+                BannerLevel.WARNING,
+                "OBS's recording changed while the app was not watching, and this session has no timing "
+                "sample to correct by: subtitles for the rest of it may be off by a few seconds.",
+            )
+
+    async def _reanchor(self, s: _Session) -> None:
+        """Spec 7: re-anchor the ``OutputDurationClock`` every ``REANCHOR_S``, following OBS's pause flag."""
+        try:
+            status, mid = await self._record_status()
+        except ObsError:
+            return
+        clock = s.clock
+        if s is not self._session or not status.get("outputActive") or not isinstance(clock, OutputDurationClock):
+            return
+        paused = bool(status.get("outputPaused"))
+        if paused and not clock.paused:
+            clock.pause(mid)
+        elif clock.paused and not paused:
+            clock.resume(mid)
+        clock.anchor(mid, int(status.get("outputDuration") or 0) + (s.lag_ms or 0))
+
+    async def _sweep_orphans(self, exclude: Path | None) -> None:
+        """Finalise every session left in ``_incoming/`` (spec 6.3 last row, 10.3) except ``exclude``.
+
+        Called only when no recording can be writing one of them: after reconcile, after a
+        ``STOPPED`` with no session, and at launch with OBS not running. A ``finalise_pending`` one
+        (its video stayed locked) is retried by the first sweep after launch only (spec 10.3, 17),
+        since each locked video costs up to 9.8 s of rename retries inside a handler.
+        """
+        states = {ManifestState.RECORDING}
+        if not self._launch_swept:
+            states.add(ManifestState.FINALISE_PENDING)
+            self._launch_swept = True
+        cfg = self._armed.cfg if self._armed is not None else self._get_config()
+        for path in sorted(paths.incoming_dir(cfg).glob(f"*{MANIFEST_SUFFIX}")):
+            if path == exclude:
+                continue
+            try:
+                manifest = load_manifest(path)
+            except (FileNotFoundError, StoreError) as exc:
+                log.warning("skipping %s: %s", path.name, exc)
+                continue
+            if manifest.state in states:
+                await self._finalise(path, cfg)
