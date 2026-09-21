@@ -9,6 +9,8 @@ import pytest
 
 from tests import _network_tripwire as _net
 
+pytest_plugins = ["pytester"]
+
 
 @pytest.fixture(scope="session", autouse=True)
 def _install_network_tripwire():
@@ -30,8 +32,15 @@ def _network_guard(request):
     See ``tests/_network_tripwire.py`` for the record-and-block mechanism this
     asserts on. Only ``network``-marked tests genuinely need it (and the gate
     deselects them), so the wrapper is suppressed for their duration alone;
-    ``e2e`` tests run in the gate and stay guarded.
+    ``e2e`` tests run in the gate and stay guarded. The stray check runs first
+    for every test, so a leaked thread's connect is reported at the next test
+    boundary, never carried past a ``network`` test onto a later one.
     """
+    stray = _net.summarize_recorded(_net.RECORDED)
+    _net.RECORDED.clear()
+    if stray:
+        pytest.fail(f"stray network connect(s) landed between tests: {stray}", pytrace=False)
+
     if request.node.get_closest_marker("network"):
         _net.SUPPRESSED = True
         try:
@@ -40,10 +49,6 @@ def _network_guard(request):
             _net.SUPPRESSED = False
         return
 
-    stray = _net.summarize_recorded(_net.RECORDED)
-    _net.RECORDED.clear()
-    if stray:
-        pytest.fail(f"stray network connect(s) landed between tests: {stray}", pytrace=False)
     yield
     leaked = _net.summarize_recorded(_net.RECORDED)
     _net.RECORDED.clear()
