@@ -16,7 +16,8 @@ import pytest
 
 from tools import nested_display as nd
 
-posix_only = pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux-only tool")
+# The tool drives kwin, /proc and POSIX process groups; CI's Windows runners skip the module.
+pytestmark = pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux-only tool")
 
 TOKEN = "tok123"
 BUS = "unix:path=/data/r1/xdg/runtime/bus,guid=abc"
@@ -409,7 +410,6 @@ def _wait_for_pid_file(path: Path, timeout_s: float = 5.0) -> int:
 PLAIN_ENV = {"PATH": "/usr/bin:/bin"}
 
 
-@posix_only
 def test_spawned_children_join_the_leader_process_group():
     group = nd.ProcessGroup(f"{TOKEN}-join-{os.getpid()}")
     try:
@@ -424,7 +424,6 @@ def test_spawned_children_join_the_leader_process_group():
         assert group.terminate(term_wait_s=2, kill_wait_s=2) == []
 
 
-@posix_only
 def test_teardown_kills_the_whole_tree_including_term_ignorers_and_session_escapees(tmp_path):
     token = f"{TOKEN}-tree-{os.getpid()}"
     group = nd.ProcessGroup(token)
@@ -453,12 +452,10 @@ def test_teardown_kills_the_whole_tree_including_term_ignorers_and_session_escap
     assert [pid for pid in pids if _alive(pid)] == []
 
 
-@posix_only
 def test_teardown_of_an_empty_group_is_a_no_op():
     assert nd.ProcessGroup(TOKEN + "-empty").terminate() == []
 
 
-@posix_only
 def test_marker_holders_are_exactly_the_marked_processes():
     token = f"{TOKEN}-holders-{os.getpid()}"
     group = nd.ProcessGroup(token)
@@ -488,7 +485,6 @@ def test_cli_refuses_setenv_without_an_equals_sign():
     assert exc.value.code == 2
 
 
-@posix_only
 def test_cli_reports_missing_tools(monkeypatch, capsys):
     monkeypatch.setattr(nd.shutil, "which", lambda name: None)
     assert nd.main(["run", "--caller", "r1", "--", "true"]) == 2
