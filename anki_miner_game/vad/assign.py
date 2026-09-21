@@ -25,6 +25,10 @@ TAIL_SKIP_MS: Final = 2_000
 """A region still sounding at the window's start is skipped when another begins within this long."""
 END_PAD_MS: Final = 150
 """Added to the end of a cue's chain."""
+SNAP_LOOKBACK_MS: Final = 10_000
+"""OCR mode: how far before its live start a cue's start may snap back. Covers a line's typewriter
+effect before owocr sees it settle; keeps title music or a sound effect long before the line from
+being taken. Provisional, tuned at T32 against real OCR sessions."""
 
 
 def assign(live_cues: Sequence[Cue], regions: Sequence[Region], text_mode: TextMode, cfg: CueSettings) -> list[Cue]:
@@ -52,9 +56,10 @@ def assign(live_cues: Sequence[Cue], regions: Sequence[Region], text_mode: TextM
         first = _chain_start(ordered, starts, window_start, window_end)
         start = cue.start_ms
         if text_mode == TextMode.OCR:
-            # The latest region starting inside [prev.live_end, start]; the first cue looks back to 0.
+            # The latest region starting inside [max(prev.live_end, start - SNAP_LOOKBACK_MS), start].
+            floor = max(live_cues[i - 1].end_ms if i else 0, cue.start_ms - SNAP_LOOKBACK_MS)
             snap = bisect_right(starts, cue.start_ms) - 1
-            if snap >= 0 and starts[snap] >= (live_cues[i - 1].end_ms if i else 0):
+            if snap >= 0 and starts[snap] >= floor:
                 first = snap
                 start = starts[snap]
                 if i:

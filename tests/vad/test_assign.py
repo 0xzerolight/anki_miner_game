@@ -13,6 +13,7 @@ from anki_miner_game.models.profile import TextMode
 from anki_miner_game.vad.assign import (
     CHAIN_GAP_MS,
     END_PAD_MS,
+    SNAP_LOOKBACK_MS,
     TAIL_SKIP_MS,
     WINDOW_LEAD_MS,
     WINDOW_MAX_MS,
@@ -197,6 +198,37 @@ def test_ocr_first_cue_snaps_back_to_the_session_start():
     assert (out.start_ms, out.end_ms) == (3000, 6000 + END_PAD_MS)
 
 
+@pytest.mark.parametrize(
+    ("region_start", "span"),
+    [
+        (20_000 - SNAP_LOOKBACK_MS, (20_000 - SNAP_LOOKBACK_MS, 20_000 - SNAP_LOOKBACK_MS + 500 + END_PAD_MS)),
+        (20_000 - SNAP_LOOKBACK_MS - 1, (20_000, 25_000)),  # beyond the look-back: no snap, no chain
+    ],
+)
+def test_ocr_snap_looks_back_at_most_snap_lookback(region_start, span):
+    [out] = assign([cue(1, 20_000, 25_000)], [Region(region_start, region_start + 500)], OCR, CFG)
+
+    assert (out.start_ms, out.end_ms) == span
+
+
+def test_ocr_first_cue_does_not_snap_to_title_music_minutes_before():
+    [out] = assign([cue(1, 300_000, 305_000)], [Region(120_000, 180_000)], OCR, CFG)
+
+    assert (out.start_ms, out.end_ms) == (300_000, 305_000)
+
+
+def test_ocr_slow_reader_keeps_the_voice_after_a_long_silence():
+    # Cue 1 was held 30 s (live end capped at 25 s); a sound effect at 27.0 s is 13 s before cue 2's
+    # live start. Cue 2 keeps its voice at 41.5 s instead of snapping to the sound effect.
+    cues = [cue(1, 10_000, 25_000), cue(2, 40_000, 55_000)]
+    regions = [Region(27_000, 27_400), Region(41_500, 45_000)]
+
+    ocr = assign(cues, regions, OCR, CFG)
+
+    assert (ocr[1].start_ms, ocr[1].end_ms) == (40_000, 45_000 + END_PAD_MS)
+    assert ocr == assign(cues, regions, HOOK, CFG)
+
+
 def test_ocr_snap_overrides_the_skip_rule():
     # A starts inside [9.65, 10.00] and is in progress at the window's start (9.80); B begins 1.7 s
     # into the window. Hook mode skips A for B; OCR mode snaps to A.
@@ -292,6 +324,7 @@ def test_invariant_holds(scenario, mode, end_gap_ms):
             assert final.start_ms == live.start_ms
         else:
             assert (cues[i - 1].end_ms if i else 0) <= final.start_ms <= live.start_ms
+            assert live.start_ms - SNAP_LOOKBACK_MS <= final.start_ms
     assert assign(cues, regions[::-1], mode, CueSettings(end_gap_ms=end_gap_ms)) == out
 
 
