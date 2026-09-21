@@ -57,14 +57,27 @@ def _network_guard(request):
 
 @pytest.fixture(autouse=True)
 def _isolate_game_home(tmp_path_factory, monkeypatch):
-    """Point ``ANKI_MINER_GAME_HOME`` at a per-test tmp dir.
+    """Point the app home and every user home dir at a per-test tmp dir.
 
-    ``paths.home()`` (T01) reads this env var at CALL time, not at import time
-    (contract: it is a function, not a module-level constant), so setting the
-    env var here is sufficient — there is no per-module snapshot to chase, the
-    trap Anki Miner's ``tests/_home_isolation.py`` documents at length.
+    ``paths.home()`` reads ``ANKI_MINER_GAME_HOME`` at CALL time, so setting the
+    env var is enough; there is no per-module snapshot to chase. ``HOME`` and
+    ``USERPROFILE`` (what ``Path.home()`` and ``~`` expand to on POSIX and on
+    Windows) plus the Windows and XDG config/data dirs point inside the same
+    tmp dir, so a default ``AppConfig().output_root`` (``~/Videos/...``) or an
+    OBS config root found under ``~`` can never reach the real home. All are
+    set on every platform; the ones a platform ignores are harmless.
     """
-    tmp_home = tmp_path_factory.mktemp("anki_miner_game_home") / ".anki_miner_game"
-    tmp_home.mkdir(parents=True, exist_ok=True)
+    fake_home = tmp_path_factory.mktemp("home")
+    for var, path in (
+        ("HOME", fake_home),
+        ("USERPROFILE", fake_home),
+        ("APPDATA", fake_home / "AppData" / "Roaming"),
+        ("LOCALAPPDATA", fake_home / "AppData" / "Local"),
+        ("XDG_CONFIG_HOME", fake_home / ".config"),
+        ("XDG_DATA_HOME", fake_home / ".local" / "share"),
+    ):
+        monkeypatch.setenv(var, str(path))
+    tmp_home = fake_home / ".anki_miner_game"
+    tmp_home.mkdir()
     monkeypatch.setenv("ANKI_MINER_GAME_HOME", str(tmp_home))
     yield tmp_home

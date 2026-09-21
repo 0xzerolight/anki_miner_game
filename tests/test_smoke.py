@@ -2,8 +2,11 @@
 
 import importlib
 import os
+from pathlib import Path
 
 import anki_miner_game
+from anki_miner_game import paths
+from anki_miner_game.models.config import AppConfig
 
 _SUBPACKAGES = [
     "anki_miner_game.models",
@@ -31,12 +34,32 @@ def test_every_package_importable():
         importlib.import_module(name)
 
 
-def test_game_home_isolated():
-    """The autouse fixture points ``ANKI_MINER_GAME_HOME`` at a throwaway dir, never the real home."""
-    home = os.environ["ANKI_MINER_GAME_HOME"]
-    real_home = os.path.join(os.path.expanduser("~"), ".anki_miner_game")
-    assert home.endswith(".anki_miner_game")
-    assert home != real_home
+_HOME_VARS = (
+    "ANKI_MINER_GAME_HOME",
+    "HOME",
+    "USERPROFILE",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+)
+
+
+def test_every_home_is_isolated_inside_the_test_tmp(tmp_path_factory):
+    """The autouse fixture points the app home and the user's home dirs at a throwaway dir."""
+    base = tmp_path_factory.getbasetemp()
+    for var in _HOME_VARS:
+        assert Path(os.environ[var]).is_relative_to(base), var
+    assert Path.home().is_relative_to(base)
+    assert Path(os.path.expanduser("~")).is_relative_to(base)
+    assert paths.home().name == ".anki_miner_game"
+
+
+def test_default_output_root_resolves_inside_the_test_tmp(tmp_path_factory):
+    """``~/Videos/Anki Miner Game`` must not reach the developer's real Videos folder."""
+    base = tmp_path_factory.getbasetemp()
+    assert paths.output_root(AppConfig()).is_relative_to(base)
+    assert paths.incoming_dir(AppConfig()).is_relative_to(base)
 
 
 def test_offscreen_qt_app(qapp):
