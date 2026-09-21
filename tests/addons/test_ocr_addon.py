@@ -612,6 +612,18 @@ async def test_pick_reports_an_exit_before_any_selection(tmp_path):
         await addon.pick(None)
 
 
+@posix_only
+async def test_pick_turns_an_owocr_that_cannot_start_into_an_ocr_error(tmp_path):
+    home = tmp_path / "home"
+    _install_fake(home, "linux")
+    addon = OcrAddon(home, platform="linux", environ={})
+    addon.executable.chmod(0o644)  # a READY install on a noexec mount, say
+    assert addon.status() is AddonStatus.READY
+    with pytest.raises(OcrError, match="owocr could not start") as raised:
+        await addon.pick(None)
+    assert isinstance(raised.value.__cause__, OSError)
+
+
 async def test_a_cancelled_pick_kills_owocr(tmp_path):
     addon, record = _picker(tmp_path, log=["10:00:00 | Launching screen coordinate picker"], grandchild=True)
     pick = asyncio.create_task(addon.pick(None))

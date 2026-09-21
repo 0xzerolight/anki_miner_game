@@ -628,7 +628,10 @@ class OcrAddon:
         if reason is not None:
             raise OcrError(reason)
         settings = OcrSettings(engine=default_ocr_engine(self._platform), window_title=window_title)
-        proc = await self.launch(settings, free_port(), pick=True)
+        try:
+            proc = await self.launch(settings, free_port(), pick=True)
+        except OSError as exc:
+            raise OcrError(f"owocr could not start: {exc}") from exc
         try:
             while (event := await proc.next_event()) is not None:
                 if event.kind in (LogKind.COORDINATES, LogKind.WINDOW_COORDINATES):
