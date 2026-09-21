@@ -59,7 +59,9 @@ class DriftSample:
     at_ms: int
     """Record-clock offset when sampled."""
     output_duration_ms: int
-    """``GetRecordStatus.outputDuration`` at that moment; a check, never an input (spec 7)."""
+    """``GetRecordStatus.outputDuration`` at that moment. ``at_ms - output_duration_ms`` of the latest
+    sample with ``output_duration_ms > 0`` is the encoder lag the ``OutputDurationClock`` adds
+    (spec 7); samples are taken only while the ``EventClock`` is in use and the recording runs unpaused."""
 
 
 @dataclass(frozen=True)

@@ -63,3 +63,23 @@ the integration fixer on `integration/wave-2a`.
 | `AddonService.install` (docstring) | `interfaces/addons.py` | No-op while `READY`; raises `RuntimeError`, also when an install is already running; failure or cancellation stops the work and removes the attempt; `progress` may come on any thread |
 | `VadJobs`, `Presenter` (docstrings) | `interfaces/addons.py`, `interfaces/presenter.py` | Every job that starts ends with `vad_finished`; skipped and shutdown-dropped jobs get no call. A manifest found at launch `vad_running` or `vad.state` `queued` is not live: the app passes it to `rerun` once |
 
+## T14 provisioning (accepted by the orchestrator)
+
+Filed by T14 (`.orchestration/status/t14-provision.json`), applied by C3.
+
+| Name | Where | What it is |
+|---|---|---|
+| `REQUIRED_REQUESTS` | `models/obs.py` | 31 names: the 26 of W0 plus `GetSceneList`, `SetCurrentProgramScene`, `GetInputSettings`, `GetInputMute`, `RemoveInput` (all obs-websocket 5.0.0; OBS 30.0 floor unchanged). Provisioning diffs scenes, inputs and mute state, makes `Game` the program scene, and removes app inputs a game no longer uses |
+
+## W2b-early integration (fix round 1)
+
+Found by the wave 2b-early cross-task reviews (`.orchestration/reviews/wave-2b-early-cross-*.md`),
+applied by the integration fixer on `integration/wave-2b-early`. Docstrings only.
+
+| Name | Where | What it is |
+|---|---|---|
+| `ObsDiscovery.wait_ready`, `launch`, `ensure_server_enabled` (docstrings) | `interfaces/obs.py` | T13's request: `wait_ready` raises `ObsAuthError` after two rejections in a row (one re-read between); `launch` raises `ObsConnectError` without an install or when OBS cannot start, and does nothing while OBS runs; `ensure_server_enabled` raises `ObsConfigError` for a file it cannot read, parse or write, and returns `False` also when no install is found |
+| `ObsDiscovery.is_running` (docstring) | `interfaces/obs.py` | `True` when the process list cannot be read: "cannot tell" never reads as "OBS gone" |
+| `Provisioner`, `ensure_profile`, `ensure_collection`, `list_windows` (docstrings) | `interfaces/obs.py` | `ensure_profile`/`ensure_collection` need every output inactive and never switch back (the caller restores). `ensure_profile` started on another profile copies its `[Audio] SampleRate`/`ChannelSetup` into the app's profile and, after writing a key OBS reads only when it builds its outputs, switches to that profile and back; started on the app's profile it sets `needs_restart` instead. `list_windows` reads the current collection, so only while the app's is current |
+| `ProvisionResult.needs_restart` (docstring) | `models/obs.py` | A change applies only once OBS re-activates the app's profile (the next disarm and arm) or restarts; text for the user only, the app never restarts OBS |
+| `DriftSample.output_duration_ms` (docstring) | `models/manifest.py` | Drift samples become the `OutputDurationClock`'s input (spec 7 as amended): its lag is `at_ms - output_duration_ms` of the latest sample with `output_duration_ms > 0`; samples are taken only on the `EventClock` with the recording unpaused |

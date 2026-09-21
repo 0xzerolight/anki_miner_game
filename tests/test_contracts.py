@@ -296,6 +296,29 @@ def test_obs_config_failures_are_typed():
         assert "ObsConfigError" in (method.__doc__ or ""), method.__name__
 
 
+def test_obs_discovery_documents_what_it_raises_and_reads_unknown_as_running():
+    """T13's request: the wizard reaches discovery only through the Protocol, so the raises live there."""
+    from anki_miner_game.interfaces.obs import ObsDiscovery
+
+    assert "ObsAuthError" in (ObsDiscovery.wait_ready.__doc__ or "")
+    assert "ObsConnectError" in (ObsDiscovery.launch.__doc__ or "")
+    enable = ObsDiscovery.ensure_server_enabled.__doc__ or ""
+    assert "ObsConfigError" in enable and "no install" in enable
+    assert "cannot be read" in (ObsDiscovery.is_running.__doc__ or "")
+
+
+def test_the_provisioner_states_its_preconditions_and_what_needs_restart_means():
+    """No output active, no switch back, a listing of the current collection, no OBS restart."""
+    from anki_miner_game.interfaces.obs import Provisioner
+
+    doc = Provisioner.__doc__ or ""
+    assert "output" in doc and "never switch back" in doc
+    profile = Provisioner.ensure_profile.__doc__ or ""
+    for word in ("SampleRate", "ChannelSetup", "switches to that profile and back", "``needs_restart``"):
+        assert word in profile, word
+    assert "current" in (Provisioner.list_windows.__doc__ or "")
+
+
 def test_ocr_area_picker_names_the_error_pick_raises():
     from anki_miner_game.interfaces.addons import OcrAreaPicker
 

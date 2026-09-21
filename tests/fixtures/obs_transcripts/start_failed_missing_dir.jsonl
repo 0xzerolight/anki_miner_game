@@ -1,0 +1,18 @@
+{"t_mono": 216829.511449894, "conn": 1, "event": "open", "subprotocol": null, "upstream": "ws://127.0.0.1:4455"}
+{"t_mono": 216829.51165483, "conn": 1, "dir": "obs->client", "msg": {"d": {"authentication": {"challenge": "<redacted>", "salt": "<redacted>"}, "obsStudioVersion": "32.2.2", "obsWebSocketVersion": "5.7.4", "rpcVersion": 1}, "op": 0}}
+{"t_mono": 216829.511996974, "conn": 1, "dir": "client->obs", "msg": {"op": 1, "d": {"rpcVersion": 1, "eventSubscriptions": 0, "authentication": "<redacted>"}}}
+{"t_mono": 216829.512268786, "conn": 1, "dir": "obs->client", "msg": {"d": {"negotiatedRpcVersion": 1}, "op": 2}}
+{"t_mono": 216829.513313101, "conn": 2, "event": "open", "subprotocol": null, "upstream": "ws://127.0.0.1:4455"}
+{"t_mono": 216829.513380598, "conn": 2, "dir": "obs->client", "msg": {"d": {"authentication": {"challenge": "<redacted>", "salt": "<redacted>"}, "obsStudioVersion": "32.2.2", "obsWebSocketVersion": "5.7.4", "rpcVersion": 1}, "op": 0}}
+{"t_mono": 216829.513709468, "conn": 2, "dir": "client->obs", "msg": {"op": 1, "d": {"rpcVersion": 1, "eventSubscriptions": 2047, "authentication": "<redacted>"}}}
+{"t_mono": 216829.513915235, "conn": 2, "dir": "obs->client", "msg": {"d": {"negotiatedRpcVersion": 1}, "op": 2}}
+{"t_mono": 216829.514487893, "conn": 1, "dir": "client->obs", "msg": {"op": 6, "d": {"requestType": "GetRecordDirectory", "requestId": 352}}}
+{"t_mono": 216829.514702297, "conn": 1, "dir": "obs->client", "msg": {"d": {"requestId": 352, "requestStatus": {"code": 100, "result": true}, "requestType": "GetRecordDirectory", "responseData": {"recordDirectory": "/home/user/Videos/Anki Miner Game/_incoming"}}, "op": 7}}
+{"t_mono": 216829.514937349, "conn": 1, "dir": "client->obs", "msg": {"op": 6, "d": {"requestType": "StartRecord", "requestId": 887}}}
+{"t_mono": 216829.515122718, "conn": 1, "dir": "obs->client", "msg": {"d": {"requestId": 887, "requestStatus": {"code": 100, "result": true}, "requestType": "StartRecord"}, "op": 7}}
+{"t_mono": 216835.523771636, "conn": 1, "dir": "client->obs", "msg": {"op": 6, "d": {"requestType": "GetRecordStatus", "requestId": 849}}}
+{"t_mono": 216835.524343032, "conn": 1, "dir": "obs->client", "msg": {"d": {"requestId": 849, "requestStatus": {"code": 100, "result": true}, "requestType": "GetRecordStatus", "responseData": {"outputActive": false, "outputBytes": 0, "outputDuration": 0, "outputPaused": false, "outputTimecode": "00:00:00.000"}}, "op": 7}}
+{"t_mono": 216837.858527731, "conn": 1, "dir": "client->obs", "msg": {"op": 6, "d": {"requestType": "GetRecordStatus", "requestId": 145}}}
+{"t_mono": 216837.859244511, "conn": 1, "dir": "obs->client", "msg": {"d": {"requestId": 145, "requestStatus": {"code": 100, "result": true}, "requestType": "GetRecordStatus", "responseData": {"outputActive": false, "outputBytes": 0, "outputDuration": 0, "outputPaused": false, "outputTimecode": "00:00:00.000"}}, "op": 7}}
+{"t_mono": 216837.869727224, "conn": 1, "event": "close", "by": "client", "code": 1000, "reason": ""}
+{"t_mono": 216837.869962347, "conn": 2, "event": "close", "by": "client", "code": 1000, "reason": ""}
