@@ -4,14 +4,17 @@ Everything lives under ``<home>/addons/vad/``: ``uv`` keeps its managed CPython,
 folders there (``bootstrap.uv_environment``), and ``env/`` holds what the VAD pass runs:
 
     env/venv/            onnxruntime, numpy and PyAV from vad/worker/requirements.txt (hash-pinned)
+    env/pins.sha256      what env/venv/ was built from: pins_digest() at install time
     env/silero_vad_v6.onnx
 
 ``install`` builds ``env/`` in place and writes the model last, through ``<name>.part``, checked
 against its pinned size and sha256. Any failure or cancellation removes ``env/`` again, so a failed
 install leaves the add-on missing, never half there: a running ``uv`` is killed
 (``bootstrap.run_uv``), and the uv and model downloads stop at their next chunk
-(``bootstrap.in_worker_thread``). ``status`` is ``ready`` only while the interpreter exists and
-the model's bytes match the pin; an ``env/`` without both is ``broken`` and a reinstall replaces it.
+(``bootstrap.in_worker_thread``). ``status`` is ``ready`` only while the interpreter exists,
+``pins.sha256`` matches the requirements and Python version this release pins, and the model's
+bytes match its pin; any other ``env/`` is ``broken`` (after an update that changed a pin, too) and
+a reinstall replaces it.
 
 ``VadSettings.enabled`` takes effect only while this add-on is ready: ``vad.trimmer`` checks
 ``status()`` before every pass and records ``unavailable`` instead of running without it.
@@ -60,6 +63,9 @@ PYTHON_VERSION: Final = "3.12"
 
 REQUIREMENTS: Final = Path(__file__).resolve().parents[1] / "vad" / "worker" / "requirements.txt"
 
+PINS_FILE: Final = "pins.sha256"
+"""In ``env/``: the ``pins_digest()`` the environment was built from."""
+
 ENVIRONMENT_BYTES: Final[Mapping[str, int]] = {"linux": 111_000_000, "win32": 77_000_000}
 """What ``uv`` downloads for the environment: the managed CPython (python-build-standalone
 20260901, ``install_only_stripped``) plus the pinned wheels, from their release and PyPI sizes on
@@ -67,6 +73,13 @@ ENVIRONMENT_BYTES: Final[Mapping[str, int]] = {"linux": 111_000_000, "win32": 77
 
 UvRunner = Callable[[Sequence[str], Mapping[str, str], Path | None], Awaitable[tuple[int, str]]]
 """``bootstrap.run_uv``'s shape; a seam for tests."""
+
+
+def pins_digest() -> str:
+    """sha256 over the requirements file's bytes and ``PYTHON_VERSION``: what ``env/venv/`` is built from."""
+    digest = hashlib.sha256(REQUIREMENTS.read_bytes())
+    digest.update(f"\npython=={PYTHON_VERSION}\n".encode())
+    return digest.hexdigest()
 
 
 class VadAddonError(RuntimeError):
@@ -120,7 +133,7 @@ class VadAddon:
             return AddonStatus.INSTALLING
         if not (self.root / "env").exists():
             return AddonStatus.MISSING
-        if self.python_path.is_file() and self._model_ok():
+        if self.python_path.is_file() and self._pins_ok() and self._model_ok():
             return AddonStatus.READY
         return AddonStatus.BROKEN
 
@@ -173,6 +186,7 @@ class VadAddon:
             ["install", "--python", str(self.python_path), "--require-hashes", "--only-binary", ":all:"]
             + ["-r", str(REQUIREMENTS)],
         )
+        (env / PINS_FILE).write_text(pins_digest(), encoding="ascii")
         progress(uv_share + env_share, total)
 
         base = uv_share + env_share
@@ -214,6 +228,12 @@ class VadAddon:
         if digest != pin.sha256:
             raise VadAddonError(f"VAD model checksum mismatch: expected {pin.sha256}, got {digest}")
         os.replace(part, self.model_path)
+
+    def _pins_ok(self) -> bool:
+        try:
+            return (self.root / "env" / PINS_FILE).read_text(encoding="ascii").strip() == pins_digest()
+        except (OSError, UnicodeDecodeError):
+            return False
 
     def _model_ok(self) -> bool:
         try:

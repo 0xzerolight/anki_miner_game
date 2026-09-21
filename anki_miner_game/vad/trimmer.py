@@ -73,7 +73,7 @@ _NO_WINDOW: Final[int] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 _UNAVAILABLE: Final = {
     AddonStatus.MISSING: "The VAD add-on is not installed.",
-    AddonStatus.BROKEN: "The VAD add-on is damaged; reinstall it.",
+    AddonStatus.BROKEN: "The VAD add-on is damaged or out of date; reinstall it.",
     AddonStatus.INSTALLING: "The VAD add-on was still installing; re-run VAD once it is ready.",
 }
 

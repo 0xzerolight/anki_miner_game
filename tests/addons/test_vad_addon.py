@@ -17,16 +17,18 @@ from pathlib import Path
 
 import pytest
 
-from anki_miner_game.addons import bootstrap
+from anki_miner_game.addons import bootstrap, vad_addon
 from anki_miner_game.addons.bootstrap import BootstrapError, Reply, uv_environment
 from anki_miner_game.addons.vad_addon import (
     MODEL,
     MODEL_HOSTS,
+    PINS_FILE,
     PYTHON_VERSION,
     REQUIREMENTS,
     ModelPin,
     VadAddon,
     VadAddonError,
+    pins_digest,
 )
 from anki_miner_game.models.addons import AddonStatus
 from anki_miner_game.vad import model_pin
@@ -152,6 +154,7 @@ def fake_install(addon: VadAddon, model_bytes: bytes = MODEL_BYTES) -> None:
     addon.python_path.parent.mkdir(parents=True)
     addon.python_path.write_bytes(b"")
     addon.model_path.write_bytes(model_bytes)
+    (addon.root / "env" / PINS_FILE).write_text(pins_digest(), encoding="ascii")
 
 
 # --- pins and layout --------------------------------------------------------
@@ -224,16 +227,39 @@ def test_status_is_ready_when_the_interpreter_and_the_pinned_model_are_there(tmp
     assert addon.status() is AddonStatus.READY
 
 
-@pytest.mark.parametrize("damage", ["model bytes", "model missing", "interpreter missing"])
+@pytest.mark.parametrize(
+    "damage", ["model bytes", "model missing", "interpreter missing", "pins missing", "pins differ"]
+)
 def test_status_is_broken_when_the_installed_files_fail_verification(tmp_path, damage):
     addon = make_addon(tmp_path)
     fake_install(addon)
+    pins = addon.root / "env" / PINS_FILE
     if damage == "model bytes":
         addon.model_path.write_bytes(MODEL_BYTES[:-1] + b"!")
     elif damage == "model missing":
         addon.model_path.unlink()
-    else:
+    elif damage == "interpreter missing":
         addon.python_path.unlink()
+    elif damage == "pins missing":
+        pins.unlink()
+    else:
+        pins.write_text("0" * 64, encoding="ascii")
+
+    assert addon.status() is AddonStatus.BROKEN
+
+
+@pytest.mark.parametrize("change", ["requirements", "python"])
+def test_an_environment_built_from_other_pins_is_broken(tmp_path, monkeypatch, change):
+    """Spec 13.1 "pinned versions": after an app update changes a pin, the old env/ needs a reinstall."""
+    addon = make_addon(tmp_path / "home")
+    fake_install(addon)
+    assert addon.status() is AddonStatus.READY
+    if change == "requirements":
+        other = tmp_path / "requirements.txt"
+        other.write_bytes(REQUIREMENTS.read_bytes() + b"# a new pin\n")
+        monkeypatch.setattr(vad_addon, "REQUIREMENTS", other)
+    else:
+        monkeypatch.setattr(vad_addon, "PYTHON_VERSION", "3.13")
 
     assert addon.status() is AddonStatus.BROKEN
 
@@ -268,7 +294,8 @@ def test_install_builds_the_venv_from_the_pinned_requirements_and_fetches_the_mo
     assert transport.calls == [FAKE_MODEL.url]
     assert addon.model_path.read_bytes() == MODEL_BYTES
     assert addon.status() is AddonStatus.READY
-    assert sorted(p.name for p in (addon.root / "env").iterdir()) == ["silero_vad_v6.onnx", "venv"]
+    assert sorted(p.name for p in (addon.root / "env").iterdir()) == [PINS_FILE, "silero_vad_v6.onnx", "venv"]
+    assert (addon.root / "env" / PINS_FILE).read_text(encoding="ascii") == pins_digest()
 
 
 def test_every_uv_call_runs_in_the_addons_own_uv_environment(tmp_path, monkeypatch):

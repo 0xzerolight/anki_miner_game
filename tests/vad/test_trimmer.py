@@ -342,7 +342,7 @@ def trimmed_already(trimmer: VadTrimmer, session: Session) -> None:
     ("status", "message"),
     [
         (AddonStatus.MISSING, "The VAD add-on is not installed."),
-        (AddonStatus.BROKEN, "The VAD add-on is damaged; reinstall it."),
+        (AddonStatus.BROKEN, "The VAD add-on is damaged or out of date; reinstall it."),
         (AddonStatus.INSTALLING, "The VAD add-on was still installing; re-run VAD once it is ready."),
     ],
 )
