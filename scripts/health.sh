@@ -6,9 +6,14 @@ set -uo pipefail
 
 cd "$(dirname "$0")/.." || exit 2
 
-# Prefer the project venv binaries; fall back to PATH.
-BIN=""
-[ -x ".venv/bin/python" ] && BIN=".venv/bin/"
+# Always the project venv's tools: a PATH fallback could report green against
+# the wrong environment.
+BIN="./.venv/bin/"
+if [ ! -x "${BIN}python" ]; then
+  echo "health.sh: no ${BIN}python here; symlink the shared venv:" >&2
+  echo "  ln -sfn /home/light/Projects/anki_miner_game/.venv $(pwd)/.venv" >&2
+  exit 2
+fi
 
 failed=()
 
