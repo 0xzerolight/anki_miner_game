@@ -22,7 +22,8 @@ Isolation, each rule learned from an incident on the owner's machine (2026-09-21
   the owner, everything else is set here. ``SESSION_MANAGER``, ``AT_SPI_BUS_ADDRESS``,
   ``WAYLAND_DISPLAY`` and the owner's ``XAUTHORITY`` never reach a child. X11 clients are also told
   outright to use X11 (``QT_QPA_PLATFORM=xcb`` and friends).
-- An owner guard fingerprints the KWin/toolkit config files and the doc-portal mount before the
+- An owner guard fingerprints the KWin/toolkit config files, the app's default home and output
+  root (``~/.anki_miner_game``, ``~/Videos/Anki Miner Game``) and the doc-portal mount before the
   display starts, re-checks it while the display runs and after teardown, and fails loudly
   (``IsolationBreachError``, exit code 3) on any change.
 - Teardown signals the whole process group (dbus-daemon, kwin, Xwayland, every child started
@@ -85,6 +86,10 @@ GUARDED_CONFIG_FILES = (
     "gtk-3.0/settings.ini",
     "gtk-4.0/settings.ini",
 )
+# The app's default home and output root under the owner's home (``paths.home()``, ``AppConfig.output_root``).
+# Children keep the owner's HOME, so an app started in the display without ANKI_MINER_GAME_HOME and a
+# config.json of its own would write here.
+GUARDED_APP_PATHS = (".anki_miner_game", "Videos/Anki Miner Game")
 PORTAL_FSTYPE = "fuse.portal"
 
 _OWNER_KEEP = ("PATH", "LANG", "HOME")
@@ -442,8 +447,8 @@ class OwnerGuard:
 
     def fingerprint(self) -> OwnerFingerprint:
         mtimes: list[tuple[str, int | None]] = []
-        for rel in GUARDED_CONFIG_FILES:
-            path = self.home / ".config" / rel
+        paths = [self.home / ".config" / rel for rel in GUARDED_CONFIG_FILES]
+        for path in paths + [self.home / rel for rel in GUARDED_APP_PATHS]:
             try:
                 mtimes.append((str(path), path.stat().st_mtime_ns))
             except FileNotFoundError:

@@ -435,6 +435,19 @@ def test_the_guard_reports_a_new_owner_file(tmp_path):
     assert any("kwinrc" in change for change in guard.changes())
 
 
+@pytest.mark.parametrize("rel", nd.GUARDED_APP_PATHS)
+def test_the_guard_reports_the_app_writing_into_the_owners_home(tmp_path, rel):
+    """E1 runs the app in the display with the owner's HOME: its home and output root must not appear."""
+    guard = _guard(tmp_path, _Findmnt())
+    guard.arm()
+    (guard.home / rel / "_incoming").mkdir(parents=True)
+    assert any(str(guard.home / rel) in change for change in guard.changes())
+
+
+def test_the_guard_covers_the_apps_default_home_and_output_root():
+    assert set(nd.GUARDED_APP_PATHS) == {".anki_miner_game", "Videos/Anki Miner Game"}
+
+
 def test_the_guard_reports_a_lost_portal_mount(tmp_path):
     findmnt = _Findmnt()
     guard = _guard(tmp_path, findmnt)
