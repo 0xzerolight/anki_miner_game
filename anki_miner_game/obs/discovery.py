@@ -18,34 +18,55 @@
   ``obs64.exe`` in ``tasklist`` on Windows.
 - ``launch``: the install's command plus ``--minimize-to-tray``, detached, in the folder it needs;
   nothing while OBS already runs.
+- ``wait_ready``: ready once ``GetVersion`` succeeds on a fresh connection. Until OBS has loaded,
+  obs-websocket accepts connections and answers every request with 207 ``NotReady``
+  (``docs/m0/source-findings.md`` summary 11), so a refused connection, a failed handshake and a
+  non-success answer all mean "not yet", with the credentials read again before every try.
+
+The probe uses obsws-python's shared connection class (``obsws_python.baseclient.ObsClient``) rather
+than ``ReqClient``, which logs every failed identify or request at ERROR: a probe fails many times
+by design. obsws-python logs the password at INFO when it connects, so its logger is held at
+WARNING (``docs/m0/source-findings.md`` section 11).
 
 The password is never logged; ``WsConfig`` and ``ObsCredentials`` keep it out of ``repr``.
 
-Ported in part from GameSentenceMiner ``GameSentenceMiner/obs/launch.py``
-(``get_obs_websocket_config_values``, ``_resolve_obs_launch_command``) at commit ``479747fe``:
-the config file is the source of truth for port and password, read as ``utf-8-sig``, and turned on
-by setting ``server_enabled``. Unlike GSM, the file is written only while OBS is closed (obs-websocket
-reads it once at start) and all other keys are kept.
+Ported in part from GameSentenceMiner ``GameSentenceMiner/obs/launch.py`` at commit ``479747fe``:
+``get_obs_websocket_config_values`` (the config file is the source of truth for port and password,
+read as ``utf-8-sig``, turned on by setting ``server_enabled``) and ``_resolve_obs_launch_command``
+(OBS starts in its executable's folder). Unlike GSM, the file is written only while OBS is closed
+(obs-websocket reads it once at start), every other key is kept, and nothing from it is copied into
+the app's own config.
 """
 
+import asyncio
 import json
 import logging
 import os
 import secrets
 import shutil
+import socket
 import string
 import subprocess
 import sys
 import threading
-from collections.abc import Callable, Iterator, Sequence
+import time
+from collections.abc import Awaitable, Callable, Iterator, Sequence
 from pathlib import Path, PurePath
 from typing import Any, Final, Protocol
+
+from obsws_python.baseclient import ObsClient
+from obsws_python.error import OBSSDKError
+from websocket import WebSocketException
 
 from anki_miner_game.models.config import AppConfig
 from anki_miner_game.models.obs import ObsConfigError, ObsConnectError, ObsCredentials, ObsInstall, WsConfig
 from anki_miner_game.store import write_text_atomic
 
 log = logging.getLogger(__name__)
+
+_obsws_log = logging.getLogger("obsws_python")
+if _obsws_log.level < logging.WARNING:  # NOTSET too: it logs the password at INFO when it connects
+    _obsws_log.setLevel(logging.WARNING)
 
 # Values that M0 runtime checks may still change live here and nowhere else.
 # Provisional until R2 (Flatpak, Linux) or H5 (Windows) confirms them at runtime; the source
@@ -77,6 +98,10 @@ LINUX_PROCESS: Final = "obs"
 WINDOWS_PROCESS: Final = "obs64.exe"
 TASKLIST: Final = ("tasklist", "/FI", f"IMAGENAME eq {WINDOWS_PROCESS}", "/FO", "CSV", "/NH")
 RUN_TIMEOUT_S: Final = 10.0
+READY_POLL_S: Final = 0.5
+"""Pause between two ``GetVersion`` tries in ``wait_ready``."""
+PROBE_TIMEOUT_S: Final = 2.0
+"""Connect and answer timeout of one ``GetVersion`` try."""
 
 _NO_WINDOW: Final[int] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 _DETACHED: Final[int] = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
@@ -129,6 +154,29 @@ class SubprocessRunner:
 
 RegistryReader = Callable[[str], str | None]
 """The default value of ``HKLM\\SOFTWARE\\OBS Studio`` in one registry view (``"64"`` or ``"32"``)."""
+Probe = Callable[[ObsCredentials, float], bool]
+"""One ``GetVersion`` with a timeout in seconds; ``True`` when it succeeds. Runs on a worker thread."""
+
+
+def get_version_succeeds(creds: ObsCredentials, timeout_s: float) -> bool:
+    """One ``GetVersion`` on a fresh connection; ``False`` for any failure, never raising for one."""
+    try:
+        # obsws-python logs a refused connection at ERROR with a traceback: look quietly first.
+        socket.create_connection((creds.host, creds.port), timeout=timeout_s).close()
+        client = ObsClient(host=creds.host, port=creds.port, password=creds.password or "", timeout=timeout_s)
+        try:
+            client.authenticate()
+            status = client.req("GetVersion")["requestStatus"]
+        finally:
+            client.ws.close()
+            client.ws.shutdown()  # close() leaves the socket open once the server has sent its close frame
+    except (OSError, ValueError, LookupError, TypeError, OBSSDKError, WebSocketException) as exc:
+        log.debug("OBS not ready: %s: %s", type(exc).__name__, exc)
+        return False
+    if status.get("result") is not True:
+        log.debug("OBS not ready: GetVersion answered %s", status.get("code"))
+        return False
+    return True
 
 
 def read_registry_install_dir(view: str) -> str | None:
@@ -156,7 +204,7 @@ class LocalObsDiscovery:
     ``config`` returns the app's current settings; ``wait_ready`` reads its credentials through it.
     Everything else is injected for tests: ``platform`` (``sys.platform``), ``which`` (``PATH``
     lookup), ``registry`` (Windows install folder), ``runner`` (``flatpak``, ``tasklist``, starting
-    OBS) and ``proc_root`` (Linux process table).
+    OBS), ``proc_root`` (Linux process table), ``probe`` (one ``GetVersion``), ``now`` and ``sleep``.
     """
 
     def __init__(
@@ -168,6 +216,9 @@ class LocalObsDiscovery:
         registry: RegistryReader = read_registry_install_dir,
         runner: ProcessRunner | None = None,
         proc_root: Path = Path("/proc"),
+        probe: Probe = get_version_succeeds,
+        now: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self._config = config
         self._windows = platform == "win32"
@@ -175,6 +226,9 @@ class LocalObsDiscovery:
         self._registry = registry
         self._runner = runner or SubprocessRunner()
         self._proc_root = proc_root
+        self._probe = probe
+        self._now = now
+        self._sleep = sleep
         self._install: ObsInstall | None = None
         self._looked = False
 
@@ -342,6 +396,29 @@ class LocalObsDiscovery:
         except OSError as exc:
             raise ObsConnectError(f"OBS could not be started ({exc.strerror or type(exc).__name__})") from exc
         log.info("OBS started: %s", " ".join(argv))
+
+    async def wait_ready(self, timeout_s: float = 30.0) -> bool:
+        """``True`` once ``GetVersion`` succeeds; ``False`` after ``timeout_s``.
+
+        Tries at once, then every ``READY_POLL_S``, the last time at the deadline. Each try reads
+        the credentials again (OBS may still be writing its config) and runs on a worker thread.
+        """
+        deadline = self._now() + timeout_s
+        while not await asyncio.to_thread(self._ready_once):
+            remaining = deadline - self._now()
+            if remaining <= 0:
+                log.info("OBS not ready after %.0f s", timeout_s)
+                return False
+            await self._sleep(min(READY_POLL_S, remaining))
+        return True
+
+    def _ready_once(self) -> bool:
+        try:
+            creds = self.credentials(self._config())
+        except ObsConfigError as exc:
+            log.debug("OBS not ready: %s", exc)
+            return False
+        return self._probe(creds, PROBE_TIMEOUT_S)
 
 
 def _load_json(path: Path) -> dict[str, Any] | None:

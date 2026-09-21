@@ -1,13 +1,18 @@
 """``obs/discovery.py``: install lookup, config roots, the websocket config, launch and readiness (spec 11.1, 17)."""
 
+import asyncio
+import base64
+import hashlib
 import json
 import logging
+import socket
 import sys
 import time
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
 import pytest
+from websockets.asyncio.server import Server, ServerConnection, serve
 
 from anki_miner_game.models.config import AppConfig, ObsSettings
 from anki_miner_game.models.obs import ObsConfigError, ObsConnectError, ObsCredentials, ObsInstall, WsConfig
@@ -671,3 +676,260 @@ def test_the_default_runner_spawns_in_the_given_folder(tmp_path):
 def test_the_default_runner_raises_when_a_program_cannot_start(tmp_path):
     with pytest.raises(OSError):
         discovery.SubprocessRunner().spawn([str(tmp_path / "no-such-program")], None)
+
+
+# --- wait_ready --------------------------------------------------------------------------------
+
+
+class FakeClock:
+    def __init__(self) -> None:
+        self.t = 1000.0
+        self.sleeps: list[float] = []
+        self.on_sleep: Callable[[], None] = lambda: None
+
+    def now(self) -> float:
+        return self.t
+
+    async def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.t += seconds
+        self.on_sleep()
+
+
+class ScriptedProbe:
+    """Answers each ``GetVersion`` probe from ``answers``; the last answer repeats."""
+
+    def __init__(self, answers: Sequence[bool]) -> None:
+        self.answers = list(answers)
+        self.seen: list[tuple[ObsCredentials, float]] = []
+
+    def __call__(self, creds: ObsCredentials, timeout_s: float) -> bool:
+        self.seen.append((creds, timeout_s))
+        return self.answers.pop(0) if len(self.answers) > 1 else self.answers[0]
+
+
+def ready_obs(tmp_path: Path, probe: Callable[[ObsCredentials, float], bool], clock: FakeClock, **kwargs: object):
+    return native_linux(tmp_path, probe=probe, now=clock.now, sleep=clock.sleep, **kwargs)
+
+
+async def test_ready_at_once_when_get_version_succeeds(tmp_path):
+    write_ws(native_root(), FULL)
+    clock, probe = FakeClock(), ScriptedProbe([True])
+
+    assert await ready_obs(tmp_path, probe, clock).wait_ready()
+
+    assert clock.sleeps == []
+    assert probe.seen == [
+        (ObsCredentials(host="127.0.0.1", port=4466, password="s3cretPassw0rd12"), discovery.PROBE_TIMEOUT_S)
+    ]
+
+
+async def test_not_ready_answers_are_retried_until_get_version_succeeds(tmp_path):
+    """207 ``NotReady`` while OBS loads: the probe answers False until OBS has loaded."""
+    write_ws(native_root(), FULL)
+    clock, probe = FakeClock(), ScriptedProbe([False, False, True])
+
+    assert await ready_obs(tmp_path, probe, clock).wait_ready()
+
+    assert clock.sleeps == [discovery.READY_POLL_S, discovery.READY_POLL_S]
+
+
+async def test_gives_up_after_the_timeout(tmp_path):
+    write_ws(native_root(), FULL)
+    clock, probe = FakeClock(), ScriptedProbe([False])
+
+    assert not await ready_obs(tmp_path, probe, clock).wait_ready(timeout_s=2.0)
+
+    assert clock.t == 1002.0
+    assert len(probe.seen) == 1 + round(2.0 / discovery.READY_POLL_S)  # the last probe comes at the deadline
+
+
+async def test_the_last_sleep_ends_at_the_deadline(tmp_path):
+    write_ws(native_root(), FULL)
+    clock = FakeClock()
+
+    assert not await ready_obs(tmp_path, ScriptedProbe([False]), clock).wait_ready(timeout_s=0.7)
+
+    assert clock.t == pytest.approx(1000.7)
+    assert clock.sleeps[-1] == pytest.approx(0.7 - discovery.READY_POLL_S)
+
+
+async def test_the_timeout_defaults_to_30_seconds(tmp_path):
+    write_ws(native_root(), FULL)
+    clock = FakeClock()
+
+    assert not await ready_obs(tmp_path, ScriptedProbe([False]), clock).wait_ready()
+
+    assert clock.t == 1030.0
+
+
+async def test_waits_while_obs_has_not_written_its_websocket_config_yet(tmp_path):
+    clock, probe = FakeClock(), ScriptedProbe([True])
+    clock.on_sleep = lambda: write_ws(native_root(), FULL)
+
+    assert await ready_obs(tmp_path, probe, clock).wait_ready()
+
+    assert len(clock.sleeps) == 1 and len(probe.seen) == 1
+
+
+async def test_reads_the_current_settings_at_every_probe(tmp_path):
+    write_ws(native_root(), FULL)
+    settings = [AppConfig(), AppConfig(obs=ObsSettings(password_override="typed"))]
+    clock, probe = FakeClock(), ScriptedProbe([False, True])
+    obs = LocalObsDiscovery(
+        lambda: settings[min(len(probe.seen), 1)],
+        which=which_from({"obs": "/usr/bin/obs"}),
+        runner=FakeRunner(),
+        probe=probe,
+        now=clock.now,
+        sleep=clock.sleep,
+    )
+
+    assert await obs.wait_ready()
+
+    assert [creds.password for creds, _ in probe.seen] == ["s3cretPassw0rd12", "typed"]
+
+
+# --- the default GetVersion probe, against a minimal obs-websocket server on loopback ----------
+
+SALT = "lM1GncleQOaCu9lT1yeUZhFYnqhsLLP1G5lAGo3ixaI="
+CHALLENGE = "+IxH4CnCiqpX1rM9scsNynZzbOe4KhDeYcTNS3PDaeY="
+
+
+def auth_string(password: str) -> str:
+    secret = base64.b64encode(hashlib.sha256((password + SALT).encode()).digest())
+    return base64.b64encode(hashlib.sha256(secret + CHALLENGE.encode()).digest()).decode()
+
+
+class MiniObs:
+    """Just enough obs-websocket v5 for a ``GetVersion`` probe.
+
+    Hello (with auth when ``password`` is set), Identify (closing with 4009 on a wrong answer, as
+    obs-websocket does), then one ``requestStatus`` per request from ``codes``: 100 succeeds, 207 is
+    ``NotReady``. The last code repeats.
+    """
+
+    def __init__(self, codes: Sequence[int], password: str | None = None) -> None:
+        self.codes = list(codes)
+        self.password = password
+        self.requests: list[str] = []
+        self._server: Server | None = None
+
+    async def __aenter__(self) -> "MiniObs":
+        self._server = await serve(self._handle, "127.0.0.1", 0, ping_interval=None)
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        assert self._server is not None
+        self._server.close()
+        await self._server.wait_closed()
+
+    @property
+    def port(self) -> int:
+        assert self._server is not None
+        return int(self._server.sockets[0].getsockname()[1])
+
+    async def _handle(self, ws: ServerConnection) -> None:
+        hello: dict[str, object] = {"obsWebSocketVersion": "5.7.4", "rpcVersion": 1}
+        if self.password is not None:
+            hello["authentication"] = {"challenge": CHALLENGE, "salt": SALT}
+        await ws.send(json.dumps({"op": 0, "d": hello}))
+        identify = json.loads(await ws.recv())["d"]
+        if self.password is not None and identify.get("authentication") != auth_string(self.password):
+            await ws.close(4009, "Authentication failed.")
+            return
+        await ws.send(json.dumps({"op": 2, "d": {"negotiatedRpcVersion": 1}}))
+        async for message in ws:
+            request = json.loads(message)["d"]
+            self.requests.append(request["requestType"])
+            code = self.codes.pop(0) if len(self.codes) > 1 else self.codes[0]
+            response: dict[str, object] = {
+                "requestType": request["requestType"],
+                "requestId": request["requestId"],
+                "requestStatus": {"result": code == 100, "code": code},
+            }
+            if code == 100:
+                response["responseData"] = {"obsVersion": "32.2.2", "availableRequests": ["GetVersion"]}
+            else:
+                response["requestStatus"]["comment"] = "OBS is not ready to perform the request."  # type: ignore[index]
+            await ws.send(json.dumps({"op": 7, "d": response}))
+
+
+async def probe(creds: ObsCredentials, timeout_s: float = 2.0) -> bool:
+    return await asyncio.to_thread(discovery.get_version_succeeds, creds, timeout_s)
+
+
+async def test_the_probe_succeeds_when_get_version_does():
+    async with MiniObs([100]) as obs:
+        assert await probe(ObsCredentials("127.0.0.1", obs.port))
+
+    assert obs.requests == ["GetVersion"]
+
+
+async def test_the_probe_fails_on_not_ready():
+    async with MiniObs([207]) as obs:
+        assert not await probe(ObsCredentials("127.0.0.1", obs.port))
+
+    assert obs.requests == ["GetVersion"]
+
+
+async def test_the_probe_authenticates_with_the_password():
+    async with MiniObs([100], password="s3cretPassw0rd12") as obs:
+        assert await probe(ObsCredentials("127.0.0.1", obs.port, "s3cretPassw0rd12"))
+
+
+@pytest.mark.parametrize("password", ["wrong", None])
+async def test_the_probe_fails_without_the_right_password(password):
+    started = time.monotonic()
+    async with MiniObs([100], password="s3cretPassw0rd12") as obs:
+        assert not await probe(ObsCredentials("127.0.0.1", obs.port, password))
+
+    assert obs.requests == []
+    # The probe closed its socket: the server did not wait out its 10 s close timeout.
+    assert time.monotonic() - started < 5
+
+
+async def test_the_probe_fails_when_nothing_listens():
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]  # closed again before the probe: nothing listens there
+
+    assert not await probe(ObsCredentials("127.0.0.1", port))
+
+
+async def test_the_probe_gives_up_on_a_server_that_never_answers():
+    async def silent(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await reader.read()  # never replies to the websocket handshake
+        writer.close()
+
+    server = await asyncio.start_server(silent, "127.0.0.1", 0)
+    try:
+        port = server.sockets[0].getsockname()[1]
+        started = time.monotonic()
+        assert not await probe(ObsCredentials("127.0.0.1", port), timeout_s=0.3)
+        assert time.monotonic() - started < 5
+    finally:
+        server.close()
+        await server.wait_closed()
+
+
+async def test_the_probe_logs_no_password_and_no_errors(caplog):
+    caplog.set_level(logging.DEBUG)
+    async with MiniObs([207, 100], password="s3cretPassw0rd12") as obs:
+        creds = ObsCredentials("127.0.0.1", obs.port, "s3cretPassw0rd12")
+        assert not await probe(creds)
+        assert await probe(creds)
+        assert not await probe(ObsCredentials("127.0.0.1", obs.port, "wrong"))
+
+    assert "s3cretPassw0rd12" not in caplog.text
+    assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
+
+
+async def test_wait_ready_polls_obs_until_it_has_loaded(tmp_path):
+    async with MiniObs([207, 207, 100], password="s3cretPassw0rd12") as server:
+        write_ws(native_root(), {**FULL, "server_port": server.port})
+        obs = native_linux(tmp_path, sleep=lambda seconds: asyncio.sleep(0))
+
+        assert await obs.wait_ready(timeout_s=10)
+
+    assert server.requests == ["GetVersion"] * 3
