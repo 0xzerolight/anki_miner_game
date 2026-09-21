@@ -18,6 +18,19 @@ Design: [`docs/specs/2026-09-20-anki-miner-game-design.md`](docs/specs/2026-09-2
 copy). Master plan: [`docs/plans/2026-09-21-master-plan.md`](docs/plans/2026-09-21-master-plan.md).
 Progress: [`docs/IMPLEMENTATION_STATUS.md`](docs/IMPLEMENTATION_STATUS.md).
 
+## Repository layout
+
+```
+anki_miner_game/                  repo root
+  CLAUDE.md  LICENSE  README.md  pyproject.toml  uv.lock
+  anki_miner_game/                spec 4.1 packages + paths.py, store.py, runtime/
+  tests/                          unit per package, fakes/, contract/, integration/, fixtures/
+  tools/                          m0/, sync_probe/, obs_transcript_recorder.py, handoff_probe.py
+  scripts/                        health.sh, diff_vendored_matcher.py, bundle_smoke.sh, release_dryrun.sh
+  packaging/  .github/workflows/  docs/
+  .worktrees/  .orchestration/    gitignored
+```
+
 ## Dependency rule (spec 4.1)
 
 ```
@@ -31,7 +44,7 @@ anki_miner_game/
   addons/        bootstrap.py, vad_addon.py, ocr_addon.py
   feed/          ws_server.py, http_server.py, page.html
   gui/           main_window, tray, wizard, game_profile_dialog, settings_dialog, hotkey_win, cli_verbs
-  interfaces/    Protocols: TextSource, RecordClock, ObsGateway, Presenter, ...
+  interfaces/    Protocols: TextSource, RecordClock, ObsGateway, Presenter
   app.py, launch.py
 ```
 
@@ -71,7 +84,8 @@ windows_only"`. It never stops at the first failure, prints `PASS <step>` /
 `FAIL <step>` per step and a `SUMMARY` block, and exits nonzero if any step
 failed. This is the Definition-of-Done gate; never claim a task complete or
 merge on a red or unrun gate. Send output to `<worktree>/gate.log` (never pipe
-through `tail`) and keep the file as evidence.
+through `tail`) and keep the file as evidence. Set
+`PYTEST_XDIST_AUTO_NUM_WORKERS=4` inside worktrees.
 
 ## Interpreter and uv rules
 
@@ -80,8 +94,8 @@ through `tail`) and keep the file as evidence.
 - The `uv` on `PATH` is a plugin shim that rejects `uv pip`; the real binary is
   `/home/light/.local/bin/uv`.
 - Installs happen only in the main checkout, only into `.venv` (dependencies
-  only, via `uv sync --no-install-project`) or `.venv-vad` (the VAD add-on's
-  own pinned environment). The project package itself is never installed;
+  only, via `uv sync --no-install-project`) or `.venv-vad` (T10, from its
+  pinned requirements). The project package itself is never installed;
   `pytest` resolves it through `pythonpath = ["."]` and mypy runs from the
   repo root. Any number of worktrees can gate at once against one shared
   `.venv` because nothing writes into it per-task.
@@ -94,6 +108,8 @@ through `tail`) and keep the file as evidence.
   string, so parallel worktrees gating at once cannot collide.
 - `pytest.importorskip` for `numpy`, `onnxruntime` and `av` in any test that
   needs them — they live only in `.venv-vad`, never this project's `.venv`.
+- `pyproject.toml` carries a mypy override for `numpy`, `onnxruntime` and `av`
+  and for `anki_miner_game/vad/worker/` (T00 added it); keep it.
 - Tests reach no network beyond loopback (`tests/_network_tripwire.py`); mark
   a genuinely networked test `network`, and a real-OBS test `obs_live`.
 - Every top-level `QWidget` a Qt test constructs goes through
