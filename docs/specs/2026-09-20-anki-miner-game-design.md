@@ -323,7 +323,7 @@ One session has exactly one start shift: `START_SHIFT_MS = {"hook": 0, "ocr": -1
   "stopped_at": "2026-10-02T19:31:40Z",
   "obs": {"version": "31.0.2", "websocket": "5.5.4", "profile": "Anki Miner Game",
           "collection": "Anki Miner Game", "output_path": ".../_incoming/2026-10-02 18-04-11.mkv"},
-  "clock": {"kind": "event", "zero_event": "STARTED", "capture_latency_ms": 0,
+  "clock": {"kind": "event", "zero_event": "STARTED", "capture_latency_ms": 10,
             "degraded": false, "drift_samples": [{"at_ms": 0, "output_duration_ms": 0}]},
   "text_mode": "hook",
   "sources_used": ["textractor"],
@@ -363,11 +363,22 @@ Arming switches OBS to the app's profile and scene collection. The switch happen
 never at Start, so Start is a single `StartRecord` with no collection reload in front of it.
 
 1. Refuse if any output is active: `GetStreamStatus`, `GetRecordStatus`, `GetReplayBufferStatus`,
-   `GetVirtualCamStatus`. Banner names the active output.
+   `GetVirtualCamStatus`. Banner names the active output. A 604 answer from the last two means the
+   output is not configured or not installed, so not active. OBS itself switches profile and
+   collection under a live recording, stream or replay buffer and keeps them running (a recording
+   started on the user's profile keeps writing into the user's folder), so this refusal is the only
+   guard (`docs/m0/obs-behaviour.md` item 6).
 2. Read the current profile and collection names; write them to `obs_restore.json`.
 3. `SetCurrentProfile`, wait for `CurrentProfileChanged`. `SetCurrentSceneCollection`, wait for
    `CurrentSceneCollectionChanged`. No other request is sent between a `...Changing` event and its
-   `...Changed` event. Timeout 15 s, then restore and report.
+   `...Changed` event. Timeout 15 s, then restore and report. A switch whose target is already
+   current is skipped: OBS answers it and sends no event. A step completes on its `...Changed`
+   event, never on the answer, whose order against the events is not guaranteed (section 3.3).
+   `CreateProfile` answers before the profile exists and then switches to it with
+   `CurrentProfileChanged` and no `...Changing`, so it too waits for the event. A 207 answer is
+   retried (section 11.2). When `CurrentProfileChanged` arrives and the answer does not follow
+   within a few seconds, OBS is showing its modal restart question (section 11.3): a banner says
+   "OBS is asking to restart" and points at OBS's window (`docs/m0/obs-behaviour.md` items 3-5).
 4. Apply the game profile to the inputs (section 11.3). Connect text sources. State `armed`.
 
 Disarm restores the names from `obs_restore.json` and deletes the file. If the file still exists at
@@ -380,9 +391,20 @@ the app's profile and record directory by construction, whoever pressed the butt
 hotkey or OBS itself). A `STARTED` event in any other state is ignored, so the app never renames a
 file from the user's own setup.
 
+The session keys every record transition on `RecordStateChanged.outputState`, never on
+`outputActive` (a `PAUSED` event carries `outputActive: false`), and tolerates events that arrive
+out of order (section 3.3).
+
 ### 6.3 Reconcile on connect
 
 Run after every connect and reconnect, before any event is trusted.
+
+"Manifest for `outputPath`" means the manifest in `_incoming/` whose `obs.output_path` equals the
+active file's path, read with `GetOutputSettings` on `simple_file_output` or `adv_file_output`
+according to the profile's `[Output] Mode`. `outputBytes` against the file size is no substitute:
+the file on disk trails it by the muxer's buffering, and is 0 bytes 5 s into a recording
+(`docs/m0/obs-behaviour.md` item 8 and section 5). `GetRecordStatus` still reads active for about
+170 ms after `STOPPED`; a `STOPPED` event already received wins over that reading.
 
 | `GetRecordStatus` | App state | Manifest for `outputPath` in `_incoming/` | Action |
 |---|---|---|---|
@@ -399,6 +421,12 @@ Run after every connect and reconnect, before any event is trusted.
 the stop offset set to the last clock reading and the flag `obs_exited`. An `.mkv` survives an OBS
 crash, which is why the profile records to `.mkv`.
 
+R2 confirmed both paths (`docs/m0/obs-behaviour.md` item 12). A clean exit sends `ExitStarted`, then
+OBS closes the connection with 1001 "Server stopping." about 330 ms later, with no `STOPPED`. A
+killed OBS drops the connection with 1006 and sends no `ExitStarted`. The `.mkv` was readable both
+times. After a kill the next launch stops at OBS's modal "OBS Studio Crash Detected" with no
+websocket until the user answers it (section 17). The app never signals OBS itself.
+
 ## 7. Record clock
 
 ```python
@@ -410,10 +438,27 @@ class RecordClock(Protocol):
 ```
 
 `EventClock` (primary). `offset = (t_mono - zero_mono - paused_total) * 1000 + capture_latency_ms`.
-`zero_mono` is the monotonic time of the zero event; pause edges come from the
-`OBS_WEBSOCKET_OUTPUT_PAUSED` and `_RESUMED` events. Which moment is the zero (the `StartRecord`
-response, `STARTING`, or `STARTED`) and the value of `capture_latency_ms` are measured in M0, not
-assumed. The default until then is `STARTED` and 0.
+`zero_mono` is the monotonic time at which the `STARTED` event arrived, and `capture_latency_ms` is
+**10**. M0 measured both against flash timestamps (`docs/m0/clock.md`): with `STARTED` as the zero
+the encoder medians lie within 50 ms of each other (NVENC with lookahead, x264, x264 with
+`rc-lookahead = 60`), under the 100 ms criterion, so one constant ships and there is no calibration
+step. The `StartRecord` response and `STARTING` arrive before the encoder has started, 7-15 ms early
+for x264 and 132-184 ms for NVENC, which would widen the spread to about 183 ms. Against 10 the
+largest residual was 50 ms without overload and 133 ms under encoder overload. Both values are
+Linux measurements, provisional for Windows until H5 (D2).
+
+Pause edges come only from the `OBS_WEBSOCKET_OUTPUT_PAUSED` and `_RESUMED` events. The app never
+sends `PauseRecord`: a pause is whatever OBS reports, whoever caused it. On OBS's default profile
+(Simple output, recording "Same as stream") the recording shares the stream encoder and cannot
+pause; a `PauseRecord` there answers success and nothing happens, no event, no pause. Provisioning
+therefore gives the app's profile a separate recording encoder (section 11.3). With one, the
+frame-aligned pause edges moved offsets after a resume by under 10 ms at the median, inside the
+150 ms bound.
+
+Under encoder overload OBS keeps its frame timeline and repeats the last frame, so the clock does
+not drift; a flash rendered while the encoder was behind is simply missing from the file. A line
+can then reach the subtitle before its picture reaches the video. Up to at least 14 % skipped
+frames that stayed inside 150 ms; nothing in the clock can correct it.
 
 `OutputDurationClock` (fallback). Anchors on `(monotonic midpoint of the request round trip,
 GetRecordStatus.outputDuration + lag)` and re-anchors every 10 s. `outputDuration` counts frames
@@ -425,8 +470,11 @@ the fallback back within the 150 ms bound. A session with no such sample has no 
 cues may start seconds early, and a banner says so. The fallback is used only when reconcile says
 the event history is incomplete (section 6.3).
 
-Rules for both: offsets are clamped to be non-negative and non-decreasing; a line arriving while
-paused is dropped and counted; the hooker's own `time` field is ignored, since mixing wall-clock
+Rules for both: line offsets are clamped to be non-negative and non-decreasing; a stop reading or a
+drift sample is never below the latest line offset but does not move that clamp; an
+`outputDuration` anchor whose round-trip midpoint falls before the latest pause edge is carried
+forward by the time the recording ran in between (`docs/m0/wave-1-amendments.md` item 7); a line
+arriving while paused is dropped and counted; the hooker's own `time` field is ignored, since mixing wall-clock
 with monotonic invites skew for a gain of milliseconds on localhost. `outputDuration` is sampled
 while the `EventClock` is in use and the recording runs unpaused: at start, 10 s after start, at
 each resume and at stop. Each sample is written to the manifest's `clock.drift_samples`, and the
@@ -435,7 +483,17 @@ fallback takes its lag from them.
 File splitting is off in the app's profile. If `RecordFileChanged` fires anyway, the session is
 finalised against the first file, flagged `split_unsupported`, and a banner says later lines were
 not subtitled. The event carries only a path and the real split lands on a keyframe, so a rebase
-would be a guess. Not in v1.
+would be a guess. Not in v1. R2 saw `RecordFileChanged` 5.6 s after the split request, and after it
+`STOPPED.outputPath`, `StopRecord.outputPath` and `GetOutputSettings` all still name the first file;
+only `RecordFileChanged` names the second, so the session never reads `STOPPED.outputPath` as the
+last file (`docs/m0/obs-behaviour.md` item 10). With several `stop` records in the journal the
+first wins (section 10.3).
+
+The stop offset is the clock reading at the receipt of `STOPPING`, not of `STOPPED`. The video
+ends at `StopRecord` / `STOPPING` within one frame, while `STOPPED` follows 560-620 ms later
+(Simple, NVENC) or about 1.3 s later (Advanced, x264); stopping on `STOPPED` would let the last cue
+run past the end of the video (`docs/m0/obs-behaviour.md` item 9). When no `STOPPING` was seen
+(a reconnect), the rules of sections 6.3 and 6.4 apply.
 
 ## 8. Text intake
 
@@ -578,6 +636,9 @@ The journal is one JSON object per line, flushed after each write:
 {"t":"resume","offset_ms":61200}
 {"t":"stop","offset_ms":5248120}
 ```
+
+The `stop` record's offset is the reading at `STOPPING` (section 7). `pause` and `resume` records
+come only from OBS's `PAUSED` and `RESUMED` events.
 
 Every accepted line is durable the moment it arrives. Cue ends are not journalled; they are a pure
 function of the journal (section 9). This replaces GSM's approach of appending SRT cues one line
