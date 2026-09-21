@@ -42,8 +42,8 @@ from tests.obs.fake_obs import FakeObs, Sleeps
 
 FIXTURES = Path(__file__).parents[1] / "fixtures" / "obs_provision"
 
-READ_PARAMETERS = frozenset(CONTAINER_KEYS + OFF_KEYS)
-"""The ``basic.ini`` keys provisioning reads; the fake models no other key's default."""
+READ_PARAMETERS = frozenset(CONTAINER_KEYS + OFF_KEYS + (("Output", "Mode"), ("SimpleOutput", "RecQuality")))
+"""The ``basic.ini`` keys the fake models that the recorded run reads; it models no other key's default."""
 
 SETTINGS_EVENTS = ("InputCreated", "InputSettingsChanged")
 
@@ -196,8 +196,9 @@ async def test_fake_obs_answers_the_r1_capture_setup_as_obs_did():
     ]
 
 
-async def test_the_profile_r2_wrote_on_a_real_obs_needs_only_the_app_record_directory(tmp_path):
-    # R2 wrote the rows provisioning writes, at the default 720p30; the output root differs.
+async def test_the_profile_r2_wrote_on_a_real_obs_needs_the_app_record_directory_and_its_own_encoder(tmp_path):
+    # R2 wrote the rows provisioning writes, at the default 720p30, but left the recording sharing
+    # the stream encoder (it read back RecQuality=Stream); the output root differs.
     obs = r2_rig()
     await replay(obs, load("r2-provision.jsonl"))
     obs.reset_calls()
@@ -207,5 +208,7 @@ async def test_the_profile_r2_wrote_on_a_real_obs_needs_only_the_app_record_dire
         AppConfig(output_root=str(tmp_path), recording=RecordingSettings(720, 30))
     )
 
-    assert result == ProvisionResult(changed=True, needs_restart=False)
-    assert obs.mutating() == ["SetRecordDirectory"]
+    # Started on the app's profile: nowhere to switch to for the re-activation.
+    assert result == ProvisionResult(changed=True, needs_restart=True)
+    assert obs.mutating() == ["SetRecordDirectory", "SetProfileParameter", "SetProfileParameter"]
+    assert obs.recording_pausable is False

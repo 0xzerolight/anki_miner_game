@@ -7,8 +7,8 @@ obs-websocket 5.7.4 uses (``docs/m0/source-findings.md``; ``RequestHandler_Confi
 ``RequestHandler_Inputs.cpp`` at ``obs-websocket@1ef34bf4``):
 
 - ``GetProfileParameter`` returns the effective value when the key has a default, else the user
-  value, else ``null``; ``RecFormat2`` defaults to ``hybrid_mp4``, ``[Audio] SampleRate`` to
-  ``48000`` and ``ChannelSetup`` to ``Stereo``.
+  value, else ``null``; the defaults are OBS's (``PROFILE_DEFAULTS``,
+  ``obs-studio@ba2f32bd frontend/widgets/OBSBasic.cpp:743-778, 871-872``).
 - A profile switch between profiles whose audio values differ is OBS's modal "Restart" question
   (``docs/m0/obs-behaviour.md`` item 3): the running profile's effective values against the values
   saved in the target's file, skipping a key the target lacks, so ``CreateProfile`` never asks. OBS
@@ -16,7 +16,10 @@ obs-websocket 5.7.4 uses (``docs/m0/source-findings.md``; ``RequestHandler_Confi
   ``restart_questions`` and completes the switch, as if the user answered "No".
 - The recording format is fixed when OBS builds its output handler, at launch and at each profile
   activation (source findings section 2, R2 item 2): ``recording_format`` is the running profile's
-  ``[SimpleOutput] RecFormat2`` as it was when the profile was last activated.
+  ``[SimpleOutput] RecFormat2`` as it was when the profile was last activated, and
+  ``recording_pausable`` whether the recording had its own encoder then, so that OBS can pause it
+  (``OBSBasic::UpdateIsRecordingPausable``, ``frontend/widgets/OBSBasic_Recording.cpp:371-392``;
+  Advanced mode's FFmpeg recording type is not modelled).
 - Handlers given to ``subscribe`` get the switch events: ``CurrentProfileChanging`` and
   ``CurrentProfileChanged``, ``CurrentSceneCollectionChanging`` and ``CurrentSceneCollectionChanged``,
   each ``...Changing`` naming the old profile or collection and each ``...Changed`` the new one, in
@@ -60,6 +63,10 @@ RESOURCE_ALREADY_EXISTS = 601
 INVALID_INPUT_KIND = 605
 
 PROFILE_DEFAULTS = {
+    ("Output", "Mode"): "Simple",
+    ("SimpleOutput", "RecQuality"): "Stream",
+    ("AdvOut", "Encoder"): "obs_x264",
+    ("AdvOut", "RecEncoder"): "none",
     ("SimpleOutput", "RecFormat2"): "hybrid_mp4",
     ("AdvOut", "RecFormat2"): "hybrid_mp4",
     ("Audio", "SampleRate"): "48000",
@@ -152,6 +159,7 @@ class FakeObs:
         self.restart_questions: list[tuple[str, str]] = []
         """``(from, to)`` of every profile switch at which OBS asked to restart."""
         self.recording_format = self._effective("Untitled", ("SimpleOutput", "RecFormat2"))
+        self.recording_pausable = self._pausable("Untitled")
         self._base_size = base_size
         self._requests = 0
 
@@ -237,6 +245,12 @@ class FakeObs:
                 self.profiles[left].setdefault(key, value)
         self.current_profile = target
         self.recording_format = self._effective(target, ("SimpleOutput", "RecFormat2"))
+        self.recording_pausable = self._pausable(target)
+
+    def _pausable(self, profile: str) -> bool:
+        if (self._effective(profile, ("Output", "Mode")) or "").casefold() == "advanced":
+            return (self._effective(profile, ("AdvOut", "RecEncoder")) or "").casefold() != "none"
+        return self._effective(profile, ("SimpleOutput", "RecQuality")) != "Stream"
 
     def _land_profile(self, target: str) -> None:
         """OBS switches to the profile ``CreateProfile`` made (``OBSBasic::CreateNewProfile``)."""

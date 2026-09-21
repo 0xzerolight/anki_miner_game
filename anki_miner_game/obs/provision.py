@@ -97,6 +97,17 @@ activated again (``docs/m0/obs-behaviour.md`` item 2). After writing one of them
 switches to the profile it came from and back; OBS is never restarted. Every other row applies at
 the next ``StartRecord``."""
 
+SIMPLE_REC_QUALITY: Final = "Small"
+"""``[SimpleOutput] RecQuality`` written in place of ``Stream`` ("Same as stream", OBS's default), with
+which the recording shares the stream encoder and OBS cannot pause it: ``PauseRecord`` then does
+nothing and no ``PAUSED`` event comes (``docs/m0/clock.md`` "Pause", ``docs/m0/obs-behaviour.md``
+item 7). ``Small`` gives it its own encoder, OBS's default one for that quality
+(``[SimpleOutput] RecEncoder`` is left alone); R2 recorded ``PAUSED`` and ``RESUMED`` with it
+(``tests/fixtures/obs_transcripts/pause_resume.jsonl``)."""
+
+ADV_STREAM_ENCODER_DEFAULT: Final = "obs_x264"
+"""OBS's default ``[AdvOut] Encoder`` (``obs-studio@ba2f32bd frontend/widgets/OBSBasic.cpp:770``)."""
+
 AUDIO_KEYS: Final = (("Audio", "SampleRate"), ("Audio", "ChannelSetup"))
 """Copied from the profile provisioning starts on into the app's profile: a profile switch between
 profiles where they differ stops at OBS's modal "Restart" question, and the switch's answer never
@@ -310,11 +321,16 @@ class ObsProvisioner:
     async def ensure_profile(self, cfg: AppConfig) -> ProvisionResult:
         """Make the app's profile current (creating it when missing) and apply spec 11.3's profile rows.
 
-        Started on another profile (the user's), it copies that profile's ``AUDIO_KEYS`` into the
-        app's, and after writing any of ``REACTIVATE_KEYS`` switches to it and back so OBS rebuilds
-        its outputs. Started on the app's profile it has nowhere to switch to, so such a write sets
-        ``needs_restart``. The switch into the app's profile is not undone: the caller restores the
-        user's profile itself.
+        Besides spec 11.3's rows the recording gets its own encoder, so that OBS can pause it
+        (``_ensure_own_recording_encoder``); every other encoder setting stays OBS's. Started on
+        another profile (the user's), it copies that profile's ``AUDIO_KEYS`` into the app's, and
+        after writing any of ``REACTIVATE_KEYS`` switches to it and back so OBS rebuilds its outputs.
+        Started on the app's profile it has nowhere to switch to, so such a write sets
+        ``needs_restart``: OBS applies it at the next profile activation (a disarm and arm) or
+        restart, and the app never restarts OBS.
+
+        It switches OBS to the app's profile and never back: the caller restores the user's profile,
+        the session actor at disarm (T15) and the wizard right after provisioning (T21).
         """
         listing = await self._request("GetProfileList")
         home = listing.get("currentProfileName")
@@ -337,6 +353,7 @@ class ObsProvisioner:
             if _config_bool(await self._profile_parameter(*key)):
                 await self._set_profile_parameter(*key, "false")
                 written.append(key)
+        written += await self._ensure_own_recording_encoder()
         needs_restart = False
         if REACTIVATE_KEYS.intersection(written):
             if home is None:
@@ -580,6 +597,28 @@ class ObsProvisioner:
         # CreateProfile answers before the profile exists; OBS then switches to it (source findings 8).
         await self._switch_profile("SetCurrentProfile" if exists else "CreateProfile", OBS_PROFILE_NAME)
         return True
+
+    async def _ensure_own_recording_encoder(self) -> list[tuple[str, str]]:
+        """Give the recording its own encoder so that OBS can pause it; return the keys written.
+
+        The app never sends ``PauseRecord``: a pause made in OBS reaches it as ``PAUSED`` and
+        ``RESUMED``, which OBS sends only for a recording with its own encoder (Simple mode: a
+        ``RecQuality`` other than ``Stream``; Advanced mode: a ``RecEncoder`` other than ``none``,
+        ``obs-studio@ba2f32bd frontend/widgets/OBSBasic_Recording.cpp:371-392``). Both modes are set,
+        whichever is active, as the container is, so a mode changed later in OBS's settings still
+        pauses. Advanced mode records with its own instance of the stream encoder's kind
+        (``[AdvOut] Encoder``); bitrate and every other encoder setting stay OBS's.
+        """
+        written: list[tuple[str, str]] = []
+        if await self._profile_parameter("SimpleOutput", "RecQuality") in (None, "Stream"):
+            await self._set_profile_parameter("SimpleOutput", "RecQuality", SIMPLE_REC_QUALITY)
+            written.append(("SimpleOutput", "RecQuality"))
+        encoder = await self._profile_parameter("AdvOut", "RecEncoder")
+        if encoder is None or encoder.casefold() == "none":  # OBS compares case-insensitively
+            stream = await self._profile_parameter("AdvOut", "Encoder") or ADV_STREAM_ENCODER_DEFAULT
+            await self._set_profile_parameter("AdvOut", "RecEncoder", stream)
+            written.append(("AdvOut", "RecEncoder"))
+        return written
 
     async def _ensure_record_directory(self, cfg: AppConfig) -> bool:
         wanted = str(paths.incoming_dir(cfg))

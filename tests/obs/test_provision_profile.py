@@ -329,6 +329,104 @@ async def test_a_container_change_with_the_app_profile_already_current_needs_a_r
     assert switches(obs) == []
 
 
+# The recording's own encoder (docs/m0/clock.md "Pause", docs/m0/obs-behaviour.md item 7) ---------
+
+
+def set_param(obs: FakeObs, section: str, key: str, value: str | None) -> None:
+    """Set a key of the app's profile; ``None`` removes it, leaving OBS's default."""
+    values = obs.profiles[OBS_PROFILE_NAME]
+    if value is None:
+        values.pop((section, key), None)
+    else:
+        values[(section, key)] = value
+
+
+def writes(obs: FakeObs) -> list[tuple[str, str, str]]:
+    return [
+        (f["parameterCategory"], f["parameterName"], f["parameterValue"])
+        for name, f in obs.calls
+        if name == "SetProfileParameter"
+    ]
+
+
+async def rerun_from_the_users_profile(obs: FakeObs, cfg: AppConfig, **app_values: str | None) -> ProvisionResult:
+    """Provision, change the app's profile (``Section__Key=value``), disarm, reset the calls and provision again."""
+    provisioner, _ = make(obs)
+    await provisioner.ensure_profile(cfg)
+    for name, value in app_values.items():
+        set_param(obs, *name.split("__"), value)
+    await obs.request("SetCurrentProfile", profileName="Untitled")
+    obs.reset_calls()
+    return await provisioner.ensure_profile(cfg)
+
+
+async def test_first_run_gives_the_recording_its_own_encoder_so_obs_can_pause_it(tmp_path):
+    obs = FakeObs(input_kinds=LINUX_X11_KINDS)
+    provisioner, _ = make(obs)
+    assert obs.recording_pausable is False  # OBS's default profile: the recording shares the stream encoder
+
+    await provisioner.ensure_profile(make_cfg(tmp_path))
+
+    assert param(obs, "SimpleOutput", "RecQuality") == "Small"
+    assert param(obs, "AdvOut", "RecEncoder") == "obs_x264"  # OBS's default stream encoder in Advanced mode
+    # The encoder for that quality and every encoder setting stay OBS's.
+    assert param(obs, "SimpleOutput", "RecEncoder") is None
+    assert obs.recording_pausable is True
+    assert switches(obs) == ["Untitled", OBS_PROFILE_NAME]  # one re-activation for every such row
+
+
+@pytest.mark.parametrize(
+    ("quality", "written"),
+    [(None, True), ("Stream", True), ("Small", False), ("HQ", False), ("Lossless", False)],
+)
+async def test_a_recording_quality_sharing_the_stream_encoder_is_set_to_small(tmp_path, quality, written):
+    obs = FakeObs(input_kinds=LINUX_X11_KINDS)
+
+    result = await rerun_from_the_users_profile(obs, make_cfg(tmp_path), SimpleOutput__RecQuality=quality)
+
+    assert writes(obs) == ([("SimpleOutput", "RecQuality", "Small")] if written else [])
+    assert switches(obs) == [OBS_PROFILE_NAME] + (["Untitled", OBS_PROFILE_NAME] if written else [])
+    assert result == ProvisionResult(changed=True, needs_restart=False)
+    assert obs.recording_pausable is True
+
+
+@pytest.mark.parametrize(
+    ("encoder", "written"),
+    [(None, True), ("none", True), ("NONE", True), ("jim_nvenc", False), ("obs_x264", False)],
+)
+async def test_an_advanced_recording_sharing_the_stream_encoder_gets_its_own_of_the_same_kind(
+    tmp_path, encoder, written
+):
+    obs = FakeObs(input_kinds=LINUX_X11_KINDS)
+
+    await rerun_from_the_users_profile(
+        obs,
+        make_cfg(tmp_path),
+        Output__Mode="Advanced",
+        AdvOut__Encoder="obs_nvenc_h264_tex",
+        AdvOut__RecEncoder=encoder,
+    )
+
+    assert writes(obs) == ([("AdvOut", "RecEncoder", "obs_nvenc_h264_tex")] if written else [])
+    assert obs.recording_pausable is True
+
+
+async def test_a_shared_encoder_with_the_app_profile_already_current_needs_a_restart(tmp_path):
+    """Nowhere to switch to: OBS pauses the recording from the next disarm and arm, or an OBS restart."""
+    obs = FakeObs(input_kinds=LINUX_X11_KINDS)
+    provisioner, _ = make(obs)
+    cfg = make_cfg(tmp_path)
+    await provisioner.ensure_profile(cfg)
+    set_param(obs, "SimpleOutput", "RecQuality", "Stream")
+    obs.reset_calls()
+
+    result = await provisioner.ensure_profile(cfg)
+
+    assert result == ProvisionResult(changed=True, needs_restart=True)
+    assert writes(obs) == [("SimpleOutput", "RecQuality", "Small")]
+    assert switches(obs) == []
+
+
 @pytest.mark.parametrize(
     ("value", "written"), [("true", True), ("1", True), ("5", True), ("false", False), ("0", False)]
 )
