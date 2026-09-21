@@ -16,8 +16,9 @@ from anki_miner_game.models.obs import (
     ObsRequestError,
     ObsUnsupportedError,
 )
+from anki_miner_game.obs import client as client_module
 from anki_miner_game.obs.client import EVENT_SUBSCRIPTIONS, NOT_READY_RETRY_S, NOT_READY_TIMEOUT_S, ObsClient
-from tests.fakes.fake_obs_server import NOT_READY_COMMENT, NOT_READY_REPLY, Reply, version_data
+from tests.fakes.fake_obs_server import NOT_READY_COMMENT, NOT_READY_REPLY, FakeObsServer, Reply, version_data
 from tests.obs.helpers import CONNECTED, LOST, PASSWORD, Credentials, FakeClock, ThreadClock, wait_until
 from tests.test_contracts import _assert_conforms
 
@@ -482,3 +483,222 @@ async def test_the_gateway_connects_again_after_close(obs_server, make_gateway):
 
     assert events.names() == [CONNECTED, CONNECTED]
     assert await gateway.request("GetRecordStatus") == {}
+
+
+# --- connection loss and reconnect ---------------------------------------------------------------
+
+
+async def test_a_failed_first_connect_starts_no_reconnecting(obs_server, make_gateway):
+    obs_server.refuse_connections = True
+    clock = FakeClock()
+    gateway, _ = make_gateway(clock=clock)
+    with pytest.raises(ObsConnectError):
+        await gateway.connect()
+
+    await asyncio.sleep(0.1)
+
+    assert obs_server.handshakes == 1
+    assert clock.backoffs() == []
+
+
+async def test_the_credentials_are_read_again_at_every_connect(obs_server, make_gateway):
+    """A reconnect goes wherever OBS's config says now: here a second OBS on another port."""
+    async with FakeObsServer(password=PASSWORD) as other:
+        target = {"server": obs_server}
+
+        def credentials() -> ObsCredentials:
+            return ObsCredentials("127.0.0.1", target["server"].port, PASSWORD)
+
+        gateway, events = make_gateway(credentials=credentials)
+        await gateway.connect()
+        target["server"] = other
+
+        await obs_server.drop_clients()
+        await wait_until(lambda: events.count(CONNECTED) == 2)
+
+        assert other.client_count == 2
+        assert await gateway.request("GetRecordStatus") == {}
+        assert other.request_types() == ["GetVersion", "GetRecordStatus"]
+        await gateway.close()
+
+
+async def test_a_password_refused_while_reconnecting_surfaces_through_connect(obs_server, make_gateway):
+    """Decision 2: the actor's banner comes from connect(); request() never raises a stale ObsAuthError."""
+    clock = FakeClock()
+    gateway, events = make_gateway(clock=clock)
+    await gateway.connect()
+    obs_server.password = "changed-in-obs"
+
+    await obs_server.drop_clients()
+    await wait_until(lambda: len(clock.backoffs()) >= 2)  # the first attempt, password read twice, is over
+
+    with pytest.raises(ObsConnectError) as raised:
+        await gateway.request("GetRecordStatus")
+    assert type(raised.value) is ObsConnectError
+    with pytest.raises(ObsAuthError):
+        await gateway.connect()
+
+    obs_server.password = PASSWORD
+    await wait_until(lambda: events.count(CONNECTED) == 2)
+    assert await gateway.request("GetRecordStatus") == {}
+
+
+async def test_a_request_obs_never_answers_times_out_and_the_gateway_reconnects(obs_server, make_gateway, monkeypatch):
+    """R2 item 3: OBS's restart question holds the ``SetCurrentProfile`` answer back for good."""
+    monkeypatch.setattr(client_module, "REQUEST_TIMEOUT_S", 0.2)
+    obs_server.stall("SetCurrentProfile")
+    gateway, events = make_gateway()
+    await gateway.connect()
+
+    with pytest.raises(ObsConnectError, match="did not answer SetCurrentProfile within 0.2 s"):
+        async with asyncio.timeout(5.0):  # never hangs
+            await gateway.request("SetCurrentProfile", profileName="Anki Miner Game")
+
+    await wait_until(lambda: events.names() == [CONNECTED, LOST, CONNECTED])
+    assert await gateway.request("GetRecordStatus") == {}
+
+
+async def test_a_request_cancelled_after_it_was_sent_drops_the_connection(obs_server, make_gateway):
+    """Decision 4: T15 gives a switch 15 s (spec 6.2 step 3); OBS's late answer must not reach the next request."""
+    obs_server.stall("SetCurrentProfile")
+    gateway, events = make_gateway()
+    await gateway.connect()
+
+    with pytest.raises(TimeoutError):
+        async with asyncio.timeout(0.2):
+            await gateway.request("SetCurrentProfile", profileName="Anki Miner Game")
+
+    await wait_until(lambda: events.names() == [CONNECTED, LOST, CONNECTED])
+    obs_server.set_reply("GetRecordStatus", Reply({"outputActive": True}))
+    assert await gateway.request("GetRecordStatus") == {"outputActive": True}
+
+
+async def test_a_request_cancelled_before_it_was_sent_keeps_the_connection(obs_server, make_gateway):
+    obs_server.stall("SetCurrentProfile")
+    gateway, events = make_gateway()
+    await gateway.connect()
+    stalled = asyncio.create_task(gateway.request("SetCurrentProfile", profileName="Anki Miner Game"))
+    await wait_until(lambda: obs_server.request_types() == ["GetVersion", "SetCurrentProfile"])
+
+    with pytest.raises(TimeoutError):
+        async with asyncio.timeout(0.2):
+            await gateway.request("GetRecordStatus")  # queued behind the stalled request, never sent
+
+    assert events.names() == [CONNECTED]
+    assert not stalled.done()
+    await gateway.close()
+    with pytest.raises(ObsConnectError):
+        await stalled
+
+
+@pytest.mark.parametrize(("code", "reason"), [(None, ""), (1001, "Server stopping.")], ids=["vanished", "obs-exit"])
+async def test_a_dropped_connection_is_announced_and_reconnected(obs_server, make_gateway, code, reason):
+    clock = FakeClock()
+    gateway, events = make_gateway(clock=clock)
+    await gateway.connect()
+
+    await obs_server.drop_clients(code, reason)
+    await wait_until(lambda: events.count(CONNECTED) == 2)
+
+    assert events.names() == [CONNECTED, LOST, CONNECTED]
+    assert clock.backoffs() == [1.0]
+    assert await gateway.request("GetRecordStatus") == {}
+
+
+@pytest.mark.parametrize(("code", "reason"), [(None, ""), (1001, "Server stopping.")], ids=["vanished", "obs-exit"])
+async def test_a_lost_connection_releases_both_sockets(obs_server, make_gateway, ws_sockets, code, reason):
+    """The idle request socket never reads OBS's close frame; nothing but the gateway would close it."""
+    gateway, events = make_gateway(clock=FakeClock(park_from=1.0))
+    await gateway.connect()
+    lost = list(ws_sockets)
+
+    await obs_server.drop_clients(code, reason)
+    await wait_until(lambda: events.names() == [CONNECTED, LOST])
+
+    await wait_until(lambda: [sock.fileno() for sock in lost] == [-1, -1])
+
+
+async def test_reconnect_backs_off_1_2_5_10_then_10_seconds(obs_server, make_gateway):
+    clock = FakeClock()
+    credentials = Credentials(obs_server)
+    gateway, events = make_gateway(credentials=credentials, clock=clock)
+    await gateway.connect()
+    obs_server.refuse_connections = True
+
+    await obs_server.drop_clients()
+    await wait_until(lambda: len(clock.backoffs()) >= 6)
+    obs_server.refuse_connections = False
+    await wait_until(lambda: events.count(CONNECTED) == 2)
+
+    assert clock.backoffs()[:6] == [1.0, 2.0, 5.0, 10.0, 10.0, 10.0]
+    assert credentials.calls == len(clock.backoffs()) + 1
+
+
+async def test_requests_fail_fast_while_reconnecting(obs_server, make_gateway):
+    clock = FakeClock(park_from=1.0)
+    gateway, events = make_gateway(clock=clock)
+    await gateway.connect()
+
+    await obs_server.drop_clients()
+    await wait_until(lambda: events.names() == [CONNECTED, LOST])
+
+    with pytest.raises(ObsConnectError) as raised:
+        await gateway.request("GetRecordStatus")
+    assert type(raised.value) is ObsConnectError
+
+    clock.release()
+    await wait_until(lambda: events.count(CONNECTED) == 2)
+
+
+async def test_connect_during_the_backoff_connects_at_once(obs_server, make_gateway):
+    clock = FakeClock(park_from=1.0)
+    gateway, events = make_gateway(clock=clock)
+    await gateway.connect()
+    await obs_server.drop_clients()
+    await wait_until(lambda: events.names() == [CONNECTED, LOST])
+
+    await gateway.connect()
+    clock.release()
+    await asyncio.sleep(0.1)
+
+    assert events.names() == [CONNECTED, LOST, CONNECTED]
+    assert obs_server.client_count == 2
+
+
+async def test_close_during_reconnect_attempts_leaves_nothing_open(obs_server, make_gateway):
+    gateway, events = make_gateway()
+    await gateway.connect()
+    obs_server.set_reply("GetVersion", NOT_READY_REPLY)
+
+    await obs_server.drop_clients()
+    await wait_until(lambda: obs_server.request_types().count("GetVersion") >= 3)
+    await gateway.close()
+
+    await obs_server.wait_for_client_count(0)
+    assert LOST in events.names() and events.count(CONNECTED) == 1
+
+
+async def test_close_while_a_reconnect_is_opening_leaves_nothing_open(obs_server, make_gateway, monkeypatch):
+    gateway, events = make_gateway()
+    await gateway.connect()
+    entered, release, opened = threading.Event(), threading.Event(), threading.Event()
+    real_open = client_module._Link.open
+
+    def slow_open(link, *args):
+        entered.set()
+        release.wait(5.0)
+        real_open(link, *args)
+        opened.set()
+
+    monkeypatch.setattr(client_module._Link, "open", slow_open)
+    await obs_server.drop_clients()
+    await wait_until(entered.is_set)
+
+    closing = asyncio.create_task(gateway.close())
+    await asyncio.sleep(0.05)
+    release.set()
+    await closing
+    await wait_until(opened.is_set)
+
+    await obs_server.wait_for_client_count(0)
+    assert events.names() == [CONNECTED, LOST]

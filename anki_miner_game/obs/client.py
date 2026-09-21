@@ -33,18 +33,19 @@ import socket
 import threading
 import time
 from collections.abc import Awaitable, Callable, Mapping
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from functools import partial
 from typing import Any, Final, NoReturn, TypeVar
 
 import obsws_python as obsws
-from obsws_python.error import OBSSDKError
+from obsws_python.error import OBSSDKError, OBSSDKTimeoutError
 
 from anki_miner_game.models.messages import ObsEvent
 from anki_miner_game.models.obs import (
     ObsAuthError,
     ObsConnectError,
     ObsCredentials,
+    ObsError,
     ObsEventName,
     ObsInfo,
     ObsRequestError,
@@ -65,6 +66,8 @@ REQUEST_TIMEOUT_S: Final = 20.0
 """Socket timeout for connecting and for each answer; a request past it drops the connection."""
 
 NOT_READY: Final = 207
+BACKOFF_S: Final = (1.0, 2.0, 5.0, 10.0)
+"""Waits before successive reconnect attempts; the last one repeats (the text sources' schedule)."""
 COLLECTION_POLL_S: Final = 0.05
 """How often a waiting ``request`` checks whether the scene collection change is over."""
 JOIN_TIMEOUT_S: Final = 2.0
@@ -109,6 +112,7 @@ class ObsClient:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._executor: ThreadPoolExecutor | None = None
         self._connect_lock = asyncio.Lock()
+        self._reconnect_task: asyncio.Task[None] | None = None
         self._tasks: set[asyncio.Task[None]] = set()
 
     # ObsGateway
@@ -120,7 +124,7 @@ class ObsClient:
         up; nothing stays open), ``ObsAuthError`` (the password was refused
         twice, the credentials read again in between), ``ObsConfigError`` (from ``credentials``),
         ``ObsUnsupportedError`` (a required request is missing) or ``ObsRequestError`` (207 past
-        the timeout).
+        the timeout). A failed ``connect`` starts no reconnecting.
         """
         self._loop = asyncio.get_running_loop()
         self._closed = False
@@ -147,6 +151,11 @@ class ObsClient:
     async def close(self) -> None:
         """Disconnect and stop reconnecting; no ``_ConnectionLost`` follows. ``connect`` may be called again."""
         self._closed = True
+        task, self._reconnect_task = self._reconnect_task, None
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
         link, self._link = self._link, None
         if link is not None:
             with self._lock:
@@ -187,7 +196,14 @@ class ObsClient:
     async def _open(self) -> "_Link":
         credentials = await self._run(self._credentials)
         link = _Link()
-        await self._run(link.open, credentials, partial(self._on_event, link), partial(self._on_end, link))
+        opening = self._run(link.open, credentials, partial(self._on_event, link), partial(self._on_end, link))
+        try:
+            await asyncio.shield(opening)
+        except asyncio.CancelledError:  # close() during a reconnect: the worker still finishes opening
+            with contextlib.suppress(Exception):
+                await opening
+            await self._teardown(link)
+            raise
         return link
 
     async def _check_version(self, link: "_Link") -> ObsInfo:
@@ -242,8 +258,18 @@ class ObsClient:
     async def _send(self, link: "_Link", name: str, fields: Mapping[str, Any]) -> dict[str, Any]:
         if link.lost or link.closed:
             raise ObsConnectError("not connected to OBS")
+        job = self._submit(_blocking_send, link.req, name, dict(fields))
         try:
-            return await self._run(_blocking_send, link.req, name, dict(fields))
+            return await asyncio.wrap_future(job)
+        except asyncio.CancelledError:
+            if not job.cancel():  # already sent: OBS's answer would be read as the next request's
+                self._lose(link, f"{name} was cancelled before OBS answered")
+            raise
+        except OBSSDKTimeoutError as exc:  # e.g. held back by a modal dialog in OBS (R2 item 3)
+            self._lose(link, f"{name}: no answer within {REQUEST_TIMEOUT_S:g} s")
+            raise ObsConnectError(
+                f"OBS did not answer {name} within {REQUEST_TIMEOUT_S:g} s; dropped the connection"
+            ) from exc
         except Exception as exc:
             self._lose(link, f"{name}: {type(exc).__name__}: {exc}")
             raise ObsConnectError(f"lost the connection to OBS during {name}") from exc
@@ -292,12 +318,32 @@ class ObsClient:
             except Exception:
                 logger.exception("an OBS event handler failed on %s", event.name)
 
-    # after a loss (on the loop)
+    # reconnecting (on the loop)
 
     def _after_loss(self, link: "_Link") -> None:
         if self._link is link:
             self._link = None
         self._spawn(self._teardown(link))
+        if not self._closed and (self._reconnect_task is None or self._reconnect_task.done()):
+            self._reconnect_task = asyncio.get_running_loop().create_task(self._reconnect())
+
+    async def _reconnect(self) -> None:
+        attempt = 0
+        while True:
+            await self._sleep(BACKOFF_S[min(attempt, len(BACKOFF_S) - 1)])
+            attempt += 1
+            async with self._connect_lock:
+                if self._closed or (self._link is not None and not self._link.lost):
+                    return
+                try:
+                    await self._connect_once()
+                except ObsError as exc:
+                    logger.info("reconnecting to OBS failed: %s", exc)
+                    continue
+                except Exception:
+                    logger.exception("reconnecting to OBS failed")
+                    continue
+            return
 
     async def _teardown(self, link: "_Link") -> None:
         link.abort()  # wakes a request blocked on this connection
@@ -309,11 +355,15 @@ class ObsClient:
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
-    def _run(self, fn: Callable[..., T], *args: Any) -> "asyncio.Future[T]":
-        """Run blocking obsws-python work on the gateway's one worker thread."""
+    def _submit(self, fn: Callable[..., T], *args: Any) -> "Future[T]":
+        """Queue blocking obsws-python work on the gateway's one worker thread."""
         if self._executor is None:
             self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="obs-gateway")
-        return asyncio.get_running_loop().run_in_executor(self._executor, fn, *args)
+        return self._executor.submit(fn, *args)
+
+    def _run(self, fn: Callable[..., T], *args: Any) -> "asyncio.Future[T]":
+        """``_submit``, awaitable from the loop (what ``run_in_executor`` does)."""
+        return asyncio.wrap_future(self._submit(fn, *args))
 
 
 class _AuthRefusedError(Exception):
