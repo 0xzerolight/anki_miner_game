@@ -46,6 +46,7 @@ from anki_miner_game.models.messages import (
     StateChanged,
     UserCommand,
 )
+from anki_miner_game.models.obs import OutputState
 from anki_miner_game.models.profile import GameProfile, TextMode
 from anki_miner_game.obs.client import ObsClient
 from anki_miner_game.obs.discovery import LocalObsDiscovery
@@ -182,6 +183,27 @@ def test_accepted_lines_are_broadcast_on_the_feed(rig):
         rig.wait(lambda: app.feed is not None and app.feed.client_count == 1)
         rig.sources[0].line("こんにちは")
         assert client.recv(timeout=5) == "こんにちは"
+
+
+def test_a_line_held_for_an_auto_start_reaches_the_feed_once(rig):
+    """The actor publishes held lines again with their offsets at STARTED; the feed has sent them already."""
+    app = rig.start()
+    assert app.feed is not None
+    rig.arm()
+    with connect(f"ws://127.0.0.1:{app.feed.ws_port}", proxy=None) as client:
+        rig.wait(lambda: app.feed is not None and app.feed.client_count == 1)
+        rig.sources[0].line("はじまり")
+        assert client.recv(timeout=5) == "はじまり"
+        app.post(UserCommand(CommandKind.START, line=GameLine("はじまり", "はじまり", 1.0, "textractor")))
+        video = rig.output_root / "_incoming" / "2026-10-02 18-04-11.mkv"
+        video.parent.mkdir(parents=True, exist_ok=True)
+        video.write_bytes(b"\x1a\x45\xdf\xa3 not really matroska")
+        rig.obs.record_active, rig.obs.output_path = True, str(video)
+        rig.obs.stops_on_request = True  # the quit's StopRecord ends the recording
+        rig.gateway.record_event(OutputState.STARTED, str(video))
+        rig.wait(lambda: rig.state() is AppState.RECORDING)
+        rig.sources[0].line("つぎ")
+        assert client.recv(timeout=5) == "つぎ"
 
 
 # CLI verbs and quitting (spec 16) -----------------------------------------------------------------

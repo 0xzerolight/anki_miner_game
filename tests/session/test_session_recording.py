@@ -16,6 +16,7 @@ from anki_miner_game.models.messages import (
     RecordingStarted,
     RecordingStopped,
     SourceStatus,
+    StateChanged,
 )
 from anki_miner_game.models.obs import ObsRequestError, OutputState
 from anki_miner_game.session import session as session_mod
@@ -270,6 +271,29 @@ async def test_auto_start_holds_lines_until_started_and_journals_them_at_zero(h:
         LineRecord(offset_ms=0, text="はじまり", source="textractor"),
         LineRecord(offset_ms=0, text="つづき", source="textractor"),
     ]
+
+
+async def test_held_lines_are_published_again_with_their_offsets_between_the_state_and_the_start(h: Harness):
+    """The window counts journalled lines from the events; the feed skips this second publication."""
+    await h.arm()
+    await h.line("はじまり", T0 + 0.2)
+    await h.send(CommandKind.START, line=h.accepted()[0].line)
+    await h.line("つづき", T0 + 0.6)
+    held = [event.line for event in h.accepted()]
+    mark = len(h.events)
+    await h.started(ZERO)
+    after = h.events[mark:]
+    recording = after.index(StateChanged(AppState.RECORDING, SLUG))
+    started = next(i for i, event in enumerate(after) if isinstance(event, RecordingStarted))
+    assert after[recording + 1 : started] == [LineAccepted(held[0], 0), LineAccepted(held[1], 0)]
+
+
+async def test_a_start_without_held_lines_publishes_no_line_at_started(h: Harness):
+    await h.arm()
+    await h.send(CommandKind.START)
+    mark = len(h.events)
+    await h.started(ZERO)
+    assert not [event for event in h.events[mark:] if isinstance(event, LineAccepted)]
 
 
 async def test_a_merge_into_a_held_line_replaces_it(rig: Harness):
