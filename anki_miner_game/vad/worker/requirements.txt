@@ -1,6 +1,7 @@
 # VAD add-on environment (spec 13.1): onnxruntime, numpy and PyAV for vad_worker.py.
-# Every package, transitive ones included, is pinned to one version and its wheel hashes;
-# uv pip install -r turns on hash checking for a file like this one. Regenerate with:
+# Every package, transitive ones included, is pinned to one version and its wheel hashes, for
+# Python 3.12 and later. uv pip install -r checks these hashes by default; --require-hashes also
+# refuses anything unhashed. Regenerate with:
 #   printf 'onnxruntime==1.30.0\nnumpy==2.5.3\nav==18.1.0\n' | uv pip compile - --universal \
 #     --python-version 3.12 --generate-hashes --only-binary :all: --no-header
 av==18.1.0 \
