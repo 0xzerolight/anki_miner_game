@@ -611,19 +611,27 @@ Profile `Anki Miner Game`:
 `SetProfileParameter` is used only where obs-websocket has no first-class request. The two key names
 marked unverified could not be checked this session (no OBS install on the design machine, and GSM
 sets neither); M0 reads them from a real `basic.ini` before any code depends on them. GSM logs that one
-of its profile changes needs an OBS restart (`obs/actions.py:224`); M0 establishes which of the rows
-above apply to the next `StartRecord` without one, and the wizard restarts OBS if any do not.
+of its profile changes needs an OBS restart (`obs/actions.py:224`). M0 found that every row above
+applies at the next `StartRecord` except the container: OBS reads it, like the output mode and the
+recording quality or encoder, only when it builds its outputs, at launch and when a profile is
+activated (`docs/m0/source-findings.md` section 2, `docs/m0/obs-behaviour.md` item 2). After
+changing one of them, provisioning switches to the profile it started on and back. Before that it
+gives the app's profile that profile's `[Audio] SampleRate` and `ChannelSetup`, since a switch
+between profiles where they differ stops at OBS's modal restart question (item 3). The app never
+restarts OBS.
 
 Scene collection `Anki Miner Game`, scene `Game`:
 
 | Platform | Video input | Audio |
 |---|---|---|
-| Windows, no pinned window | `game_capture`, mode "any fullscreen application" | desktop audio (`wasapi_output_capture` special input) |
-| Windows, pinned window | `game_capture` on that window, plus a `window_capture` of the same window underneath as fallback for games that refuse the hook | `wasapi_process_output_capture` on the same window; desktop audio muted |
+| Windows, no pinned window | `game_capture`, mode "any fullscreen application" | desktop audio (the app's own `wasapi_output_capture` input) |
+| Windows, pinned window | `game_capture` on that window, plus a `window_capture` of the same window underneath as fallback for games that refuse the hook | `wasapi_process_output_capture` on the same window (desktop audio when `audio.mode` is `desktop`) |
 | Linux, PipeWire available | `pipewire-screen-capture-source`; OBS shows the portal picker once and keeps the restore token | `pulse_output_capture` |
 | Linux, X11 | `xcomposite_input` on the pinned window | `pulse_output_capture` |
 
-The microphone special input is muted through `GetSpecialInputs` and `SetInputMute`. The game
+The app's collection has none of OBS's special audio inputs: OBS creates them only in the
+collection of its first run (`docs/m0/obs-behaviour.md` section 1). A special input the user adds
+to it later, desktop or microphone, is muted through `GetSpecialInputs` and `SetInputMute`. The game
 profile dialog fills its window list from `GetInputPropertiesListPropertyItems(inputName,
 propertyName="window")`, the same call GSM uses, and stores the returned item value verbatim in
 `capture.window`. Input kinds that `GetInputKindList` does not report are skipped, and the dialog
