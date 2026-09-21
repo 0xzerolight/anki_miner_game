@@ -13,6 +13,7 @@ ran isolated (``-I``).
 """
 
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -21,7 +22,9 @@ from pathlib import Path
 def main() -> int:
     args = sys.argv[1:]
     video = Path(args[args.index("--video") + 1])
-    Path(f"{video}.argv.json").write_text(json.dumps({"argv": args, "isolated": sys.flags.isolated}))
+    started = Path(f"{video}.argv.json")
+    started.with_suffix(".tmp").write_text(json.dumps({"argv": args, "isolated": sys.flags.isolated}))
+    os.replace(started.with_suffix(".tmp"), started)  # a test polling for it never reads half a file
     script = json.loads(Path(f"{video}.fake.json").read_text(encoding="utf-8"))
     for line in script.get("lines", []):
         sys.stdout.write(line + "\n")

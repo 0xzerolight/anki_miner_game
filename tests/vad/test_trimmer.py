@@ -239,19 +239,18 @@ def test_progress_is_forwarded_including_an_unknown_total(make_trimmer, presente
     assert presenter.progress == [(session.manifest, 600000, 5248120), (session.manifest, 700000, None)]
 
 
-def test_the_manifest_reads_queued_then_vad_running_while_the_worker_runs(make_trimmer, presenter, session, tmp_path):
+def test_the_manifest_reads_vad_running_while_the_worker_runs(make_trimmer, session, tmp_path):
     release = tmp_path / "release"
     session.script(worker_lines(EXAMPLE_REGIONS), wait_for=release)
     trimmer = make_trimmer()
 
     trimmer.queue(session.manifest)
-    assert session.load().vad == VadRecord(state=VadState.QUEUED)
-    wait_until(lambda: session.load().state is ManifestState.VAD_RUNNING)
+    wait_until(lambda: session.started is not None)  # polls the worker, never the manifest being written
     running = session.load()
     release.write_text("go")
     run_jobs(trimmer)
 
-    assert running.vad == VadRecord(state=VadState.QUEUED)
+    assert (running.state, running.vad) == (ManifestState.VAD_RUNNING, VadRecord(state=VadState.QUEUED))
     assert session.srt() == TRIMMED_SRT
     assert session.load().state is ManifestState.READY
 
@@ -562,7 +561,7 @@ def test_close_stops_a_running_pass_and_leaves_it_queued(make_trimmer, presenter
     trimmer = make_trimmer()
     trimmer.queue(running.manifest)
     trimmer.queue(pending.manifest)
-    wait_until(lambda: running.load().state is ManifestState.VAD_RUNNING)
+    wait_until(lambda: running.started is not None)
 
     closed = threading.Thread(target=trimmer.close)
     closed.start()
