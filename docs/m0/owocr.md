@@ -14,6 +14,7 @@ on both platforms; exact install floor.*
 | Install floor | Python >= 3.11. `uv tool install "owocr[meikiocr]==1.26.8"` **fails on Linux** without cairo (and GObject introspection) dev packages; succeeds with `pygobject` overridden out, which only works for X11 capture. Windows: H5 |
 | OCR through the websocket | Three lines from a synthetic window, recognised 49-65 ms after the text changed |
 | `~/.config/owocr_config.ini` | owocr **creates it** on first run (downloaded from GitHub) and reads it on every later run. Redirecting `HOME` contained it; the real file did not exist before or after the spike |
+| Owner desktop | **Touched.** No window opened on it, but the nested kwin shared the owner's config dir and session D-Bus and rewrote eight owner config files (section "Owner-environment incident") |
 
 Five findings need spec changes (section "Proposed spec amendments"); one of them (Linux Wayland
 install) may need an owner decision.
@@ -26,13 +27,14 @@ install) may need an owner decision.
 - Display: a private `kwin_wayland --virtual --xwayland` (own socket, 1280x720 virtual output),
   and inside it a **rootful** `Xwayland :N -geometry 1280x720` started as a client of the nested
   kwin. Every probe process ran as an X11 client of that rootful server with `WAYLAND_DISPLAY`
-  unset and `XDG_SESSION_TYPE=x11`. Nothing opened on the owner desktop.
+  unset and `XDG_SESSION_TYPE=x11`. No window opened on the owner desktop, but the nested kwin was
+  not isolated from the owner session (section "Owner-environment incident").
   - The rootless Xwayland that `kwin --xwayland` provides is not enough: mss's `GetImage` on its
     root window fails with `BadMatch` (X error 8, major opcode 73), so owocr exits with
     `The window was closed or an error occurred` (`run.py:2544`). S2's `tools/nested_display.py`
     needs the same rootful step for any screen-grab probe.
-  - kwin also started an fcitx instance inside the nested session, which failed to take its D-Bus
-    name and unloaded. It had no effect on the owner session.
+  - kwin also started an fcitx instance, which tried to take its name on the owner's session bus,
+    failed (`Is there another fcitx already running?`, `out-*/kwin.log`) and unloaded.
 - owocr environment: `HOME`, `XDG_CACHE_HOME` and `XDG_CONFIG_HOME` pointed at a scratch dir.
 - Synthetic window: a frameless PyQt6 `QLabel` (X11 bypass-WM hint) at screen `100,100` size
   800x160, Noto Sans CJK JP 48 pt, black on white, showing three sentences 15 s apart and printing
@@ -45,6 +47,41 @@ Command used (spec 14 Linux form with explicit rectangles):
 ```
 owocr -r screencapture -w websocket -wp <free port> -t False -l ja -e meikiocr -sa 100,100,900,260
 ```
+
+## Owner-environment incident
+
+`nest.sh` started `kwin_wayland --virtual --xwayland` with the owner's environment minus
+`WAYLAND_DISPLAY` and `DISPLAY`, so the nested kwin kept the owner's `HOME`, `XDG_CONFIG_HOME`,
+`XDG_RUNTIME_DIR`, `DBUS_SESSION_BUS_ADDRESS` and `SESSION_MANAGER`. It wrote the owner's config
+(`stat` through `.orchestration/m0/r3/owner-check.sh`, after the spike):
+
+| File under `~/.config/` | mtime 2026-09-21 | Nested run at that time |
+|---|---|---|
+| `kwinrc` | 14:57:10 | first run (its output dir did not survive) |
+| `xsettingsd/xsettingsd.conf`, `gtk-3.0/settings.ini`, `gtk-4.0/settings.ini` | 14:57:08 | first run |
+| `kwinoutputconfig.json` | 15:00:28 | variants run (15:00:19-28); now holds a `Virtual-0` output |
+| `gtkrc`, `gtkrc-2.0`, `Trolltech.conf` | 15:00:20 | variants run |
+
+- The second R3 instance also saw `kwinoutputconfig.json` at 14:59:03, 14:59:33 and 14:59:39, the
+  ocr and picker runs (addendum of `.orchestration/reviews/r3-owocr-impl-report.md`).
+- Unchanged: `kglobalshortcutsrc` (2026-09-14), `findmnt /run/user/1000/doc` (`fuse.portal`), and
+  `~/.config/owocr_config.ini` (absent).
+- The session bus was the owner's. Every `out-*/kwin.log` shows `Failed to register service
+  org.kde.kglobalaccel`, `Failed to register with host portal` and fcitx's `Unable to request dbus
+  name`: names already held on the owner's bus.
+- R3 did not restore the files; that is the orchestrator's call.
+
+Isolation S2's `tools/nested_display.py` needs. R3 wrote `.orchestration/m0/r3/iso-nest.sh` along
+these lines but never ran it, so none of this is verified:
+
+- Start kwin from `env -i` with an explicit environment, so no owner `DBUS_SESSION_BUS_ADDRESS`,
+  `SESSION_MANAGER`, `DISPLAY`, `WAYLAND_DISPLAY` or `XDG_SESSION_*` is inherited.
+- Private `HOME`, `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME` and
+  `XDG_RUNTIME_DIR` (mode 0700).
+- A private `dbus-daemon` session bus from a config with no `<servicedir>`, so nothing is
+  bus-activated; stop it after the run.
+- Fingerprint the files above and `findmnt /run/user/<uid>/doc` before and after every run, and fail
+  the run on any change.
 
 ## Coordinate log lines
 
