@@ -3,11 +3,13 @@
 import ast
 import importlib
 import inspect
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 
 import anki_miner_game
+from anki_miner_game.models.messages import SourceStatus
 
 SECTION_4_NAMES = {
     "anki_miner_game.models.constants": [
@@ -106,6 +108,7 @@ PROTOCOL_MEMBERS = {
         "status": PROPERTY,
         "start": sync("sink"),
         "stop": sync(),
+        "set_status_listener": sync("cb"),
     },
     ("anki_miner_game.interfaces.record_clock", "RecordClock"): {
         "start": sync("zero_mono"),
@@ -187,6 +190,79 @@ def test_protocols_declare_exactly_their_members(key, members):
             is_async, params = expected
             assert inspect.iscoroutinefunction(attr) is is_async, member
             assert tuple(inspect.signature(attr).parameters)[1:] == params, member
+
+
+def _assert_conforms(protocol: type, impl: type) -> None:
+    """``impl`` has every member of ``protocol``, of the same kind, taking the same parameters."""
+    for member in (attr for attr in vars(protocol) if not attr.startswith("_")):
+        expected = inspect.getattr_static(protocol, member)
+        actual = inspect.getattr_static(impl, member)
+        if isinstance(expected, property):
+            assert isinstance(actual, property), member
+        else:
+            assert inspect.iscoroutinefunction(actual) is inspect.iscoroutinefunction(expected), member
+            assert tuple(inspect.signature(actual).parameters) == tuple(inspect.signature(expected).parameters), member
+
+
+class _FakeTextSource:
+    """The smallest ``TextSource``: a transition sets ``status`` first, then tells the listener."""
+
+    def __init__(self, source_id: str) -> None:
+        self._id = source_id
+        self._status = SourceStatus.DISCONNECTED
+        self._listener: Callable[[str, SourceStatus], None] | None = None
+
+    @property
+    def id(self) -> str:
+        return self._id
+
+    @property
+    def status(self) -> SourceStatus:
+        return self._status
+
+    def start(self, sink: Callable[[str, float, str], None]) -> None:
+        self._move(SourceStatus.CONNECTING)
+
+    def stop(self) -> None:
+        self._move(SourceStatus.DISCONNECTED)
+
+    def set_status_listener(self, cb: Callable[[str, SourceStatus], None]) -> None:
+        self._listener = cb
+
+    def _move(self, status: SourceStatus) -> None:
+        if status is self._status:
+            return
+        self._status = status
+        if self._listener is not None:
+            self._listener(self._id, status)
+
+
+def test_a_text_source_reports_every_status_transition_to_its_listener():
+    from anki_miner_game.interfaces.text_source import TextSource
+
+    _assert_conforms(TextSource, _FakeTextSource)
+    source = _FakeTextSource("textractor")
+    heard: list[tuple[str, SourceStatus, SourceStatus]] = []
+    source.set_status_listener(lambda source_id, status: heard.append((source_id, status, source.status)))
+    source.start(lambda raw, t_mono, source_id: None)
+    source._move(SourceStatus.CONNECTED)
+    source._move(SourceStatus.CONNECTED)
+    source._move(SourceStatus.RECEIVING)
+    source.stop()
+    assert [(source_id, status) for source_id, status, _ in heard] == [
+        ("textractor", SourceStatus.CONNECTING),
+        ("textractor", SourceStatus.CONNECTED),
+        ("textractor", SourceStatus.RECEIVING),
+        ("textractor", SourceStatus.DISCONNECTED),
+    ]
+    assert all(status is seen for _, status, seen in heard)
+
+
+def test_the_text_source_status_listener_is_documented():
+    from anki_miner_game.interfaces.text_source import TextSource
+
+    doc = TextSource.set_status_listener.__doc__ or ""
+    assert "every" in doc and "SourceStatusChanged" in doc
 
 
 def test_obs_config_failures_are_typed():

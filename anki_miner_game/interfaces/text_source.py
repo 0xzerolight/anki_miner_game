@@ -8,6 +8,9 @@ from anki_miner_game.models.messages import SourceStatus
 LineSink = Callable[[str, float, str], None]
 """Called as ``sink(raw, t_mono, source_id)``."""
 
+StatusListener = Callable[[str, SourceStatus], None]
+"""Called as ``listener(source_id, status)``."""
+
 
 class TextSource(Protocol):
     """A producer of raw text lines.
@@ -29,3 +32,17 @@ class TextSource(Protocol):
     def start(self, sink: LineSink) -> None: ...
 
     def stop(self) -> None: ...
+
+    def set_status_listener(self, cb: StatusListener) -> None:
+        """Have ``cb(source_id, status)`` called on every transition of ``status``.
+
+        Called once per change, after the ``status`` property already reports
+        the new value, including the move to ``DISCONNECTED`` on ``stop``; never
+        for an unchanged status. It runs on the same thread as the sink, so it
+        must only hand the change on. One listener per source: a later call
+        replaces it. Set it before ``start``; the status at that moment is not
+        reported (read ``status``). The session actor registers it and
+        publishes each change as ``SourceStatusChanged``, which the Presenter
+        shows as ``source_status``.
+        """
+        ...
