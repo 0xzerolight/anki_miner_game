@@ -71,7 +71,7 @@ def test_session_input_and_event_unions_cover_every_message():
         Tick(t_mono=3.0),
     ]
     events = [
-        StateChanged(AppState.ARMED),
+        StateChanged(AppState.ARMED, slug="steins-gate"),
         LineAccepted(line=line, offset_ms=None),
         RecordingStarted(stem="2026-10-02 18-04-11"),
         RecordingStopped(stem="2026-10-02 18-04-11"),

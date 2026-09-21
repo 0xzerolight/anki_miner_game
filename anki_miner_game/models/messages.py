@@ -96,6 +96,11 @@ SessionInput = LineReceived | ObsEvent | UserCommand | Tick
 @dataclass(frozen=True)
 class StateChanged:
     state: AppState
+    slug: str | None
+    """The armed game's ``GameProfile.slug`` in every state but ``idle``, where it is ``None``.
+
+    Arming another game while armed publishes ``StateChanged(ARMED, <new slug>)``.
+    """
 
 
 @dataclass(frozen=True)

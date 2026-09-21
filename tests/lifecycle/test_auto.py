@@ -103,16 +103,24 @@ def make_profile(
     )
 
 
+SLUG = "steins-gate"
+
+
 class Rig:
     def __init__(self, profile: GameProfile | None, items: list[Item] | None = None) -> None:
-        self.profile = profile
+        self.profiles: dict[str, GameProfile] = {} if profile is None else {profile.slug: profile}
+        self.lookups: list[str] = []
         self.control = FakeControl()
         self.clock = Clock()
         self.windows = Windows(items if items is not None else [Item(WIN_VALUE, True)])
-        self.auto = AutoMode(self.control, lambda: self.profile, self.windows, now=self.clock)
+        self.auto = AutoMode(self.control, self.lookup, self.windows, now=self.clock)
 
-    def state(self, state: AppState) -> None:
-        self.control.emit(StateChanged(state))
+    def lookup(self, slug: str) -> GameProfile | None:
+        self.lookups.append(slug)
+        return self.profiles.get(slug)
+
+    def state(self, state: AppState, slug: str = SLUG) -> None:
+        self.control.emit(StateChanged(state, None if state is AppState.IDLE else slug))
 
     def line(self, offset_ms: int | None = None) -> None:
         self.control.emit(LineAccepted(GameLine("こんにちは", "こんにちは", self.clock.t, "hook"), offset_ms))
@@ -197,7 +205,7 @@ def test_auto_mode_off_or_no_profile_never_starts(profile: GameProfile | None) -
 def test_profile_is_read_when_the_state_changes() -> None:
     rig = Rig(make_profile(enabled=False))
     rig.state(AppState.ARMED)
-    rig.profile = make_profile()
+    rig.profiles[SLUG] = make_profile()
     rig.line()
     assert rig.control.commands() == []
     rig.state(AppState.IDLE)
@@ -206,12 +214,53 @@ def test_profile_is_read_when_the_state_changes() -> None:
     assert rig.control.commands() == [CommandKind.START]
 
 
-def test_starts_from_the_control_state_at_construction() -> None:
+def test_the_profile_is_looked_up_by_the_armed_slug_once_per_change() -> None:
+    rig = Rig(make_profile())
+    rig.state(AppState.ARMED)
+    rig.line()
+    rig.line()
+    rig.state(AppState.RECORDING)
+    rig.state(AppState.IDLE)
+    assert rig.lookups == [SLUG, SLUG]
+    assert rig.control.commands() == [CommandKind.START]
+
+
+def test_nothing_is_known_before_the_first_state_change() -> None:
+    """``SessionControl`` has no armed slug, so a control already armed at construction starts nothing."""
     control = FakeControl(AppState.ARMED)
     profile = make_profile()
-    AutoMode(control, lambda: profile, Windows([]), now=Clock())
+    AutoMode(control, {profile.slug: profile}.get, Windows([]), now=Clock())
     control.emit(LineAccepted(GameLine("a", "a", 0.0, "hook"), None))
+    assert control.posted == []
+    control.emit(StateChanged(AppState.ARMED, SLUG))
+    control.emit(LineAccepted(GameLine("b", "b", 1.0, "hook"), None))
     assert [m.kind for m in control.posted if isinstance(m, UserCommand)] == [CommandKind.START]
+
+
+def test_arming_another_game_starts_a_new_armed_period_with_its_profile() -> None:
+    rig = Rig(make_profile())
+    rig.profiles["chaos-head"] = replace(make_profile(), slug="chaos-head")
+    rig.profiles["robotics-notes"] = replace(make_profile(start=False), slug="robotics-notes")
+    rig.state(AppState.ARMED)
+    rig.line()
+    rig.state(AppState.ARMED, "chaos-head")
+    rig.line()
+    assert rig.control.commands() == [CommandKind.START, CommandKind.START]
+    rig.state(AppState.ARMED, "robotics-notes")
+    rig.line()
+    assert rig.control.commands() == [CommandKind.START, CommandKind.START]
+
+
+def test_arming_another_game_drops_the_previous_games_window() -> None:
+    rig = Rig(make_profile(idle_min=0), [Item(WIN_VALUE, False)])
+    rig.profiles["chaos-head"] = replace(make_profile(idle_min=0, window=None), slug="chaos-head")
+    rig.state(AppState.ARMED)
+    rig.state(AppState.ARMED, "chaos-head")
+    rig.state(AppState.RECORDING, "chaos-head")
+    rig.check()
+    rig.check()
+    assert rig.windows.calls == 0
+    assert rig.control.commands() == []
 
 
 # Auto-stop, idle.

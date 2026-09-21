@@ -2,8 +2,10 @@
 
 ``AutoMode`` subscribes to the session actor's events and sends it ordinary
 ``UserCommand``s; no other module knows it exists. Everything is gated on
-the armed game's ``auto.enabled``. The profile is read at every state
-change, so an edit made while armed applies from the next state.
+the armed game's ``auto.enabled``. The profile is looked up by
+``StateChanged.slug`` whenever the state or the armed game changes, so an
+edit made while armed applies from the next state, and arming another game
+starts a new armed period with that game's settings.
 
 - Auto-start: the first ``LineAccepted`` while ``armed`` posts ``start``
   carrying that line (``UserCommand.line``), once per armed period; the
@@ -99,18 +101,25 @@ class AutoMode:
     def __init__(
         self,
         control: SessionControl,
-        profile: Callable[[], GameProfile | None],
+        profile_for: Callable[[str], GameProfile | None],
         list_windows: ListWindows,
         *,
         now: Callable[[], float] = time.monotonic,
     ) -> None:
-        """``profile`` returns the armed game's profile (``None`` when none is armed)."""
+        """``profile_for(slug)`` returns that game's profile, or ``None``.
+
+        It runs on the actor's thread, so it must not read the disk: pass a
+        lookup over the profiles already loaded. ``SessionControl`` exposes no
+        armed game, so build this before the actor publishes its first
+        ``StateChanged`` (at launch, while it is idle).
+        """
         self._control = control
-        self._profile_source = profile
+        self._profile_for = profile_for
         self._list_windows = list_windows
         self._now = now
         self._state = control.state
-        self._profile = profile()
+        self._slug: str | None = None
+        self._profile: GameProfile | None = None
         self._start_sent = False
         self._stop_sent = False
         self._last_activity = now()
@@ -119,10 +128,10 @@ class AutoMode:
 
     def on_event(self, event: SessionEvent) -> None:
         if isinstance(event, StateChanged):
-            if event.state is self._state:
+            if event.state is self._state and event.slug == self._slug:
                 return
-            self._state = event.state
-            self._profile = self._profile_source()
+            self._state, self._slug = event.state, event.slug
+            self._profile = None if event.slug is None else self._profile_for(event.slug)
             self._start_sent = False
             self._stop_sent = False
             self._misses = 0

@@ -21,7 +21,9 @@ class Presenter(Protocol):
     pass runs and ``vad_finished`` once per job.
     """
 
-    def state_changed(self, state: AppState) -> None: ...
+    def state_changed(self, state: AppState, slug: str | None) -> None:
+        """``slug`` is the armed game (``StateChanged.slug``); ``None`` when idle."""
+        ...
 
     def source_status(self, source_id: str, status: SourceStatus) -> None: ...
 

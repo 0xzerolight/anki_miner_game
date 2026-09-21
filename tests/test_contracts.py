@@ -142,7 +142,7 @@ PROTOCOL_MEMBERS = {
     },
     ("anki_miner_game.interfaces.obs", "Recorder"): {"start": coro(), "stop": coro()},
     ("anki_miner_game.interfaces.presenter", "Presenter"): {
-        "state_changed": sync("state"),
+        "state_changed": sync("state", "slug"),
         "source_status": sync("source_id", "status"),
         "line_accepted": sync("line", "offset_ms", "replaces_previous"),
         "banner": sync("banner"),
