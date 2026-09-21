@@ -83,3 +83,11 @@ applied by the integration fixer on `integration/wave-2b-early`. Docstrings only
 | `Provisioner`, `ensure_profile`, `ensure_collection`, `list_windows` (docstrings) | `interfaces/obs.py` | `ensure_profile`/`ensure_collection` need every output inactive and never switch back (the caller restores). `ensure_profile` started on another profile copies its `[Audio] SampleRate`/`ChannelSetup` into the app's profile and, after writing a key OBS reads only when it builds its outputs, switches to that profile and back; started on the app's profile it sets `needs_restart` instead. `list_windows` reads the current collection, so only while the app's is current |
 | `ProvisionResult.needs_restart` (docstring) | `models/obs.py` | A change applies only once OBS re-activates the app's profile (the next disarm and arm) or restarts; text for the user only, the app never restarts OBS |
 | `DriftSample.output_duration_ms` (docstring) | `models/manifest.py` | Drift samples become the `OutputDurationClock`'s input (spec 7 as amended): its lag is `at_ms - output_duration_ms` of the latest sample with `output_duration_ms > 0`; samples are taken only on the `EventClock` with the recording unpaused |
+
+## M0 findings (accepted by the orchestrator)
+
+Applied by C4.
+
+| Name | Where | What it is |
+|---|---|---|
+| `REQUIRED_REQUESTS` | `models/obs.py` | 32 names: T14's 31 plus `GetOutputSettings` (obs-websocket 5.0.0; OBS 30.0 floor unchanged). After a reconnect it returns the active file's `path` on `simple_file_output` / `adv_file_output` (R2 item 8, `docs/m0/obs-behaviour.md`) |
