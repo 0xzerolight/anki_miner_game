@@ -39,12 +39,9 @@ def test_game_home_isolated():
     assert home != real_home
 
 
-def test_offscreen_qt_app():
-    """PyQt6 constructs under the offscreen platform (proves the dev env is sane)."""
-    from PyQt6.QtWidgets import QApplication
-
-    app = QApplication.instance() or QApplication([])
-    assert app is not None
+def test_offscreen_qt_app(qapp):
+    """pytest-qt's ``qapp`` runs on the offscreen platform (later Qt tests copy this: never build a QApplication)."""
+    assert qapp.platformName() == "offscreen"
 
 
 def test_loopback_socket_not_blocked():

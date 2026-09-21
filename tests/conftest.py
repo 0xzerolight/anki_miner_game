@@ -1,7 +1,6 @@
 """Pytest configuration and shared fixtures."""
 
 import os
-from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -69,9 +68,3 @@ def _isolate_game_home(tmp_path_factory, monkeypatch):
     tmp_home.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("ANKI_MINER_GAME_HOME", str(tmp_home))
     yield tmp_home
-
-
-@pytest.fixture
-def temp_dir(tmp_path: Path) -> Path:
-    """Provide a temporary directory for test files."""
-    return tmp_path
