@@ -20,7 +20,7 @@ from tools import nested_display as nd
 pytestmark = pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux-only tool")
 
 TOKEN = "tok123"
-BUS = "unix:path=/data/r1/xdg/runtime/bus,guid=abc"
+BUS = "unix:path=/tmp/amg-12345678/bus,guid=abc"
 
 # Everything a KDE Wayland session exports that must never reach a nested process.
 OWNER_ENV = {
@@ -46,7 +46,7 @@ OWNER_ENV = {
 
 
 def _xdg(tmp_path: Path) -> nd.XdgDirs:
-    return nd.XdgDirs(tmp_path / "xdg")
+    return nd.XdgDirs(tmp_path / "xdg", tmp_path / "run")
 
 
 # --- XDG dirs and paths ---------------------------------------------------------------------
@@ -55,9 +55,10 @@ def _xdg(tmp_path: Path) -> nd.XdgDirs:
 def test_xdg_dirs_are_private_and_the_runtime_dir_is_owner_only(tmp_path):
     xdg = _xdg(tmp_path)
     xdg.create()
-    for path in (xdg.config, xdg.cache, xdg.data, xdg.state, xdg.runtime):
+    for path in (xdg.config, xdg.cache, xdg.data, xdg.state):
         assert path.is_dir()
         assert path.parent == xdg.root
+    assert xdg.runtime.is_dir()
     assert (xdg.runtime.stat().st_mode & 0o777) == 0o700
     assert xdg.env() == {
         "XDG_CONFIG_HOME": str(xdg.config),
@@ -93,9 +94,37 @@ def test_an_xdg_root_outside_the_orchestration_data_dir_is_refused():
         nd.check_xdg_root(base / ".." / "escape" / "xdg", base)
 
 
-def test_the_real_default_root_fits_the_socket_path_limit():
-    main = Path("/home/light/Projects/anki_miner_game")
-    nd.check_xdg_root(nd.default_xdg_root("e1-m1-exit-linux", main), main / ".orchestration" / "m0" / "data")
+MAIN = Path("/home/light/Projects/anki_miner_game")
+LONGEST_CALLER = "e1-m1-exit-linux"  # the longest slug the plan gives a nested display
+
+
+def test_flatpaks_bus_proxy_socket_would_not_fit_under_the_orchestration_dirs():
+    # Flatpak binds its bus proxy at realpath($XDG_RUNTIME_DIR)/.dbus-proxy/session-bus-proxy-XXXXXX.
+    # Even the shortest caller's xdg root leaves no room for it, so the runtime dir lives elsewhere.
+    for caller in ("r1-clock", LONGEST_CALLER):
+        with pytest.raises(nd.NestedDisplayError, match="session-bus-proxy"):
+            nd.check_runtime_dir(nd.default_xdg_root(caller, MAIN))
+
+
+def test_the_runtime_dir_fits_flatpaks_bus_proxy_for_the_longest_caller(tmp_path):
+    guard = nd.OwnerGuard(home=tmp_path, doc_path=Path("/run/user/1000/doc"), run=_Findmnt())
+    display = nd.NestedDisplay(caller=LONGEST_CALLER, guard=guard, owner_env={"PATH": "/usr/bin", "HOME": "/h"})
+    runtime = display.xdg.runtime
+    assert display.xdg.root == nd.default_xdg_root(LONGEST_CALLER)  # config and state stay watched
+    assert runtime.parent == Path("/tmp") and runtime.name.startswith("amg-")
+    proxy = runtime / ".dbus-proxy" / "session-bus-proxy-XXXXXX"
+    assert len(os.fsencode(str(proxy))) <= 107
+    assert len(os.fsencode(str(proxy))) == len("/tmp/amg-12345678/.dbus-proxy/session-bus-proxy-XXXXXX")
+    nd.check_runtime_dir(runtime)
+    assert not runtime.exists()  # created at start, not by the constructor
+
+
+def test_every_display_gets_its_own_runtime_dir(tmp_path):
+    guard = nd.OwnerGuard(home=tmp_path, doc_path=Path("/run/user/1000/doc"), run=_Findmnt())
+    env = {"PATH": "/usr/bin", "HOME": "/h"}
+    first = nd.NestedDisplay(caller="r1-clock", guard=guard, owner_env=env)
+    second = nd.NestedDisplay(caller="r1-clock", guard=guard, owner_env=env)
+    assert first.xdg.runtime != second.xdg.runtime
 
 
 def test_an_xdg_root_with_whitespace_is_refused(tmp_path):
@@ -105,10 +134,49 @@ def test_an_xdg_root_with_whitespace_is_refused(tmp_path):
         nd.check_xdg_root(base / "r 1" / "xdg", base)
 
 
-def test_a_bus_socket_path_too_long_for_sun_path_is_refused(tmp_path):
-    base = tmp_path / "data"
+def test_a_runtime_dir_too_long_for_sun_path_is_refused():
     with pytest.raises(nd.NestedDisplayError, match="socket path"):
-        nd.check_xdg_root(base / ("d" * 120) / "xdg", base)
+        nd.check_runtime_dir(Path("/tmp") / ("d" * 70))
+    nd.check_runtime_dir(Path("/tmp") / ("d" * 60))
+
+
+def test_creating_the_runtime_dir_refuses_one_that_already_exists(tmp_path):
+    (tmp_path / "run").mkdir()
+    with pytest.raises(FileExistsError):
+        _xdg(tmp_path).create()
+
+
+def test_the_runtime_dir_is_removed_with_what_the_session_left_in_it(tmp_path):
+    xdg = _xdg(tmp_path)
+    xdg.create()
+    (xdg.runtime / ".flatpak" / "123").mkdir(parents=True)
+    (xdg.runtime / ".flatpak" / "123" / "bwrapinfo.json").write_text("{}", encoding="utf-8")
+    (xdg.runtime / "wayland-amg.lock").touch()
+    nd.remove_runtime_dir(xdg.runtime, mountinfo="")
+    assert not xdg.runtime.exists()
+    assert xdg.config.is_dir()  # the watched dirs stay as evidence
+    nd.remove_runtime_dir(xdg.runtime, mountinfo="")  # already gone: nothing to do
+
+
+def test_a_runtime_dir_with_a_mount_inside_is_left_alone(tmp_path):
+    # A document portal mounts at $XDG_RUNTIME_DIR/doc; deleting through it would delete the files
+    # it exposes.
+    xdg = _xdg(tmp_path)
+    xdg.create()
+    (xdg.runtime / "doc").mkdir()
+    mountinfo = (
+        "22 1 0:21 / /proc rw,nosuid - proc proc rw\n"
+        f"99 22 0:77 / {xdg.runtime}/doc rw,nosuid,nodev - fuse.portal portal rw,user_id=1000\n"
+    )
+    with pytest.raises(nd.NestedDisplayError, match="doc"):
+        nd.remove_runtime_dir(xdg.runtime, mountinfo=mountinfo)
+    assert (xdg.runtime / "doc").is_dir()
+
+
+def test_mount_points_are_read_with_their_octal_escapes_undone():
+    mountinfo = "99 22 0:77 / /tmp/amg-1/a\\040b rw - tmpfs tmpfs rw\n"
+    assert nd.mounts_under(Path("/tmp/amg-1"), mountinfo) == ["/tmp/amg-1/a b"]
+    assert nd.mounts_under(Path("/tmp/amg-10"), mountinfo) == []
 
 
 # --- the private bus --------------------------------------------------------------------------
@@ -454,6 +522,35 @@ def test_teardown_kills_the_whole_tree_including_term_ignorers_and_session_escap
 
 def test_teardown_of_an_empty_group_is_a_no_op():
     assert nd.ProcessGroup(TOKEN + "-empty").terminate() == []
+
+
+def test_stopping_a_display_removes_its_runtime_dir(tmp_path):
+    guard = nd.OwnerGuard(home=tmp_path, doc_path=Path("/run/user/1000/doc"), run=_Findmnt())
+    display = nd.NestedDisplay(
+        xdg_root=tmp_path / "data" / "xdg", runtime_base=tmp_path, guard=guard, owner_env=PLAIN_ENV
+    )
+    display.xdg.create()
+    (display.xdg.runtime / "bus").touch()
+    display.stop(term_wait_s=1)
+    assert not display.xdg.runtime.exists()
+    assert display.xdg.config.is_dir()
+
+
+def test_a_failed_start_never_removes_a_runtime_dir_it_did_not_create(tmp_path, monkeypatch):
+    monkeypatch.setattr(nd, "check_runtime_dir", lambda runtime: None)  # tmp_path is too long for sun_path
+    guard = nd.OwnerGuard(home=tmp_path, doc_path=Path("/run/user/1000/doc"), run=_Findmnt())
+    display = nd.NestedDisplay(
+        xdg_root=tmp_path / "data" / "xdg",
+        data_base=tmp_path / "data",
+        runtime_base=tmp_path,
+        guard=guard,
+        owner_env=PLAIN_ENV,
+    )
+    display.xdg.runtime.mkdir()
+    (display.xdg.runtime / "someone-elses").touch()
+    with pytest.raises(FileExistsError):
+        display.start()
+    assert (display.xdg.runtime / "someone-elses").exists()
 
 
 def test_marker_holders_are_exactly_the_marked_processes():

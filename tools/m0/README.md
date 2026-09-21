@@ -53,10 +53,16 @@ kill -TERM <serve pid>      # tears down the display and everything started in i
 
 What each run gets:
 
-- Private `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME` and
-  `XDG_RUNTIME_DIR` (mode 0700) under `.orchestration/m0/data/<caller>/xdg/` (`config`, `cache`,
-  `data`, `state`, `run`). kwin writes `kwinrc`, `kwinoutputconfig.json` and
-  `kglobalshortcutsrc` there, and its caches (ksycoca, mesa, nvidia) under `cache`.
+- Private `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`, `XDG_DATA_HOME` and `XDG_STATE_HOME` under
+  `.orchestration/m0/data/<caller>/xdg/` (`config`, `cache`, `data`, `state`). kwin writes
+  `kwinrc`, `kwinoutputconfig.json` and `kglobalshortcutsrc` there, and its caches (ksycoca,
+  mesa, nvidia) under `cache`.
+- A private `XDG_RUNTIME_DIR`, a new `/tmp/amg-<random>` (mode 0700) per run, printed at start
+  and removed at teardown. It holds the sockets: kwin's, the private bus and Flatpak's bus
+  proxy. The proxy goes to `realpath($XDG_RUNTIME_DIR)/.dbus-proxy/session-bus-proxy-XXXXXX`,
+  which does not fit in the 107 bytes of `sun_path` under the `.orchestration` prefix, and
+  Flatpak's `realpath()` defeats a symlink. The tool refuses a runtime dir that is too long, and
+  leaves it in place if anything is mounted inside it.
 - A private `dbus-daemon` from `xdg/bus.conf`, which has no `<servicedir>`, no
   `<standard_session_servicedirs/>` and no includes, so nothing can be activated on it; a call
   to a portal fails with `org.freedesktop.DBus.Error.ServiceUnknown`. Its address is the only
@@ -71,7 +77,8 @@ What each run gets:
   child), a wait, then SIGKILL. Every child carries `AMG_NESTED_RUN=<token>`, so a descendant
   that left the group with `setsid`, or a program started with `exec` from another shell, is
   found in `/proc` and killed too. If the tool itself is killed with SIGKILL, clean up with the
-  process group it printed at start: `kill -TERM -- -<pgid>`.
+  process group it printed at start, `kill -TERM -- -<pgid>`, then remove the runtime dir it
+  printed.
 - Logs: `xdg/dbus.log`, `xdg/kwin.log`, `xdg/xwayland-rootful.log`.
 
 ### Rootless or rootful Xwayland
@@ -98,8 +105,10 @@ session:
 
 - The private `XDG_RUNTIME_DIR` holds no `wayland-0`, `pulse/native`, `pipewire-0` or `doc`
   mount, so Flatpak finds none of the owner's sockets to bind into the sandbox.
-- The sandbox's session bus is Flatpak's proxy to the private bus. Portal calls there fail
-  instead of starting portals.
+- The sandbox's session bus is Flatpak's proxy to the private bus, with its socket in the
+  private runtime dir. Portal calls there fail instead of starting portals.
+- Flatpak registers the instance in the private runtime dir, so `flatpak ps` in the owner's
+  shell does not list this OBS. `obs_scenarios.py` looks for an `obs` process instead.
 - `--nosocket=wayland --socket=x11`: the OBS manifest asks for `wayland` with `fallback-x11`;
   this forces X11, so OBS opens in the nested display.
 - `--no-documents-portal` and `--no-a11y-bus`: Flatpak does not ask for the document portal or

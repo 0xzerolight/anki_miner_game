@@ -10,8 +10,10 @@ Isolation, each rule learned from an incident on the owner's machine (2026-09-21
 - An unisolated nested kwin rewrote the owner's ``~/.config/kwinrc`` and
   ``kwinoutputconfig.json``, and KDE then regenerated ``gtkrc``, ``Trolltech.conf`` and the GTK
   ``settings.ini`` files. So every nested process gets private ``XDG_CONFIG_HOME``,
-  ``XDG_CACHE_HOME``, ``XDG_DATA_HOME``, ``XDG_STATE_HOME`` and ``XDG_RUNTIME_DIR`` under
-  ``.orchestration/m0/data/<caller>/xdg`` (the only place the orchestrator's watchdog accepts).
+  ``XDG_CACHE_HOME``, ``XDG_DATA_HOME`` and ``XDG_STATE_HOME`` under
+  ``.orchestration/m0/data/<caller>/xdg`` (the only place the orchestrator's watchdog accepts),
+  and a private ``XDG_RUNTIME_DIR``, ``/tmp/amg-<random>``: Flatpak's bus-proxy socket path does
+  not fit in ``sun_path`` under the ``.orchestration`` prefix. It is removed at teardown.
 - A plain ``dbus-run-session`` auto-activated a second xdg-document-portal, which unmounted the
   owner's ``/run/user/<uid>/doc``. So the tool starts its own ``dbus-daemon`` from a config with no
   ``<servicedir>``: nothing can be activated on it. Its address is the only bus any nested process
@@ -65,6 +67,11 @@ TEARDOWN_SIGNALS = (signal.SIGTERM, getattr(signal, "SIGKILL", signal.SIGTERM))
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ORCH_DATA = Path(".orchestration") / "m0" / "data"
+RUNTIME_BASE = Path("/tmp")  # short on purpose: see RUNTIME_SOCKETS
+# The longest socket paths created in XDG_RUNTIME_DIR. Flatpak binds its bus proxy at
+# realpath($XDG_RUNTIME_DIR)/.dbus-proxy/session-bus-proxy-XXXXXX (flatpak-run.c,
+# create_proxy_socket), so a symlink cannot shorten it.
+RUNTIME_SOCKETS = (f"{WAYLAND_SOCKET}.lock", ".dbus-proxy/session-bus-proxy-XXXXXX")
 
 # Owner config files the incidents touched (kwin wrote the first three; KDE regenerated the rest).
 GUARDED_CONFIG_FILES = (
@@ -135,9 +142,14 @@ def default_xdg_root(caller: str, checkout: Path = REPO_ROOT) -> Path:
 
 @dataclass(frozen=True)
 class XdgDirs:
-    """The private XDG dirs of one nested display, plus its bus config, logs and reporter."""
+    """The private XDG dirs of one nested display.
+
+    ``root`` holds config, cache, data and state, plus the bus config, logs and reporter.
+    ``runtime`` is a separate short dir for the sockets, which must fit in ``sun_path``.
+    """
 
     root: Path
+    runtime: Path
 
     @property
     def config(self) -> Path:
@@ -156,18 +168,14 @@ class XdgDirs:
         return self.root / "state"
 
     @property
-    def runtime(self) -> Path:
-        return self.root / "run"  # short: sun_path holds 107 bytes
-
-    @property
     def bus_socket(self) -> Path:
         return self.runtime / "bus"
 
     def create(self) -> None:
         for path in (self.config, self.cache, self.data, self.state):
             path.mkdir(parents=True, exist_ok=True)
-        self.runtime.mkdir(parents=True, exist_ok=True)
-        self.runtime.chmod(0o700)  # kwin and libwayland insist on an owner-only runtime dir
+        self.runtime.mkdir(mode=0o700)  # new, never reused: a name planted in /tmp fails here
+        self.runtime.chmod(0o700)  # whatever the umask: kwin and libwayland insist on owner-only
 
     def env(self) -> dict[str, str]:
         return {
@@ -180,15 +188,46 @@ class XdgDirs:
 
 
 def check_xdg_root(root: Path, data_base: Path) -> None:
-    """Refuse a root the watchdog would flag, kwin would mis-split, or a socket could not bind."""
+    """Refuse a root the watchdog would flag or kwin would mis-split."""
     if not _SAFE_PATH_RE.match(str(root)):
         raise NestedDisplayError(f"xdg root must not contain whitespace or shell metacharacters: {root}")
     resolved, base = root.resolve(), data_base.resolve()
     if not resolved.is_relative_to(base):
         raise NestedDisplayError(f"xdg root {resolved} is outside {base}, where every nested kwin must keep its dirs")
-    longest = XdgDirs(resolved).runtime / f"{WAYLAND_SOCKET}.lock"
-    if len(os.fsencode(str(longest))) > _SUN_PATH_MAX:
-        raise NestedDisplayError(f"socket path too long for sun_path ({_SUN_PATH_MAX} bytes): {longest}")
+
+
+def check_runtime_dir(runtime: Path) -> None:
+    """Refuse a runtime dir whose sockets (kwin's, Flatpak's bus proxy) could not bind."""
+    for name in RUNTIME_SOCKETS:
+        path = Path(os.path.realpath(runtime)) / name
+        if len(os.fsencode(str(path))) > _SUN_PATH_MAX:
+            raise NestedDisplayError(f"socket path too long for sun_path ({_SUN_PATH_MAX} bytes): {path}")
+
+
+def mounts_under(path: Path, mountinfo: str) -> list[str]:
+    """Mount points at or below ``path``, from ``/proc/self/mountinfo`` text."""
+    points = [_unescape_mount(line.split()[4]) for line in mountinfo.splitlines() if len(line.split()) > 4]
+    return [point for point in points if point == str(path) or point.startswith(f"{path}/")]
+
+
+def _unescape_mount(field: str) -> str:
+    return re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), field)
+
+
+def remove_runtime_dir(runtime: Path, mountinfo: str | None = None) -> None:
+    """Delete the runtime dir and what the session left in it, unless something is mounted inside.
+
+    A document portal mounts at ``$XDG_RUNTIME_DIR/doc``; deleting through it would delete the
+    files it exposes.
+    """
+    if not runtime.exists():
+        return
+    if mountinfo is None:
+        mountinfo = Path("/proc/self/mountinfo").read_text(encoding="utf-8", errors="replace")
+    mounted = mounts_under(runtime, mountinfo)
+    if mounted:
+        raise NestedDisplayError(f"left {runtime} in place: something is mounted inside it: {', '.join(mounted)}")
+    shutil.rmtree(runtime)
 
 
 # --- the private bus ---------------------------------------------------------------------------
@@ -573,12 +612,14 @@ class NestedDisplay:
         owner_env: Mapping[str, str] | None = None,
         guard: OwnerGuard | None = None,
         data_base: Path | None = None,
+        runtime_base: Path = RUNTIME_BASE,
     ) -> None:
         if xdg_root is None:
             if caller is None:
                 raise NestedDisplayError("give a caller slug or an xdg root")
             xdg_root = default_xdg_root(caller)
-        self.xdg = XdgDirs(Path(os.path.abspath(xdg_root)))  # env values must be absolute
+        runtime = Path(os.path.abspath(runtime_base)) / f"amg-{secrets.token_hex(4)}"
+        self.xdg = XdgDirs(Path(os.path.abspath(xdg_root)), runtime)  # env values must be absolute
         self.data_base = data_base if data_base is not None else main_checkout() / ORCH_DATA
         self.width, self.height, self.rootful, self.timeout_s = width, height, rootful, timeout_s
         self.token = f"{caller or 'nested'}-{os.getpid()}-{secrets.token_hex(4)}"
@@ -588,7 +629,6 @@ class NestedDisplay:
         self.bus_address: str | None = None
         self.display: str | None = None
         self.xauthority: str | None = None
-        self.rootless_display: str | None = None
         self._core: list[subprocess.Popen[bytes]] = []
 
     @property
@@ -599,9 +639,10 @@ class NestedDisplay:
 
     def start(self) -> str:
         check_xdg_root(self.xdg.root, self.data_base)
+        check_runtime_dir(self.xdg.runtime)
         self.guard.arm()
+        self.xdg.create()  # outside the try: stop() deletes the runtime dir, so it must be ours
         try:
-            self.xdg.create()
             self._start_bus()
             self._start_kwin()
             if self.rootful:
@@ -618,8 +659,6 @@ class NestedDisplay:
     def _start_bus(self) -> None:
         conf = self.xdg.root / "bus.conf"
         conf.write_text(bus_config(self.xdg.bus_socket), encoding="utf-8")
-        if self.xdg.bus_socket.is_socket():
-            self.xdg.bus_socket.unlink()  # left by a SIGKILLed daemon of an earlier run
         env = {**_owner_basics(self.owner_env), **self.xdg.env(), MARKER: self.token}
         read_fd, write_fd = os.pipe()
         try:
@@ -664,8 +703,7 @@ class NestedDisplay:
             display, xauth = wait_for_report(report, alive=lambda: proc.poll() is None, timeout_s=self.timeout_s)
         except NestedDisplayError as exc:
             raise NestedDisplayError(f"{exc}\n--- kwin.log tail ---\n{_tail(self.xdg.root / 'kwin.log')}") from exc
-        self.display = self.rootless_display = display
-        self.xauthority = xauth
+        self.display, self.xauthority = display, xauth
 
     def _start_rootful(self) -> None:
         env = self.env()
@@ -720,14 +758,24 @@ class NestedDisplay:
         self.guard.check()
 
     def stop(self, term_wait_s: float = 10.0) -> None:
-        """Tear down the whole group, then re-check the owner guard (raises on a breach)."""
+        """Tear down the whole group and the runtime dir, then re-check the owner guard.
+
+        Raises ``IsolationBreachError`` on a breach, else ``NestedDisplayError`` when a process
+        survived (the runtime dir is then kept: it may still be in use) or the dir stayed.
+        """
         survivors = self.group.terminate(term_wait_s=term_wait_s)
         self._core.clear()
-        self.display = self.rootless_display = self.xauthority = None
+        self.display = self.xauthority = None
+        problem = f"processes survived teardown: {survivors}" if survivors else None
+        if not survivors:
+            try:
+                remove_runtime_dir(self.xdg.runtime)
+            except (NestedDisplayError, OSError) as exc:
+                problem = str(exc)
         if self.guard.baseline is not None:
             self.guard.check()
-        if survivors:
-            raise NestedDisplayError(f"processes survived teardown: {survivors}")
+        if problem:
+            raise NestedDisplayError(problem)
 
     def __enter__(self) -> NestedDisplay:
         self.start()
@@ -846,7 +894,8 @@ def _display_verb(args: argparse.Namespace) -> int:
         print(f"nested_display.py: {exc}", file=sys.stderr)
         return 1
     print(
-        f"nested display {nested.display} (process group {nested.pgid}, dirs {nested.xdg.root})",
+        f"nested display {nested.display} (process group {nested.pgid}, dirs {nested.xdg.root},"
+        f" runtime {nested.xdg.runtime})",
         file=sys.stderr,
         flush=True,
     )
