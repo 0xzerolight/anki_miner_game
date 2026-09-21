@@ -262,6 +262,14 @@ def test_end_clamps_against_a_snapped_next_start():
     assert spans(out) == [(5000, 9660 - CFG.end_gap_ms), (9660, 11000 + END_PAD_MS)]
 
 
+def test_a_cue_without_a_chain_keeps_the_end_gap_before_a_snapped_next_start():
+    # R starts inside cue 1's window, but cue 2 snaps to it (9.70 s) and takes it from cue 1's chain.
+    # Cue 1 has no chain left; its live end (9.65 s) would sit 50 ms before cue 2's voice.
+    out = assign(SNAP_CUES, [Region(9700, 12000)], OCR, CFG)
+
+    assert spans(out) == [(5000, 9700 - CFG.end_gap_ms), (9700, 12000 + END_PAD_MS)]
+
+
 def test_end_is_at_least_min_cue_after_the_start():
     out = assign([cue(1, 10000, 19650), cue(2, 20000, 25000)], [Region(9900, 10100)], HOOK, CFG)
 

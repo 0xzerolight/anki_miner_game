@@ -36,7 +36,8 @@ def assign(live_cues: Sequence[Cue], regions: Sequence[Region], text_mode: TextM
 
     ``live_cues`` are the cues before the VAD pass, in order and holding the section 9 invariant;
     ``regions`` are the worker's, in any order. Returns one cue per live cue with the same index,
-    text and source; a cue whose chain is empty keeps its live start and end.
+    text and source; a cue whose chain is empty keeps its live start and end, except that when the
+    next cue's start snapped back (OCR) its live end gets the same end clamp as a chain's end.
 
     Windows are half-open: a region that begins exactly at the next cue's live start belongs to the
     next cue. The last cue's end has no clamp but the ``MIN_CUE_MS`` floor.
@@ -70,13 +71,16 @@ def assign(live_cues: Sequence[Cue], regions: Sequence[Region], text_mode: TextM
     # Step 3.
     out: list[Cue] = []
     for i, cue in enumerate(live_cues):
-        if not chains[i]:
+        start = final_starts[i]
+        next_start = final_starts[i + 1] if i + 1 < count else None
+        if chains[i]:
+            end = max(ordered[k].end_ms for k in chains[i]) + END_PAD_MS
+        elif next_start is not None and next_start < live_cues[i + 1].start_ms:
+            end = cue.end_ms  # no chain, but the next cue snapped back towards it: clamp the live end
+        else:
             out.append(cue)
             continue
-        start = final_starts[i]
-        end = max(ordered[k].end_ms for k in chains[i]) + END_PAD_MS
-        if i + 1 < count:
-            next_start = final_starts[i + 1]
+        if next_start is not None:
             end = max(min(end, next_start - cfg.end_gap_ms), min(next_start, start + MIN_CUE_MS))
         else:
             end = max(end, start + MIN_CUE_MS)
