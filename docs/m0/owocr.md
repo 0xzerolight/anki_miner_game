@@ -10,13 +10,13 @@ on both platforms; exact install floor.*
 | Item | Result |
 |---|---|
 | Coordinate log line | `Selected coordinates:` captured from real runs (one and two rectangles). `Selected window coordinates:` cannot be produced on Linux; fixtures are synthetic and labelled |
-| Process tree dies | Linux: yes, `os.killpg` on a process group started with `start_new_session=True` removes every process, including the picker's grandchildren. Killing only the parent leaves two orphans. Windows: H5 |
+| Process tree dies | Linux: yes, `os.killpg` on a process group started with `start_new_session=True` removes every process, including the picker's grandchildren. Killing only the parent leaves two orphans. The `resource_tracker` ignores SIGTERM, so a stop needs SIGTERM, a grace period, then SIGKILL, all to the group. Windows: H5 |
 | Install floor | Python >= 3.11. `uv tool install "owocr[meikiocr]==1.26.8"` **fails on Linux** without cairo (and GObject introspection) dev packages; succeeds with `pygobject` overridden out, which only works for X11 capture. Windows: H5 |
 | OCR through the websocket | Three lines from a synthetic window. A changed line reached the websocket 54-65 ms after the change (two changes); meikiocr's own recognition took 49-62 ms per frame |
 | `~/.config/owocr_config.ini` | owocr **creates it** on first run (downloaded from GitHub) and reads it on every later run. Redirecting `HOME` contained it; the real file did not exist before or after the spike |
 | Owner desktop | **Touched.** No window opened on it, but the nested kwin shared the owner's config dir and session D-Bus and rewrote eight owner config files (section "Owner-environment incident") |
 
-Five findings need spec changes (section "Proposed spec amendments"); one of them (Linux Wayland
+Six findings need spec changes (section "Proposed spec amendments"); one of them (Linux Wayland
 install) may need an owner decision.
 
 ## Setup
@@ -51,6 +51,9 @@ Command used (spec 14 Linux form with explicit rectangles):
 ```
 owocr -r screencapture -w websocket -wp <free port> -t False -l ja -e meikiocr -sa 100,100,900,260
 ```
+
+It had no `-el`, so owocr built every engine it could import at start (`out-ocr/ocr-run.log`);
+amendment 6.
 
 ## Owner-environment incident
 
@@ -148,14 +151,27 @@ owocr's process group started with `start_new_session=True` (evidence in
 | Picker (`-sa ""`) | 3: owocr, `multiprocessing.resource_tracker`, the `spawn_main` picker child (`screen_coordinate_picker.py:484`) | `os.kill(pid, SIGKILL)` on the parent only | **2 orphans** survive, reparented to the user `systemd`, still in the group |
 | same, continued | the 2 orphans | `os.killpg(pgid, SIGKILL)` | all gone |
 | Four `-sa` variants | not listed (the driver logged no tree) | `killpg(SIGKILL)` or own exit | no survivors |
+| Stand-in picker tree, fix round 1 | 3: parent, `resource_tracker`, spawn child | `os.killpg(pgid, SIGTERM)` | all gone in 16 ms, return code -15 |
+| same shape, fresh group | 3 | SIGTERM to the parent only | tracker and child still there after 5 s, reparented to `systemd --user`; `killpg(SIGKILL)` cleared them |
+
+The stand-in (`.orchestration/m0/r3/fix1/tree_sigterm.py`, output `tree_sigterm.jsonl`) runs
+without owocr and without a display, in the tool venv's CPython 3.12.13: a parent with the spawn
+start method, two `multiprocessing.Queue` and a daemon `Process` that sleeps, the shape of
+`screen_coordinate_picker.py:482-485`. The real Tk picker under SIGTERM was not run.
 
 - On Linux the `uv tool` entry point is a symlink to a console script whose shebang is the tool
   venv's Python, so there is no separate shim process; owocr's own `multiprocessing` children (spawn
   start method, `__main__.py:18`) are the reason a parent-only kill is not enough.
 - `-t False` matters: with the tray on, owocr preloads the picker in a child at start-up
   (`run.py:1896,1928-1929`).
+- `multiprocessing.resource_tracker` ignores SIGTERM and SIGINT (`resource_tracker.py:237-238` in
+  uv's CPython 3.12.13) and exits only on EOF, once every other holder of its pipe has gone. A
+  group SIGTERM clears it only when every other member dies to SIGTERM; a member that survives
+  keeps the tracker alive too, hence the SIGKILL step in amendment 4.
 - No owocr 1.26.8 code calls `setsid`, `setpgid` or `start_new_session` (grep), so every descendant
-  stays in the group. `subprocess.run` at `ocr.py:946,1899` is Windows/Screen AI helper code.
+  stays in the group. `subprocess.run` at `ocr.py:946` runs a downloaded CIPD client on every
+  platform whenever the Screen AI engine is built (amendment 6); `ocr.py:1899` is Windows-only
+  OneOCR code.
 - Windows (uv trampoline `.exe` launching `python.exe`, job object with kill-on-close) is not
   testable here: H5.
 
@@ -206,8 +222,9 @@ owocr's process group started with `start_new_session=True` (evidence in
   tries to fetch Chrome Screen AI from `chrome-infra-packages.appspot.com` into `~/.config/screen_ai`
   (`ocr.py:854,933`) even with `-e meikiocr` (both in `out-ocr/ocr-run.log`; the Screen AI fetch
   failed there). Both sit in bare `try`/`except` blocks (`run.py:3038-3044`, `ocr.py:935-949`), so
-  a failure only logs; an offline start was not run. Other engine paths also hang off `~`: `~/.config/oneocr` (`ocr.py:1876`, OneOCR files copied from the Snipping
-  Tool on Windows 11), `~/.config/google_vision.json`, `~/.config/ndlocr_lite`.
+  a failure only logs; an offline start was not run. Other engine paths also hang off `~`:
+  `~/.config/oneocr` (`ocr.py:1876`, OneOCR files copied from the Snipping Tool on Windows 11),
+  `~/.config/google_vision.json`, `~/.config/ndlocr_lite`.
 
 ## Timing
 
@@ -248,15 +265,25 @@ swaps; how stabilisation delays typewriter-style text is T32's (H4) question.
    as a Linux prerequisite and show uv's build error in the add-on banner; (b) install with
    `pygobject` overridden out and support X11 sessions only; (c) mark OCR on Linux unsupported in
    v1. Linux is best-effort (Global Constraints), so (a) or (c) fits; the owner decides.
-4. **14, supervisor and picker.** Start owocr with `start_new_session=True` and kill with
-   `os.killpg` (confirmed necessary: a parent-only kill orphans the picker child and the
-   `resource_tracker`). Exit code 1 with a known message (`Invalid coordinate set(s)`, `Window
-   capture is only currently supported`, `Picker window was closed`) is a configuration error, not a
-   crash: show a banner instead of spending the three restarts. "Select OCR area" kills owocr after
-   the coordinate line, or on picker-closed; the window picker's closed case keeps owocr running
-   and prints no coordinate line. Tracebacks in the log (the stdin `termios` one) are not failures.
+4. **14, supervisor and picker.** Start owocr with `start_new_session=True`. Stop it with
+   `os.killpg(pgid, SIGTERM)`, wait a grace period (2 s proposed) for the group to empty, then
+   `os.killpg(pgid, SIGKILL)`. Never signal the parent alone: that orphans the picker child and the
+   `resource_tracker` (picker run). Never rely on SIGTERM alone: the `resource_tracker` ignores it
+   and stays while any other member lives. Exit code 1 with a known message (`Invalid coordinate
+   set(s)`, `Window capture is only currently supported`, `Picker window was closed`) is a
+   configuration error, not a crash: show a banner instead of spending the three restarts.
+   "Select OCR area" kills owocr after the coordinate line, or on picker-closed; the window
+   picker's closed case keeps owocr running and prints no coordinate line. Tracebacks in the log (the stdin `termios` one) are not failures.
 5. **3.4, cite.** Log lines also at `run.py:2480,2517` (picker) besides `1956,2035` (explicit); the
    window line is Windows-only (Linux never reaches `-swa`).
+6. **14 / 3.4, command line.** Add `-el <engine>`, the same value as `-e <engine>`, to both command
+   lines and to 3.4's flag list. `-el` (`config.py:27`) filters which engines owocr constructs
+   (`run.py:3250,3261-3266`); without it owocr builds every engine it can import. The explicit-rect
+   run built Bing, Google Lens and meikiocr and tried Chrome Screen AI, which downloads a CIPD client
+   from `chrome-infra-packages.appspot.com` and runs it as a child (`ocr.py:933-946`;
+   `out-ocr/ocr-run.log`). The `-el` help text omits `meikiocr`, but the filter compares
+   `engine_class.name`, which is `meikiocr` (`ocr.py:2404`). From source; a run with `-el` was not
+   made.
 
 ## Left for H4 / H5
 
