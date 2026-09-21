@@ -165,3 +165,51 @@ def test_a_failing_sink_or_listener_is_logged_not_raised(clipboard, source, capl
     clipboard.setText("一")
     assert source.status is SourceStatus.RECEIVING
     assert sum("failed" in r.getMessage() for r in caplog.records) == 3
+
+
+def _in_thread(fn) -> None:
+    worker = threading.Thread(target=fn, name="io-loop")
+    worker.start()
+    worker.join(5)
+    assert not worker.is_alive()
+
+
+def test_start_and_stop_from_another_thread_run_on_the_main_thread(clipboard, qtbot, ticks):
+    """The actor calls ``start``/``stop`` on the I/O loop's thread (``TextSource``); the source moves them."""
+    rec = Recorder()
+    made: list[ClipboardSource] = []
+    _in_thread(lambda: made.append(ClipboardSource(now=ticks)))
+    source = made[0]
+    source.set_status_listener(rec.listener)
+
+    _in_thread(lambda: source.start(rec.sink))
+    qtbot.waitUntil(lambda: source.status is SourceStatus.CONNECTED)
+    clipboard.setText("別スレッドから")
+    assert [line for line, _, _ in rec.lines] == ["別スレッドから"]
+
+    _in_thread(source.stop)
+    qtbot.waitUntil(lambda: source.status is SourceStatus.DISCONNECTED)
+    clipboard.setText("聞こえない")
+    assert [line for line, _, _ in rec.lines] == ["別スレッドから"]
+    assert rec.threads == {threading.main_thread()}
+
+
+def test_starting_twice_from_another_thread_is_an_error_at_once(qtbot, source):
+    errors: list[Exception] = []
+
+    def twice() -> None:
+        source.start(lambda raw, t, sid: None)
+        try:
+            source.start(lambda raw, t, sid: None)
+        except RuntimeError as exc:
+            errors.append(exc)
+
+    _in_thread(twice)
+    assert len(errors) == 1
+    qtbot.waitUntil(lambda: source.status is SourceStatus.CONNECTED)
+
+
+async def test_wait_closed_returns_at_once(source):
+    source.start(lambda raw, t, sid: None)
+    source.stop()
+    await source.wait_closed()
