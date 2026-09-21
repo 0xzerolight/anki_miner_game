@@ -18,6 +18,12 @@ class AddonService(Protocol):
         """Approximate download size, shown by the wizard."""
         ...
 
+    @property
+    def note(self) -> str | None:
+        """A platform limitation to show beside the status, or ``None``. The OCR add-on on Linux
+        says OCR needs an X11 session (Wayland is not supported in v1)."""
+        ...
+
     async def install(self, progress: ProgressCallback) -> None:
         """Download and verify; raises on failure and leaves no partial install behind."""
         ...
@@ -42,5 +48,9 @@ class VadJobs(Protocol):
 
 class OcrAreaPicker(Protocol):
     async def pick(self, window_title: str | None) -> str | None:
-        """Run owocr's own picker; the selected rectangles text, or ``None`` when cancelled."""
+        """Run owocr's own picker; the selected rectangles text, or ``None`` when cancelled.
+
+        Raises ``RuntimeError`` (the add-on's ``OcrError``) with a message fit for the dialog when
+        owocr cannot run or exits without an answer.
+        """
         ...

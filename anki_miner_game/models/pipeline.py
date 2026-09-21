@@ -34,7 +34,12 @@ class Accepted:
 
 @dataclass(frozen=True)
 class Replaced:
-    """Typewriter merge: ``line`` replaces the previous accepted line and keeps its offset (step 9)."""
+    """Typewriter merge (spec 8.2 step 9).
+
+    ``line`` extends the previous line accepted since the last ``TextPipeline.reset()`` and keeps its ``t_mono``.
+    The actor journals it as a ``ReplaceRecord`` only when that line is the journal's last ``LineRecord``,
+    otherwise as a new ``LineRecord``.
+    """
 
     line: GameLine
 

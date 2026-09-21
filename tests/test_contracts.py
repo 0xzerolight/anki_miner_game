@@ -3,6 +3,7 @@
 import ast
 import importlib
 import inspect
+import typing
 from collections.abc import Callable
 from pathlib import Path
 
@@ -157,6 +158,7 @@ PROTOCOL_MEMBERS = {
     ("anki_miner_game.interfaces.addons", "AddonService"): {
         "status": sync(),
         "size_bytes": PROPERTY,
+        "note": PROPERTY,
         "install": coro("progress"),
     },
     ("anki_miner_game.interfaces.addons", "VadJobs"): {
@@ -273,6 +275,20 @@ def test_obs_config_failures_are_typed():
         assert "ObsConfigError" in (method.__doc__ or ""), method.__name__
 
 
+def test_ocr_area_picker_names_the_error_pick_raises():
+    from anki_miner_game.interfaces.addons import OcrAreaPicker
+
+    assert "RuntimeError" in (OcrAreaPicker.pick.__doc__ or "")
+
+
+def test_the_addon_note_is_optional_text_shown_beside_the_status():
+    from anki_miner_game.interfaces.addons import AddonService
+
+    note = inspect.getattr_static(AddonService, "note")
+    assert typing.get_type_hints(note.fget)["return"] == str | None
+    assert "status" in (note.__doc__ or "")
+
+
 def test_wait_ready_defaults_to_30_seconds():
     from anki_miner_game.interfaces.obs import ObsDiscovery
 
@@ -306,3 +322,27 @@ def test_contract_packages_keep_the_dependency_rule(package, allowed):
         if not name.startswith(allowed)
     ]
     assert offenders == []
+
+
+def test_vad_progress_total_may_be_unknown():
+    from typing import get_type_hints
+
+    from anki_miner_game.interfaces.presenter import Presenter
+
+    assert get_type_hints(Presenter.vad_progress)["total_ms"] == int | None
+
+
+def test_obs_ready_and_requests_document_207_not_ready():
+    from anki_miner_game.interfaces.obs import ObsDiscovery, ObsGateway
+
+    assert "GetVersion" in (ObsDiscovery.wait_ready.__doc__ or "")
+    for method in (ObsDiscovery.wait_ready, ObsGateway.connect, ObsGateway.request):
+        assert "207 ``NotReady``" in (method.__doc__ or ""), method.__name__
+
+
+def test_replaced_documents_its_merge_base():
+    from anki_miner_game.models.pipeline import Replaced
+
+    doc = Replaced.__doc__ or ""
+    assert "TextPipeline.reset()" in doc
+    assert "ReplaceRecord" in doc

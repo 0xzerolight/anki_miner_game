@@ -26,10 +26,9 @@ Changes after W0 go through a `CONTRACT-CHANGE-REQUEST` (see `CLAUDE.md`) and ar
 | `TextSource.set_status_listener(cb)` | `interfaces/text_source.py` | `cb(source_id, status)` (`StatusListener`) on every status transition, after `status` reports it, on the sink's thread; one listener, set before `start`. The session actor registers it and publishes each change as `SourceStatusChanged` |
 | `VadSettings.enabled` (docstring only) | `models/config.py` | Effective value is `enabled and <VAD add-on installed>`, enforced by the VAD add-on; no behaviour change |
 
-## W1 integration (requested, pending the orchestrator's ruling)
+## W1 integration (accepted by the orchestrator)
 
-Filed by the wave 1 integration fix (`.orchestration/status/wave-1-integration-fix.json`). Not in the
-code yet; the contract agent moves each row up once accepted.
+Filed by the wave 1 integration fix (`.orchestration/status/wave-1-integration-fix.json`), applied by C1.
 
 | Name | Where | What it is |
 |---|---|---|
@@ -37,3 +36,12 @@ code yet; the contract agent moves each row up once accepted.
 | `ObsDiscovery.wait_ready`, `ObsGateway.connect`, `ObsGateway.request` (docstrings) | `interfaces/obs.py` | Ready = `GetVersion` succeeds, not "accepts connections"; `connect` and `request` retry 207 `NotReady` until a timeout, then raise `ObsRequestError` (S1 summary 5 and 11) |
 | `WindowItem.enabled: bool` | `models/obs.py` | `itemEnabled` from `GetInputPropertiesListPropertyItems`; `False` on the configured value OBS keeps listing when no live window matches it (S1 summary 12) |
 | `Replaced` (docstring) | `models/pipeline.py` | The merge's base is the previous line accepted since the last `TextPipeline.reset()`; the actor journals a `ReplaceRecord` only when that line is the journal's last `LineRecord` |
+
+## T24 OCR add-on (accepted by the orchestrator)
+
+Filed by T24 (`.orchestration/status/t24-ocr-addon.json`), applied by C2.
+
+| Name | Where | What it is |
+|---|---|---|
+| `AddonService.note -> str \| None` | `interfaces/addons.py` | Property: a platform limitation shown beside the status, or `None`. The OCR add-on on Linux says OCR needs an X11 session; the VAD add-on returns `None` |
+| `OcrAreaPicker.pick` (docstring) | `interfaces/addons.py` | Raises `RuntimeError` (the add-on's `OcrError`) with a message fit for the dialog when owocr cannot run or exits without an answer |
