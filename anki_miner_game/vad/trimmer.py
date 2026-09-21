@@ -15,6 +15,12 @@ is a rewrite from the manifest and no second subtitle file exists (spec 13.3). T
   rewrites the subtitle from ``live_cues``: the live subtitle stands (spec 13, 17).
 - ``restore``: the subtitle from ``live_cues``, ``vad`` ``restored``; needs no add-on.
 
+A manifest write that Windows refuses because another handle has the file open is retried after
+short waits (``WRITE_BACKOFF_S``) on the job thread. A ``queued`` marker that cannot be written
+does not hold the pass back; if ``vad_running`` still cannot be written, the pass fails without
+running. Every job that starts ends with ``Presenter.vad_finished``, even when its outcome
+could not be written.
+
 ``VadSettings.enabled`` is the switch for ``queue`` (the pass after finalise); ``rerun`` is the
 user's explicit request and runs either way. Either runs only while the add-on is ready.
 
@@ -33,6 +39,7 @@ import logging
 import subprocess
 import tempfile
 import threading
+import time
 from bisect import bisect_left
 from collections.abc import Callable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -47,7 +54,7 @@ from anki_miner_game.models.cue import Cue, Region
 from anki_miner_game.models.manifest import ManifestState, SessionManifest, VadRecord, VadState
 from anki_miner_game.session.manifest import load_manifest, write_manifest_atomic
 from anki_miner_game.session.srt_writer import write_srt_atomic
-from anki_miner_game.store import StoreError
+from anki_miner_game.store import StoreError, StoreWriteError
 from anki_miner_game.vad import model_pin
 from anki_miner_game.vad.assign import assign
 
@@ -56,6 +63,10 @@ log = logging.getLogger(__name__)
 WORKER_SCRIPT: Final = Path(__file__).resolve().parent / "worker" / "vad_worker.py"
 MODEL_NAME: Final = PurePath(model_pin.MODEL_FILENAME).stem
 """Recorded in ``VadRecord.model``."""
+
+WRITE_BACKOFF_S: Final = (0.1, 0.2, 0.5, 1.0, 2.0)
+"""Waits between attempts to write a manifest that Windows reports locked (``PermissionError``): another
+handle has it open, such as the GUI re-reading it or a virus scanner. 3.8 s in all, on the job thread."""
 
 _NO_WINDOW: Final[int] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 """Keeps a console window from flashing up on Windows; 0 elsewhere."""
@@ -106,11 +117,13 @@ class VadTrimmer:
         config: Callable[[], AppConfig],
         *,
         worker_script: Path = WORKER_SCRIPT,
+        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self._addon = addon
         self._presenter = presenter
         self._config = config
         self._worker_script = worker_script
+        self._sleep = sleep
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="vad-job")
         self._manifest_lock = threading.Lock()
         """Held for every read-modify-write of a manifest, from the job thread and from callers."""
@@ -163,6 +176,8 @@ class VadTrimmer:
                 if session is None:
                     return
                 write_manifest_atomic(manifest_path, replace(session.manifest, vad=VadRecord(state=VadState.QUEUED)))
+        except StoreWriteError as exc:  # the job thread writes the manifest again, and waits out a lock there
+            log.warning("VAD pass for %s queued without the queued marker: %s", manifest_path, exc)
         except StoreError as exc:
             log.warning("VAD pass for %s not queued: %s", manifest_path, exc)
             return
@@ -198,13 +213,23 @@ class VadTrimmer:
             record = VadRecord(state=VadState.UNAVAILABLE, message=_UNAVAILABLE[status])
             self._settle(manifest_path, session, record, None)
             return
-        if not self._update(manifest_path, lambda m: replace(m, state=ManifestState.VAD_RUNNING)):
+        try:
+            self._update(manifest_path, lambda m: replace(m, state=ManifestState.VAD_RUNNING))
+        except StoreWriteError as exc:
+            message = f"The session file could not be written: {exc}"
+            self._settle(manifest_path, session, VadRecord(VadState.FAILED, message=message), None)
+            return
+        except (FileNotFoundError, StoreError) as exc:
+            log.warning("VAD job for %s skipped: %s", manifest_path, exc)
             return
         try:
             regions = self._run_worker(manifest_path, session.video)
         except _CancelledError:
             log.info("VAD pass for %s stopped; it stays queued", manifest_path)
-            self._update(manifest_path, lambda m: replace(m, state=ManifestState.READY))
+            try:
+                self._update(manifest_path, lambda m: replace(m, state=ManifestState.READY))
+            except (FileNotFoundError, StoreError) as exc:
+                log.warning("VAD job could not update %s: %s", manifest_path, exc)
             return
         except _PassFailedError as exc:
             log.warning("VAD pass for %s failed: %s", manifest_path, exc)
@@ -222,7 +247,11 @@ class VadTrimmer:
             self._settle(manifest_path, session, VadRecord(state=VadState.RESTORED), None)
 
     def _settle(self, manifest_path: Path, session: _Session, record: VadRecord, cues: Sequence[Cue] | None) -> None:
-        """Write the subtitle (``cues``, or the live cues), then ``vad`` and ``ready``; tell the presenter."""
+        """Write the subtitle (``cues``, or the live cues), then ``vad`` and ``ready``; tell the presenter.
+
+        The presenter hears ``record.state`` even when the manifest cannot be written (logged): the job
+        has ended either way.
+        """
         try:
             write_srt_atomic(
                 session.subtitle, cues if cues is not None else [c.to_cue() for c in session.manifest.live_cues]
@@ -230,19 +259,33 @@ class VadTrimmer:
         except OSError as exc:
             log.warning("VAD job for %s could not write %s: %s", manifest_path, session.subtitle, exc)
             record = VadRecord(VadState.FAILED, model=record.model, message=f"The subtitle could not be written: {exc}")
-        if self._update(manifest_path, lambda m: replace(m, state=ManifestState.READY, vad=record)):
-            log.info("VAD job for %s: %s", manifest_path, record.state)
-            self._presenter.vad_finished(manifest_path, record.state)
-
-    def _update(self, manifest_path: Path, change: Callable[[SessionManifest], SessionManifest]) -> bool:
-        """Apply ``change`` to the manifest on disk; false (logged) when it cannot be read or written."""
         try:
-            with self._manifest_lock:
-                write_manifest_atomic(manifest_path, change(load_manifest(manifest_path)))
+            self._update(manifest_path, lambda m: replace(m, state=ManifestState.READY, vad=record))
         except (FileNotFoundError, StoreError) as exc:
-            log.warning("VAD job could not update %s: %s", manifest_path, exc)
-            return False
-        return True
+            log.warning("VAD job for %s (%s) could not update the manifest: %s", manifest_path, record.state, exc)
+        else:
+            log.info("VAD job for %s: %s", manifest_path, record.state)
+        self._presenter.vad_finished(manifest_path, record.state)
+
+    def _update(self, manifest_path: Path, change: Callable[[SessionManifest], SessionManifest]) -> None:
+        """Apply ``change`` to the manifest on disk.
+
+        A write refused with ``PermissionError`` (Windows: another handle has the manifest open) is
+        tried again after each ``WRITE_BACKOFF_S`` wait, re-reading the manifest each time. Raises
+        ``FileNotFoundError`` or ``StoreError``: ``StoreWriteError`` when the write still fails.
+        """
+        waits = iter(WRITE_BACKOFF_S)
+        while True:
+            try:
+                with self._manifest_lock:
+                    write_manifest_atomic(manifest_path, change(load_manifest(manifest_path)))
+                return
+            except StoreWriteError as exc:
+                wait = next(waits, None) if isinstance(exc.__cause__, PermissionError) else None
+                if wait is None:
+                    raise
+                log.info("VAD job waits %s s to write %s again: %s", wait, manifest_path, exc)
+                self._sleep(wait)
 
     def _eligible_or_log(self, manifest_path: Path) -> _Session | None:
         try:

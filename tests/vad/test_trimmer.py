@@ -4,9 +4,12 @@ The worker is ``tests/fakes/fake_vad_worker.py``, run by this interpreter the wa
 the real one, so the protocol, the subprocess handling and the manifest writes are all real.
 """
 
+import errno
 import json
+import os
 import sys
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -28,7 +31,7 @@ from anki_miner_game.models.manifest import (
 from anki_miner_game.models.profile import TextMode
 from anki_miner_game.session.manifest import load_manifest, write_manifest_atomic
 from anki_miner_game.session.srt_writer import format_srt, write_srt_atomic
-from anki_miner_game.vad.trimmer import WORKER_SCRIPT, VadTrimmer
+from anki_miner_game.vad.trimmer import WORKER_SCRIPT, WRITE_BACKOFF_S, VadTrimmer
 
 FAKE_WORKER = Path(__file__).resolve().parents[1] / "fakes" / "fake_vad_worker.py"
 JOIN_S = 30
@@ -151,12 +154,20 @@ def presenter() -> RecordingPresenter:
 
 
 @pytest.fixture
-def make_trimmer(model, presenter):
+def sleeps() -> list[float]:
+    """The waits the trimmer asked for before writing a manifest again."""
+    return []
+
+
+@pytest.fixture
+def make_trimmer(model, presenter, sleeps):
     made: list[VadTrimmer] = []
 
     def make(status: AddonStatus = AddonStatus.READY, cfg: AppConfig | None = None) -> VadTrimmer:
         config = cfg or AppConfig()
-        trimmer = VadTrimmer(FakeAddon(model, status), presenter, lambda: config, worker_script=FAKE_WORKER)
+        trimmer = VadTrimmer(
+            FakeAddon(model, status), presenter, lambda: config, worker_script=FAKE_WORKER, sleep=sleeps.append
+        )
         made.append(trimmer)
         return trimmer
 
@@ -445,6 +456,113 @@ def test_a_worker_that_cannot_start_fails_the_pass(model, presenter, session):
     assert vad.state is VadState.FAILED
     assert vad.message.startswith("The VAD worker could not start:")
     assert session.srt() == LIVE_SRT
+
+
+# --- a manifest that cannot be written ----------------------------------------
+
+
+def queued(data: dict) -> bool:
+    return data["state"] == "ready" and data["vad"]["state"] == "queued"
+
+
+def running(data: dict) -> bool:
+    return data["state"] == "vad_running"
+
+
+def settled(data: dict) -> bool:
+    return data["state"] == "ready" and data["vad"]["state"] != "queued"
+
+
+def refuse_manifest_writes(
+    monkeypatch, match: Callable[[dict], bool], *, times: int | None = None, error: OSError | None = None
+) -> list[Path]:
+    """Fail ``os.replace`` onto a manifest for the writes ``match`` picks: ``times`` times, or every time.
+
+    The default error is the one Windows raises while another handle has the manifest open (the GUI
+    reading it, a virus scanner). Returns the refused targets.
+    """
+    real_replace = os.replace
+    refused: list[Path] = []
+
+    def replace(src, dst):
+        manifest = str(dst).endswith(".session.json") and (times is None or len(refused) < times)
+        if manifest and match(json.loads(Path(src).read_text(encoding="utf-8"))):
+            refused.append(Path(dst))
+            raise error or PermissionError(errno.EACCES, "The file is being used by another process")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", replace)
+    return refused
+
+
+@pytest.mark.parametrize("match", [running, settled], ids=["pass-start", "pass-end"])
+def test_a_manifest_write_refused_once_is_retried(monkeypatch, make_trimmer, presenter, sleeps, session, match):
+    session.script(worker_lines(EXAMPLE_REGIONS))
+    refused = refuse_manifest_writes(monkeypatch, match, times=1)
+    trimmer = make_trimmer()
+
+    trimmer.queue(session.manifest)
+    run_jobs(trimmer)
+
+    assert refused == [session.manifest]
+    assert sleeps == [WRITE_BACKOFF_S[0]]
+    assert session.srt() == TRIMMED_SRT
+    assert session.load().state is ManifestState.READY
+    assert session.load().vad.state is VadState.DONE
+    assert presenter.finished == [(session.manifest, VadState.DONE)]
+
+
+def test_a_queued_marker_that_cannot_be_written_still_runs_the_pass(monkeypatch, make_trimmer, presenter, session):
+    session.script(worker_lines(EXAMPLE_REGIONS))
+    refused = refuse_manifest_writes(monkeypatch, queued, times=1)
+    trimmer = make_trimmer()
+
+    trimmer.queue(session.manifest)
+    run_jobs(trimmer)
+
+    assert refused == [session.manifest]
+    assert session.srt() == TRIMMED_SRT
+    assert session.load().vad.state is VadState.DONE
+    assert presenter.finished == [(session.manifest, VadState.DONE)]
+
+
+@pytest.mark.parametrize(
+    ("error", "waits"),
+    [(None, list(WRITE_BACKOFF_S)), (OSError(errno.ENOSPC, "No space left on device"), [])],
+    ids=["locked", "disk-full"],
+)
+def test_a_manifest_that_cannot_be_marked_running_fails_the_pass(
+    monkeypatch, make_trimmer, presenter, sleeps, session, error, waits
+):
+    session.script(worker_lines(EXAMPLE_REGIONS))
+    refuse_manifest_writes(monkeypatch, running, error=error)
+    trimmer = make_trimmer()
+
+    trimmer.queue(session.manifest)
+    run_jobs(trimmer)
+
+    assert session.started is None  # the worker never ran
+    assert sleeps == waits  # only a sharing violation is waited out
+    vad = session.load().vad
+    assert vad.state is VadState.FAILED
+    assert vad.message.startswith("The session file could not be written:")
+    assert session.srt() == LIVE_SRT
+    assert presenter.finished == [(session.manifest, VadState.FAILED)]
+
+
+def test_the_job_ends_with_vad_finished_when_its_outcome_cannot_be_written(
+    monkeypatch, make_trimmer, presenter, sleeps, session
+):
+    session.script(worker_lines(EXAMPLE_REGIONS))
+    refuse_manifest_writes(monkeypatch, settled)
+    trimmer = make_trimmer()
+
+    trimmer.queue(session.manifest)
+    run_jobs(trimmer)
+
+    assert sleeps == list(WRITE_BACKOFF_S)
+    assert session.load().vad.state is VadState.QUEUED  # re-queued at the next launch
+    assert presenter.finished == [(session.manifest, VadState.DONE)]
 
 
 # --- restore ----------------------------------------------------------------
