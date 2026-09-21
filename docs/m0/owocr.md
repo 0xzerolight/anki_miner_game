@@ -57,6 +57,12 @@ amendment 6.
 
 ## Owner-environment incident
 
+R3 did not leave the owner desktop untouched. An unisolated nested kwin rewrote the owner's
+`~/.config/kwinrc` and `~/.config/kwinoutputconfig.json`, and KDE regenerated `gtkrc`,
+`gtkrc-2.0`, `Trolltech.conf`, `gtk-3.0/settings.ini`, `gtk-4.0/settings.ini` and
+`xsettingsd/xsettingsd.conf`. Copies of the rewritten kwin files are the evidence in
+`/home/light/Projects/anki_miner_game/.orchestration/incidents/2026-09-21-kwin-config/`.
+
 `nest.sh` started `kwin_wayland --virtual --xwayland` with the owner's environment minus
 `WAYLAND_DISPLAY` and `DISPLAY`, so the nested kwin kept the owner's `HOME`, `XDG_CONFIG_HOME`,
 `XDG_RUNTIME_DIR`, `DBUS_SESSION_BUS_ADDRESS` and `SESSION_MANAGER`. It wrote the owner's config
