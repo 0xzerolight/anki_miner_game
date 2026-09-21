@@ -22,6 +22,10 @@ Rules this module keeps (wave-1 amendments 3 and 8, wave 2a contracts, M0 findin
   runs on the source's thread and is handed to the loop with ``call_soon_threadsafe``.
 - A profile or collection switch is done on its ``...Changed`` event, never on the answer (R2 item
   5), and a switch to what is already current is never sent (R2 item 4: no event would come).
+- The app never pauses a recording: pause edges come only from OBS's ``PAUSED`` / ``RESUMED``
+  events (M0 ruling on R1 finding 1; provisioning gives the app's profile its own recording encoder).
+- Drift samples are taken on the ``EventClock`` only, and the ``OutputDurationClock`` adds the lag
+  the latest one measured (spec 7 as amended).
 """
 
 import asyncio
@@ -131,9 +135,10 @@ no ``STARTED``; no ``STARTED`` within 10 s and ``GetRecordStatus`` inactive is t
 ``STARTED`` 7-184 ms after the request."""
 RECORD_OUTPUT_NAMES: Final = ("simple_file_output", "adv_file_output")
 """R2 item 8: the file output of ``[Output] Mode`` (Simple, Advanced); its ``GetOutputSettings``
-``path`` is the file being recorded, the first file even after a split (item 10). Both are asked: a
-running output keeps its handler through a profile switch (source findings section 8), so the
-current profile's mode need not be the recording's; the absent one answers 600."""
+``path`` is the file being recorded, the first file even after a split (item 10). They are tried in
+turn rather than picked by reading ``[Output] Mode``: a running output keeps its handler through a
+profile switch (source findings section 8), so the current profile's mode need not be the
+recording's, and the absent output answers 600."""
 RESTART_QUESTION_S: Final = 3.0
 """R2 items 3 and 5: ``SetCurrentProfile`` answers within a millisecond of its ``...Changed`` event, or
 not at all while OBS's modal restart question is open. No answer this long after the event is that
