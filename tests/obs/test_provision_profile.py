@@ -330,7 +330,7 @@ async def test_a_changed_output_root_moves_the_record_directory(tmp_path):
 
 def test_the_provisioner_conforms_to_the_provisioner_protocol():
     members = [attr for attr in vars(Provisioner) if not attr.startswith("_")]
-    assert sorted(members) == ["ensure_collection", "ensure_profile", "list_windows"]
+    assert sorted(members) == ["capture_method", "ensure_collection", "ensure_profile", "list_windows"]
     for member in members:
         expected = inspect.getattr_static(Provisioner, member)
         actual = inspect.getattr_static(ObsProvisioner, member)
