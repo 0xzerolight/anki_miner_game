@@ -45,6 +45,11 @@ class VadJobs(Protocol):
     ``vad`` record, then calls ``Presenter.vad_finished`` with that state. A job
     skipped because its manifest is missing, unreadable or not a placed session
     with a subtitle, and a job dropped at shutdown, get no call.
+
+    Jobs live only in the running app. A manifest found at launch with
+    ``state`` ``vad_running`` or ``vad.state`` ``queued`` was left so by a pass
+    that a quit or a crash interrupted; nothing resumes it, so the app passes
+    each such manifest to ``rerun`` once when it first loads the recent sessions.
     """
 
     def queue(self, manifest_path: Path) -> None: ...

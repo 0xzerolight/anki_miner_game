@@ -617,6 +617,9 @@ case in that row of the spec's unit-test table.
 - `gui/main_window.py` (replaces the minimal one), `gui/tray.py`, `gui/widgets/*`; spec 16, 17,
   Appendix C. Recent-session row: Open folder, context menu Re-run VAD / Restore untrimmed subtitle
   through `VadJobs`. Emits requests for dialogs and the wizard.
+- When the recent sessions first load at launch, pass each manifest with `state` `vad_running` or
+  `vad.state` `queued` to `VadJobs.rerun` once: a pass a quit or crash interrupted is not live and
+  nothing else resumes it (`VadJobs` docstring; wave 2a integration fix).
 
 ### T20 game profile + settings dialogs (Opus xhigh, W3)
 - `gui/game_profile_dialog.py`, `gui/settings_dialog.py`; spec 5 tables, 11.3 window picker, 12
@@ -635,6 +638,8 @@ case in that row of the spec's unit-test table.
 ### T26 GUI wiring (Opus xhigh, W3, after T19-T21)
 - `app.py`, `gui/main_window.py` connections: dialogs, wizard, tray, hotkey, auto mode, clipboard,
   OCR, VAD; recent sessions refresh after finalise; offscreen launch smoke.
+- Wire T19's launch-time hand-off of interrupted VAD passes (`vad_running` or `vad.state` `queued`)
+  to `VadJobs.rerun`, once per launch, before the first `queue` from a finalise.
 
 ### T27 PyInstaller + bundle smoke (Opus xhigh, W4)
 - `anki_miner_game.spec` (one-folder, data files `page.html`, `vad_worker.py`, `requirements.txt`,
