@@ -16,10 +16,10 @@ to the subscribed handlers under one lock, so handlers see `_Connected`, then th
 order, then `_ConnectionLost`. `connect` opens both clients (a refused password re-reads the
 credentials once), checks `GetVersion` (207 retried) against `REQUIRED_REQUESTS` and announces
 `_Connected`; `request` waits while `collection_changing`, retries 207 and turns a transport
-failure into a lost link, which starts a backoff reconnect loop that re-reads the credentials at
-every attempt. `FakeObsServer` is a `websockets` server speaking ops 0/1/2/5/6/7 with SHA-256
-auth, answering from a reply table, and replaying JSONL transcripts in the format of
-`tools/obs_transcript_recorder.py`.
+failure, a timeout or a cancellation after sending into a lost link, which starts a backoff
+reconnect loop that re-reads the credentials at every attempt. `FakeObsServer` is a `websockets`
+server speaking ops 0/1/2/5/6/7 with SHA-256 auth, answering from a reply table, and replaying
+JSONL transcripts in the format of `tools/obs_transcript_recorder.py`.
 
 **Tech Stack:** Python 3.12, obsws-python 1.8.0 (websocket-client 1.9.2 underneath), websockets
 17.1 (the fake only), pytest 9 + pytest-asyncio 1.4 (`asyncio_mode = "auto"`), black, ruff, mypy.
@@ -104,8 +104,13 @@ Verbatim from the master plan; every task below inherits them.
   passed black, ruff, mypy and the full suite (1135 passed) in this worktree; the Task 1 and Task 3
   intermediate states passed their own tests; the Task 4 tests failed on the Task 3 code as
   listed in Task 4; and the replay test passed on all 24 draft transcripts in R2's worktree
-  (read-only) and on 29 raw R2 runs. The prototype was deleted before this plan was committed; you
-  write the files again, test first.
+  (read-only) and on 29 raw R2 runs. After judge round 1 the revised code was assembled from this
+  plan again and run: Task 2 `14 passed`, Task 3 `32 passed`, the Task 4 tests on the Task 3 code
+  `10 failed, 35 passed` (the ten listed there), Task 4 `59 passed` and ten clean `-n 16` runs,
+  Task 5 `26 passed` on the 24 transcripts R2 committed (`feat/r2-obs-behaviour` b8d8398, copied in
+  and removed again), and the gate `exit 0` (1165 passed); each new test also failed on the code
+  without its fix. The prototype was deleted before this plan was committed; you write the files
+  again, test first.
 
 ## Decisions made while planning
 
@@ -124,10 +129,12 @@ findings and the installed library sources.
    retries; a second refusal raises `ObsAuthError`. A refusal is recognised as "Hello carried an
    `authentication` challenge and Identify failed" (OBS closes with 4009; obsws-python surfaces it
    as an `OBSSDKError`, and raises the same type when no password was given), so a missing
-   password counts too. While the background reconnect loop fails on the password, `request()`
-   raises `ObsAuthError` instead of `ObsConnectError`, so T15 can raise the password banner from
-   either path. The flag clears at the next successful connect. No contract change:
-   `ObsAuthError` is an `ObsConnectError`.
+   password counts too. `ObsAuthError` comes from `connect()` only: T15 raises the password
+   banner around `connect()` (its `_ensure_connected`, which arming and launch call again after a
+   loss), and `connect()` during the backoff tries at once (decision 3). The background reconnect
+   loop logs a refused password and keeps retrying with freshly read credentials; `request()`
+   raises plain `ObsConnectError` meanwhile. The gateway keeps no "password refused" flag (judge
+   round 1, finding 2). No contract change: `ObsAuthError` is an `ObsConnectError`.
 3. **Reconnect starts only after a connection that succeeded is lost.** A failed first
    `connect()` raises and starts nothing: the caller (arming) decides to launch OBS and wait. After
    a loss the gateway reconnects (`BACKOFF_S` = 1, 2, 5, 10, 10 ... s, the text sources'
@@ -140,8 +147,13 @@ findings and the installed library sources.
 4. **A lost link** is: obsws-python's event thread ending (the socket closed), or a request failing
    below the protocol (closed socket, unreadable or mismatched reply) or timing out
    (`REQUEST_TIMEOUT_S`, the socket timeout; obsws-python cannot match a late reply, so a client
-   is never reused after one, S1 summary 16). Teardown aborts both sockets (which wakes a request
-   blocked in `recv`), closes them without a close handshake and joins the event thread.
+   is never reused after one, S1 summary 16), or a request whose caller cancelled it after it went
+   out (T15 wraps each switch in `asyncio.timeout(15)`; R2 item 3's restart question leaves
+   `SetCurrentProfile` unanswered). A cancelled request's answer, if it ever came, would be read as
+   the answer to the next request on that socket, and the worker thread would stay blocked until
+   the socket timeout. A request cancelled while still queued behind another never reached OBS and
+   costs nothing. Teardown aborts both sockets (which wakes a request blocked in `recv`), closes
+   them without a close handshake and joins the event thread.
 5. **Raw event data.** obsws-python converts `eventData` to snake-case dataclasses and dispatches
    by function name; `ObsEvent.data` must be `eventData` as OBS sent it (camelCase `outputState`,
    `outputPath`, `newOutputPath`). `_EventClient` subclasses `obsws_python.EventClient`, swaps in a
@@ -153,10 +165,14 @@ findings and the installed library sources.
    `ExitStarted`, profile and collection switches, record events. The `ReqClient` identifies with
    0, so OBS never sends it an event frame that obsws-python would take for a response.
 7. **`_Connected` comes first.** `connect` opens both clients, then checks `GetVersion`, then
-   announces `_Connected`. Events that reach the new link before that (the R2 recordings have
-   `CurrentProfileChanged` right after Identify) are held on the link, with their arrival stamps,
-   and delivered right after `_Connected` (spec 6.3: reconcile runs "before any event is
-   trusted"). A failed connect drops them.
+   announces `_Connected`. An event that reaches the new event connection before that (OBS's user
+   starts a recording or switches profile between Identify and the `GetVersion` answer, a window
+   that 207 retries stretch while OBS loads) is held on the link, with its arrival stamp, and
+   delivered right after `_Connected` (spec 6.3: reconcile runs "before any event is trusted"). A
+   failed connect drops them. None of the 24 R2 recordings has such an event: in each, the first
+   frame after both Identifieds is a client request, and R2 item 5 puts the first event on a new
+   connection about 40 ms after `Identified`. The window is small but real, so the hold stays; a
+   live test parks `connect` inside its 207 retry to pin it (Task 3).
 8. **`collection_changing`** is set by a delivered `CurrentSceneCollectionChanging` and cleared by
    `CurrentSceneCollectionChanged`, by a lost connection and by `close()`. `request` polls it
    (`COLLECTION_POLL_S`) until it clears or `NOT_READY_TIMEOUT_S` passes, then sends anyway: a lost
@@ -192,7 +208,11 @@ findings and the installed library sources.
     - `GetVersion` exchanges are dropped and the first successful recorded answer becomes the
       fake's live `GetVersion` answer, because the gateway sends its own at every connect;
     - Hello/Identify/Identified are dropped: the fake runs the handshake live, without
-      authentication (the recorded authentication is redacted).
+      authentication (the recorded authentication is redacted);
+    - a request on a generation's connections that OBS never answered makes the loader refuse the
+      file (`ValueError` naming it). In the 24 R2 files the one unanswered request (restart
+      prompt) and every 207 (`switch_not_ready`) sit on other clients' connections, so the replay
+      has no code for either (judge round 1, finding 4).
 
     The fake plays the steps in recorded order: an `open` binds the next identified client of that
     role (whatever order the gateway connects in); a `request` waits for the bound client to send
@@ -210,6 +230,40 @@ findings and the installed library sources.
     not list the host (`websocket/_url.py:108-200`), and obsws-python passes no proxy options. The
     tests clear `http_proxy`/`HTTP_PROXY` (autouse fixture in `tests/obs/conftest.py`); the app is
     flagged for H5 and the user guide, not worked around.
+
+## Judge notes
+
+Round 1 (`.orchestration/reviews/t12-obs-gateway-judge-r1.md`): five findings, all accepted.
+
+1. **BLOCKER, cancelled request keeps an out-of-step link.** Accepted. Task 4 edits 8 and 9: `_send`
+   submits to the executor itself so it holds the `concurrent.futures.Future`; on
+   `CancelledError`, `job.cancel()` failing means the request is on the wire, so the link is lost
+   (decision 4). Tests `test_a_request_cancelled_after_it_was_sent_drops_the_connection` (the
+   judge's test: `[CONNECTED, LOST, CONNECTED]`, then the next request gets its own answer) and the
+   guard `test_a_request_cancelled_before_it_was_sent_keeps_the_connection`.
+2. **`_auth_failed` goes stale.** Accepted, first option: the flag is gone. Evidence that nothing
+   needs it: the T15 plan (`.worktrees/t15-session/docs/plans/tasks/t15-session.md`) catches
+   `ObsAuthError` only around `connect()` in `_ensure_connected` (line 1997) and calls
+   `_ensure_connected` again after `_ConnectionLost` (arming, launch), and `connect()` during the
+   backoff tries at once. Decision 2 and the Task 4 auth test now pin "`request()` raises plain
+   `ObsConnectError`, `connect()` raises `ObsAuthError`".
+3. **Decision 7's evidence.** Accepted and checked: in all 24 committed R2 transcripts the first
+   frame after both Identifieds is a client request. Decision 7 now gives the real reason (the
+   Identify-to-`GetVersion` window, stretched by 207 retries) and cites R2 item 5; Task 3 adds
+   `test_an_event_that_arrives_during_connect_follows_connected`, which parks `connect` in its
+   207 retry, emits an event, waits until the event thread has stamped it, and checks it is held.
+4. **207-run and never-answered replay code.** Accepted and checked (the only 207s are
+   `switch_not_ready` conn 3, the only unanswered request `switch_restart_prompt` conn 3, both
+   other clients). Removed: the 207 merge in `exchanges()`, the 207 repeats in `_replay`,
+   `replay()`'s pending unanswered requests, the sample's 207 records and its `GetStreamStatus`
+   run. Two adaptations: the loader now refuses a never-answered request on the recorded client's
+   own connections (so `Exchange.response` is never `None`; test
+   `test_the_loader_refuses_a_request_of_the_recorded_client_obs_never_answered`), and the
+   sample's conn 3 keeps an unanswered request instead of a 207 poll, which is the real
+   `switch_restart_prompt` shape the other-client rule must drop. The rules for the shapes left out
+   are written down under "Which tests need which transcript".
+5. **`close()` does not stop an in-flight `connect()`.** Accepted: `_mark_ready` raises
+   `ObsConnectError` when `_closed` is set; `test_close_while_connect_is_under_way_leaves_nothing_open`.
 
 ## File structure
 
@@ -249,8 +303,9 @@ class ObsClient:                       # satisfies interfaces.obs.ObsGateway
     async def connect(self) -> ObsInfo: ...          # ObsConnectError | ObsAuthError | ObsConfigError
                                                      # | ObsUnsupportedError | ObsRequestError(207)
     async def request(self, name: str, **fields: Any) -> dict[str, Any]: ...
-                                                     # ObsRequestError | ObsConnectError
-                                                     # | ObsAuthError (reconnect refused the password)
+                                                     # ObsRequestError | ObsConnectError; cancelled
+                                                     # after sending: the connection is dropped
+                                                     # (_ConnectionLost, then reconnect)
     def subscribe(self, handler: Callable[[ObsEvent], None]) -> None: ...
     @property
     def collection_changing(self) -> bool: ...
@@ -270,7 +325,7 @@ def version_data(*, obs_version: str = "32.2.2", websocket_version: str = "5.7.4
 NOT_READY_REPLY = Reply(code=207, comment=NOT_READY_COMMENT)
 @dataclass(frozen=True) class RecordedRequest: client: int; request_type: str; request_data: Mapping[str, Any]
 @dataclass(frozen=True) class Step: conn; kind: Literal["open", "request", "response", "event", "close"]; d; by; code; reason
-@dataclass(frozen=True) class Exchange: generation: int; request_type: str; request_data: Mapping[str, Any]; response: Mapping[str, Any] | None
+@dataclass(frozen=True) class Exchange: generation: int; request_type: str; request_data: Mapping[str, Any]; response: Mapping[str, Any]
 @dataclass(frozen=True) class Transcript:
     name: str; roles: Mapping[int, Role]; generations: tuple[tuple[int, int], ...]
     steps: tuple[Step, ...]; version: Mapping[str, Any] | None
@@ -279,7 +334,8 @@ NOT_READY_REPLY = Reply(code=207, comment=NOT_READY_COMMENT)
     def close_of(self, conn: int) -> Step | None: ...
     def exchanges(self) -> list[Exchange]: ...
     def expected_events(self, subscriptions: int, connected: str, lost: str) -> list[tuple[str, dict[str, Any]]]: ...
-def load_transcript(path: Path) -> Transcript: ...
+def load_transcript(path: Path) -> Transcript: ...   # ValueError: overlapping generations, or a
+                                                    # request of the recorded client never answered
 class FakeObsServer:
     def __init__(self, *, password: str | None = None, version: Mapping[str, Any] | None = None,
                  transcript: Transcript | None = None) -> None: ...
@@ -330,14 +386,24 @@ or added file needs no change here. G = generations, X = exchanges the test send
 | `provision`, `settings_apply`, `window_retitle`, `split_off_runtime`, `start_failed_missing_dir`, `start_failed_unwritable`, `synthetic-arm-virtualcam-active` | 1 | 4-38 | Inputs/Scenes/SceneItems events filtered out by the 67 mask; 604/702 failures |
 | `split` | 1 | 7 | `RecordFileChanged` delivered raw (`newOutputPath`) |
 
-If the M0 gate commits a transcript whose shape the loader refuses (overlapping generations) or
-whose replay gets stuck, the failure message names the file and the step
-(`FakeObsServer.replay_position`). Extend the loader rule for that shape in
-`tests/fakes/fake_obs_server.py` with a sample test first; if the recording shows the recorded
-client sending a request between a `CurrentSceneCollectionChanging` it did not cause and the
-matching `Changed` (the gateway defers such a request, so the replay would wait for a request the
-gateway holds back), the rule is: the loader moves that request after the `Changed` and drops its
-207 answers. Neither case occurs in the 24 draft files, so neither rule is written now.
+If the M0 gate commits a transcript whose shape the loader refuses (overlapping generations, a
+request of the recorded client that OBS never answered) or whose replay gets stuck, the failure
+message names the file and the step (`FakeObsServer.replay_position`). Extend the loader rule for
+that shape in `tests/fakes/fake_obs_server.py` with a sample test first. The rules for the shapes
+already foreseen:
+- a 207 run on the recorded client's own connections (the replay gets stuck on the test's second
+  send of it, because the gateway already retried): `Transcript.exchanges()` merges a run of 207
+  answers followed by the same request into one exchange;
+- a request of the recorded client that OBS never answered: the loader keeps it, `replay()`
+  leaves it pending and expects it to end as `ObsConnectError` at `close()`;
+- the recorded client sending a request between a `CurrentSceneCollectionChanging` it did not
+  cause and the matching `Changed` (the gateway defers such a request, so the replay would wait
+  for a request the gateway holds back): the loader moves that request after the `Changed` and
+  drops its 207 answers.
+
+None of these occurs in the 24 files R2 committed (checked by scanning them: the only 207s are on
+`switch_not_ready` conn 3 and the only unanswered request on `switch_restart_prompt` conn 3, both
+other clients), so none of these rules is written now.
 
 ---
 
@@ -929,12 +995,13 @@ records. The replay rules are decision 13.
 Synthetic: every record says so in its ``synthetic`` field. The recorded R2 sessions in
 ``tests/fixtures/obs_transcripts/`` are the real thing; this one exists so that the loader and the
 replay rules are pinned by a file whose every line is known. It holds, in order: a request client
-(conn 1) and an event client (conn 2); an event right after the event client identifies; a
-``GetVersion`` exchange; a recording start with an Inputs event among the Outputs events; a second
-request client (conn 3) polling beside the first and getting 207; a scene collection switch; a 207
-run on the main client; a failed request without data; the recorded client dropping both
-connections and reconnecting (conns 4 and 5); ``ExitStarted`` without ``eventData``; OBS closing
-both connections; a refused reconnect (conn 6).
+(conn 1) and an event client (conn 2); an event right after the event client identifies (no R2
+recording has one; the gateway holds such an event until ``_Connected``); a ``GetVersion``
+exchange; a recording start with an Inputs event among the Outputs events; a second request client
+(conn 3) beside the first, whose request OBS never answers (another client's, as in
+``switch_restart_prompt``); a scene collection switch; failed requests with and without a comment;
+the recorded client dropping both connections and reconnecting (conns 4 and 5); ``ExitStarted``
+without ``eventData``; OBS closing both connections; a refused reconnect (conn 6).
 """
 
 import json
@@ -1023,10 +1090,10 @@ def _record(state: str, active: bool, path: str | None) -> dict[str, Any]:
     return {"outputActive": active, "outputPath": path, "outputState": f"OBS_WEBSOCKET_OUTPUT_{state}"}
 
 
-_NOT_READY = {"code": 207, "comment": "OBS is not ready to perform the request."}
 _SWITCH_REQUEST, _SWITCH_RESPONSE = _exchange(
     1, "SetCurrentSceneCollection", {"sceneCollectionName": "Anki Miner Game"}
 )
+_UNANSWERED_REQUEST, _ = _exchange(3, "SetCurrentProfile", {"profileName": "Untitled"})
 
 SAMPLE_RECORDS: list[dict[str, Any]] = [
     *_open(1, 0),
@@ -1039,15 +1106,12 @@ SAMPLE_RECORDS: list[dict[str, Any]] = [
     _event(2, "InputCreated", 8, {"inputName": "Game capture", "inputKind": "xcomposite_input"}),
     _event(2, "RecordStateChanged", 64, _record("STARTED", True, RECORDING_PATH)),
     *_open(3, 0),
-    *_exchange(3, "GetRecordStatus", **_NOT_READY),
+    _UNANSWERED_REQUEST,
     _SWITCH_REQUEST,
     _event(2, "CurrentSceneCollectionChanging", 2, {"sceneCollectionName": "Untitled"}),
     _event(2, "CurrentSceneCollectionChanged", 2, {"sceneCollectionName": "Anki Miner Game"}),
     _SWITCH_RESPONSE,
     _close(3, "client", 1000),
-    *_exchange(1, "GetStreamStatus", **_NOT_READY),
-    *_exchange(1, "GetStreamStatus", **_NOT_READY),
-    *_exchange(1, "GetStreamStatus", data={"outputActive": False}),
     *_exchange(1, "GetReplayBufferStatus", code=604, comment="Replay buffer is not available."),
     *_exchange(1, "CreateSceneCollection", {"sceneCollectionName": "Anki Miner Game"}, code=601),
     _close(1, "client", 1000),
@@ -1133,7 +1197,6 @@ def test_the_loader_pairs_connections_and_drops_other_clients_and_get_version(tm
         (0, "GetRecordStatus", 100),
         (0, "StartRecord", 100),
         (0, "SetCurrentSceneCollection", 100),
-        (0, "GetStreamStatus", 100),
         (0, "GetReplayBufferStatus", 604),
         (0, "CreateSceneCollection", 601),
         (1, "GetRecordStatus", 100),
@@ -1159,6 +1222,14 @@ def test_the_loader_refuses_overlapping_connections(tmp_path):
 
     with pytest.raises(ValueError, match="overlap"):
         load_transcript(write_transcript(tmp_path / "overlap.jsonl", records))
+
+
+def test_the_loader_refuses_a_request_of_the_recorded_client_obs_never_answered(tmp_path):
+    """OBS exiting while the recorded client waits for an answer: a shape the replay does not take yet."""
+    records = [r for r in SAMPLE_RECORDS if not (r["conn"] == 4 and r.get("msg", {}).get("op") == 7)]
+
+    with pytest.raises(ValueError, match="never answered"):
+        load_transcript(write_transcript(tmp_path / "unanswered.jsonl", records))
 
 
 async def test_replay_binds_clients_by_role_and_plays_the_recording(tmp_path):
@@ -1252,8 +1323,8 @@ class Exchange:
     generation: int
     request_type: str
     request_data: Mapping[str, Any]
-    response: Mapping[str, Any] | None
-    """The final response's ``d``; ``None`` when OBS never answered."""
+    response: Mapping[str, Any]
+    """The response's ``d``."""
 
 
 @dataclass(frozen=True)
@@ -1276,39 +1347,23 @@ class Transcript:
         return next((s for s in self.steps if s.conn == conn and s.kind == "close"), None)
 
     def exchanges(self) -> list[Exchange]:
-        """Every request with its final answer, in sending order.
-
-        A run of 207 ``NotReady`` answers followed by the same request again is one exchange: the
-        gateway retries 207 itself.
-        """
-        pending: dict[int, collections.deque[int]] = collections.defaultdict(collections.deque)
-        found: list[list[Any]] = []
+        """Every request with its answer, in sending order (the loader refused unanswered ones)."""
+        pending: dict[int, collections.deque[Step]] = collections.defaultdict(collections.deque)
+        found: list[Exchange] = []
         for step in self.steps:
             if step.kind == "request":
-                pending[step.conn].append(len(found))
-                found.append([step, None])
+                pending[step.conn].append(step)
             elif step.kind == "response":
-                found[pending[step.conn].popleft()][1] = step.d
-        merged: list[Exchange] = []
-        for request, response in found:
-            exchange = Exchange(
-                self.generation_of(request.conn),
-                request.d["requestType"],
-                dict(request.d.get("requestData") or {}),
-                response,
-            )
-            previous = merged[-1] if merged else None
-            if (
-                previous is not None
-                and previous.response is not None
-                and previous.response["requestStatus"]["code"] == NOT_READY
-                and (previous.generation, previous.request_type, previous.request_data)
-                == (exchange.generation, exchange.request_type, exchange.request_data)
-            ):
-                merged[-1] = exchange
-            else:
-                merged.append(exchange)
-        return merged
+                request = pending[step.conn].popleft()
+                found.append(
+                    Exchange(
+                        self.generation_of(request.conn),
+                        request.d["requestType"],
+                        dict(request.d.get("requestData") or {}),
+                        step.d,
+                    )
+                )
+        return found
 
     def expected_events(self, subscriptions: int, connected: str, lost: str) -> list[tuple[str, dict[str, Any]]]:
         """``(name, data)`` a gateway subscribed to ``subscriptions`` should hand on, in order.
@@ -1341,6 +1396,8 @@ def load_transcript(path: Path) -> Transcript:
       successful recorded answer, because the gateway sends its own at every connect.
     - Hello, Identify and Identified are dropped: the fake runs the handshake live, without
       authentication (the recorded authentication is redacted).
+    - A request on a generation's connections that OBS never answered is refused: no recording
+      has one yet, and the replay does not take that shape.
     """
     records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
     opened: dict[int, int] = {}
@@ -1391,8 +1448,10 @@ def load_transcript(path: Path) -> Transcript:
                 dropped.update((request_index, index))
                 if version is None and msg["d"]["requestStatus"]["result"]:
                     version = msg["d"].get("responseData")
-    for leftovers in pending.values():  # never answered
-        dropped.update(i for i in leftovers if records[i]["msg"]["d"]["requestType"] == "GetVersion")
+    for conn, leftovers in pending.items():
+        if leftovers:
+            request_type = records[leftovers[0]]["msg"]["d"]["requestType"]
+            raise ValueError(f"{path.name}: conn {conn} sent {request_type}, which OBS never answered")
 
     steps: list[Step] = []
     for index, record in enumerate(records):
@@ -1604,8 +1663,8 @@ with
         """Play the recorded steps in order.
 
         - ``open``: bind the next identified client of that connection's role.
-        - ``request``: wait until the bound client sends it. A repeat of a request whose recorded
-          answer was 207 gets that answer again (the client retried longer than the recording).
+        - ``request``: wait until the bound client sends a request; one that differs from the
+          recording is noted in ``unscripted`` and takes the recorded one's place.
         - ``response``: send the recorded answer with the client's request id.
         - ``event``: send it when the client's subscriptions cover its ``eventIntent``.
         - ``close`` by OBS: close with the recorded code (abort for 1006); after the last
@@ -1613,8 +1672,6 @@ with
           client with a later generation: cut the connection, since that client reconnected.
         """
         bound: dict[int, _Client] = {}
-        asked: dict[int, tuple[str, dict[str, Any]]] = {}
-        not_ready: dict[int, tuple[tuple[str, dict[str, Any]], Mapping[str, Any]]] = {}
         for number, step in enumerate(transcript.steps):
             self.replay_position = f"{transcript.name} step {number}: {step.kind} on conn {step.conn} {dict(step.d)}"
             if step.kind == "open":
@@ -1622,25 +1679,12 @@ with
                 continue
             client = bound[step.conn]
             if step.kind == "request":
-                wanted = (step.d["requestType"], dict(step.d.get("requestData") or {}))
-                while True:
-                    request_id, request_type, request_data = await client.inbox.get()
-                    got = (request_type, request_data)
-                    repeat = not_ready.get(step.conn)
-                    if got != wanted and repeat is not None and got == repeat[0]:
-                        await self._send(client, OP_RESPONSE, {**repeat[1], "requestId": request_id})
-                        continue
-                    if got != wanted:
-                        self.unscripted.append(f"{self.replay_position}: got {request_type} {request_data}")
-                    break
+                request_id, request_type, request_data = await client.inbox.get()
+                if (request_type, request_data) != (step.d["requestType"], dict(step.d.get("requestData") or {})):
+                    self.unscripted.append(f"{self.replay_position}: got {request_type} {request_data}")
                 client.pending.append(request_id)
-                asked[step.conn] = wanted
             elif step.kind == "response":
                 await self._send(client, OP_RESPONSE, {**step.d, "requestId": client.pending.popleft()})
-                if step.d["requestStatus"]["code"] == NOT_READY:
-                    not_ready[step.conn] = (asked[step.conn], step.d)
-                else:
-                    not_ready.pop(step.conn, None)
             elif step.kind == "event":
                 if client.subs & step.d["eventIntent"]:
                     await self._send(client, OP_EVENT, step.d)
@@ -1657,7 +1701,7 @@ with
 - [ ] **Step 5: Run the tests to see them pass**
 
 Run: `cd /home/light/Projects/anki_miner_game/.worktrees/t12-obs-gateway && ./.venv/bin/pytest tests/fakes/test_fake_obs_server.py -n0 -p no:cacheprovider -q`
-Expected: `13 passed`.
+Expected: `14 passed`.
 
 - [ ] **Step 6: Format, lint, commit**
 
@@ -1685,13 +1729,15 @@ Everything of the gateway except reconnecting (Task 4). What each test group pin
 | authentication | "on auth failure re-read once, then a banner" (spec 17): re-read once, second refusal `ObsAuthError`; password never logged (Global Constraint, S1 summary 16) |
 | requests | `run_in_executor` on one worker (the loop stays free; concurrent requests never cross, S1 summary 16); `responseData` or `{}`; `ObsRequestError(request, code, comment)`; 207 in `request()` |
 | scene collection changes | "requests wait while `collection_changing`" (spec 11.2, 3.3); a lost `Changed` cannot hold them forever; a lost connection ends the change |
-| events | events stamped with the injected `now` on the library's thread and handed on raw (spec 4.2, 11.2); only the subscribed categories; a failing handler stops nothing |
-| close | `close()` sends no `_ConnectionLost` (`docs/contracts.md` row `ObsGateway.close()`); the gateway connects again after it |
+| events | events stamped with the injected `now` on the library's thread and handed on raw (spec 4.2, 11.2); an event that arrives while `connect` is still checking is held until `_Connected` (decision 7, spec 6.3); only the subscribed categories; a failing handler stops nothing |
+| close | `close()` sends no `_ConnectionLost` (`docs/contracts.md` row `ObsGateway.close()`); a `connect()` still under way when `close()` runs fails and leaves nothing open; the gateway connects again after it |
 
 `FakeClock.sleep` moves `now` on by the requested time, so 30 s of 207 retries take a few
 milliseconds; `FakeClock(advance=False)` keeps `now` still for the one test that must wait for an
-event; `park_from=1.0` parks the reconnect backoff (Task 4). `make_gateway` closes every gateway at
-teardown so no obsws-python thread outlives its test.
+event; `park_from` parks every sleep at least that long until `release()`: `NOT_READY_RETRY_S`
+holds `connect` inside its 207 retry with both connections open, `1.0` the reconnect backoff
+(Task 4). `make_gateway` closes every gateway at teardown so no obsws-python thread outlives its
+test.
 
 - [ ] **Step 1: Write the helpers and fixtures**
 
@@ -1738,7 +1784,7 @@ class FakeClock:
     """Injected ``now`` and ``sleep``: ``sleep`` records its argument and moves ``now`` on by it.
 
     ``advance=False`` keeps ``now`` still (a wait that never times out). ``park_from`` parks every
-    sleep of at least that many seconds (the reconnect backoff) until ``release()``.
+    sleep of at least that many seconds (a 207 retry, the reconnect backoff) until ``release()``.
     """
 
     def __init__(self, *, advance: bool = True, park_from: float | None = None) -> None:
@@ -2221,6 +2267,35 @@ async def test_events_are_stamped_on_the_library_event_thread(obs_server, make_g
     assert not stamped_by.name.startswith("obs-gateway")
 
 
+async def test_an_event_that_arrives_during_connect_follows_connected(obs_server, make_gateway):
+    """Spec 6.3: the actor reconciles on ``_Connected`` before it trusts an event of that connection."""
+    obs_server.set_reply("GetVersion", NOT_READY_REPLY, Reply(version_data()))
+    clock = FakeClock(park_from=NOT_READY_RETRY_S)
+    loop_thread = threading.current_thread()
+    stamped_on: list[threading.Thread] = []
+
+    def now() -> float:
+        stamped_on.append(threading.current_thread())
+        return clock.t
+
+    gateway, events = make_gateway(clock=clock, now=now)
+    start = clock.t
+    connecting = asyncio.create_task(gateway.connect())
+    await wait_until(lambda: clock.sleeps == [NOT_READY_RETRY_S])  # GetVersion got 207; connect is parked
+
+    await obs_server.emit("RecordStateChanged", RECORDING)
+    await wait_until(lambda: any(thread is not loop_thread for thread in stamped_on))  # the gateway has it
+    assert events.got == []
+
+    clock.release()
+    await connecting
+
+    assert [(e.name, dict(e.data), e.t_mono) for e in events.got] == [
+        (CONNECTED, {}, start + NOT_READY_RETRY_S),
+        ("RecordStateChanged", RECORDING, start),
+    ]
+
+
 async def test_only_the_subscribed_categories_reach_the_handlers(obs_server, make_gateway):
     gateway, events = make_gateway()
     await gateway.connect()
@@ -2267,6 +2342,22 @@ async def test_close_disconnects_without_a_lost_event(obs_server, make_gateway):
     assert obs_server.handshakes == 2
     with pytest.raises(ObsConnectError):
         await gateway.request("GetRecordStatus")
+
+
+async def test_close_while_connect_is_under_way_leaves_nothing_open(obs_server, make_gateway):
+    obs_server.set_reply("GetVersion", NOT_READY_REPLY, Reply(version_data()))
+    clock = FakeClock(park_from=NOT_READY_RETRY_S)
+    gateway, events = make_gateway(clock=clock)
+    connecting = asyncio.create_task(gateway.connect())
+    await wait_until(lambda: clock.sleeps == [NOT_READY_RETRY_S])  # both connections open, GetVersion got 207
+
+    await gateway.close()
+    clock.release()
+
+    with pytest.raises(ObsConnectError):
+        await connecting
+    await obs_server.wait_for_client_count(0)
+    assert events.got == []
 
 
 async def test_the_gateway_connects_again_after_close(obs_server, make_gateway):
@@ -2393,7 +2484,6 @@ class ObsClient:
         self._changing = False
         self._link: _Link | None = None
         self._info: ObsInfo | None = None
-        self._auth_failed = False
         self._closed = False
         self._loop: asyncio.AbstractEventLoop | None = None
         self._executor: ThreadPoolExecutor | None = None
@@ -2405,7 +2495,8 @@ class ObsClient:
     async def connect(self) -> ObsInfo:
         """Connect unless connected; see ``ObsGateway.connect``.
 
-        Raises ``ObsConnectError`` (OBS unreachable), ``ObsAuthError`` (the password was refused
+        Raises ``ObsConnectError`` (OBS unreachable, or ``close()`` ran before the connection was
+        up; nothing stays open), ``ObsAuthError`` (the password was refused
         twice, the credentials read again in between), ``ObsConfigError`` (from ``credentials``),
         ``ObsUnsupportedError`` (a required request is missing) or ``ObsRequestError`` (207 past
         the timeout).
@@ -2418,7 +2509,7 @@ class ObsClient:
             return await self._connect_once()
 
     async def request(self, name: str, **fields: Any) -> dict[str, Any]:
-        """See ``ObsGateway.request``. While reconnecting after a refused password it raises ``ObsAuthError``."""
+        """See ``ObsGateway.request``."""
         deadline = self._now() + NOT_READY_TIMEOUT_S
         while self._changing and self._now() < deadline:
             await self._sleep(COLLECTION_POLL_S)
@@ -2470,7 +2561,6 @@ class ObsClient:
         try:
             return await self._open()
         except _AuthRefusedError:
-            self._auth_failed = True
             raise ObsAuthError("OBS refused the websocket password") from None
 
     async def _open(self) -> "_Link":
@@ -2496,9 +2586,10 @@ class ObsClient:
         with self._lock:
             if link.lost:
                 raise ObsConnectError("OBS closed the connection while it was being set up")
+            if self._closed:
+                raise ObsConnectError("the gateway was closed while it was connecting")
             link.ready = True
             self._link = link
-            self._auth_failed = False
             self._deliver(ObsEvent(ObsEventName.CONNECTED, {}, self._now()))
             for event in link.held:
                 self._deliver(event)
@@ -2509,8 +2600,6 @@ class ObsClient:
     def _require_link(self) -> "_Link":
         link = self._link
         if link is None or link.lost:
-            if self._auth_failed:
-                raise ObsAuthError("OBS refused the websocket password")
             raise ObsConnectError("not connected to OBS")
         return link
 
@@ -2732,6 +2821,11 @@ Notes on the parts a reviewer will ask about:
   failed request), delivers `_ConnectionLost` once under the lock, and hands the rest to the loop
   with `call_soon_threadsafe`. A link that was never announced is only marked lost; `connect`
   sees the flag in `_mark_ready` and fails.
+- `_mark_ready` also fails when `close()` ran while `connect` was under way (`connect` resets
+  `_closed` before it takes the lock, `close()` cannot see a link that is not announced yet, and
+  `_run` makes a new worker after `close()` shut the old one down). The failure tears the link
+  down, so a `connect()` that finishes after `close()` leaves no connection, event thread or
+  `_Connected` behind.
 - `_teardown` aborts both sockets from the loop first (`WebSocket.abort` shuts the socket down,
   which wakes a `recv` blocked on the worker thread), then closes them and joins the event
   thread on the worker, after whatever request was in flight.
@@ -2739,7 +2833,7 @@ Notes on the parts a reviewer will ask about:
 - [ ] **Step 5: Run the tests to see them pass**
 
 Run: `cd /home/light/Projects/anki_miner_game/.worktrees/t12-obs-gateway && ./.venv/bin/pytest tests/obs/test_client.py -n0 -p no:cacheprovider -q`
-Expected: `30 passed`.
+Expected: `32 passed`.
 
 - [ ] **Step 6: Type-check, format, lint, commit**
 
@@ -2759,11 +2853,12 @@ mypy expected: `Success: no issues found`. The obsws-python base classes are `An
 
 **Files:**
 - Modify: `tests/obs/test_client.py` (imports, new section at the end)
-- Modify: `anki_miner_game/obs/client.py` (seven edits below)
+- Modify: `anki_miner_game/obs/client.py` (nine edits below)
 
 Spec 11.2: "Connection loss triggers reconnect with backoff, and every successful connect runs
 reconcile" (the actor reconciles on each `_Connected`); card: "credentials from
-`ObsDiscovery.credentials` at every connect". Decisions 2 and 3.
+`ObsDiscovery.credentials` at every connect". Decisions 2, 3 and 4 (a request cancelled after it
+was sent loses the connection).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2824,7 +2919,8 @@ async def test_the_credentials_are_read_again_at_every_connect(obs_server, make_
         await gateway.close()
 
 
-async def test_requests_raise_obs_auth_error_while_the_password_is_refused(obs_server, make_gateway):
+async def test_a_password_refused_while_reconnecting_surfaces_through_connect(obs_server, make_gateway):
+    """Decision 2: the actor's banner comes from connect(); request() never raises a stale ObsAuthError."""
     clock = FakeClock()
     gateway, events = make_gateway(clock=clock)
     await gateway.connect()
@@ -2833,19 +2929,15 @@ async def test_requests_raise_obs_auth_error_while_the_password_is_refused(obs_s
     await obs_server.drop_clients()
     await wait_until(lambda: len(clock.backoffs()) >= 2)  # the first attempt, password read twice, is over
 
-    with pytest.raises(ObsAuthError):
+    with pytest.raises(ObsConnectError) as raised:
         await gateway.request("GetRecordStatus")
+    assert type(raised.value) is ObsConnectError
+    with pytest.raises(ObsAuthError):
+        await gateway.connect()
 
     obs_server.password = PASSWORD
     await wait_until(lambda: events.count(CONNECTED) == 2)
     assert await gateway.request("GetRecordStatus") == {}
-
-    obs_server.refuse_connections = True  # a later loss is no longer about the password
-    await obs_server.drop_clients()
-    await wait_until(lambda: events.count(LOST) == 2)
-    with pytest.raises(ObsConnectError) as raised:
-        await gateway.request("GetRecordStatus")
-    assert type(raised.value) is ObsConnectError
 
 
 async def test_a_request_that_times_out_drops_the_connection_and_reconnects(obs_server, make_gateway, monkeypatch):
@@ -2859,6 +2951,39 @@ async def test_a_request_that_times_out_drops_the_connection_and_reconnects(obs_
 
     await wait_until(lambda: events.names() == [CONNECTED, LOST, CONNECTED])
     assert await gateway.request("GetRecordStatus") == {}
+
+
+async def test_a_request_cancelled_after_it_was_sent_drops_the_connection(obs_server, make_gateway):
+    """Decision 4: T15 gives a switch 15 s (spec 6.2 step 3); OBS's late answer must not reach the next request."""
+    obs_server.stall("SetCurrentProfile")
+    gateway, events = make_gateway()
+    await gateway.connect()
+
+    with pytest.raises(TimeoutError):
+        async with asyncio.timeout(0.2):
+            await gateway.request("SetCurrentProfile", profileName="Anki Miner Game")
+
+    await wait_until(lambda: events.names() == [CONNECTED, LOST, CONNECTED])
+    obs_server.set_reply("GetRecordStatus", Reply({"outputActive": True}))
+    assert await gateway.request("GetRecordStatus") == {"outputActive": True}
+
+
+async def test_a_request_cancelled_before_it_was_sent_keeps_the_connection(obs_server, make_gateway):
+    obs_server.stall("SetCurrentProfile")
+    gateway, events = make_gateway()
+    await gateway.connect()
+    stalled = asyncio.create_task(gateway.request("SetCurrentProfile", profileName="Anki Miner Game"))
+    await wait_until(lambda: obs_server.request_types() == ["GetVersion", "SetCurrentProfile"])
+
+    with pytest.raises(TimeoutError):
+        async with asyncio.timeout(0.2):
+            await gateway.request("GetRecordStatus")  # queued behind the stalled request, never sent
+
+    assert events.names() == [CONNECTED]
+    assert not stalled.done()
+    await gateway.close()
+    with pytest.raises(ObsConnectError):
+        await stalled
 
 
 @pytest.mark.parametrize(("code", "reason"), [(None, ""), (1001, "Server stopping.")], ids=["vanished", "obs-exit"])
@@ -2965,24 +3090,29 @@ async def test_close_while_a_reconnect_is_opening_leaves_nothing_open(obs_server
 
 Run: `cd /home/light/Projects/anki_miner_game/.worktrees/t12-obs-gateway && ./.venv/bin/pytest tests/obs/test_client.py -n 8 -p no:cacheprovider -q`
 (`-n 8`: the failing tests each wait out a 5 s `wait_until`.)
-Expected: `9 failed, 32 passed`. The failures are
+Expected: `10 failed, 35 passed`. The failures are
 `test_the_credentials_are_read_again_at_every_connect`,
-`test_requests_raise_obs_auth_error_while_the_password_is_refused`,
+`test_a_password_refused_while_reconnecting_surfaces_through_connect`,
 `test_a_request_that_times_out_drops_the_connection_and_reconnects`,
+`test_a_request_cancelled_after_it_was_sent_drops_the_connection`,
 `test_a_dropped_connection_is_announced_and_reconnected[vanished]` and `[obs-exit]`,
 `test_reconnect_backs_off_1_2_5_10_then_10_seconds`, `test_requests_fail_fast_while_reconnecting`,
 `test_close_during_reconnect_attempts_leaves_nothing_open` and
 `test_close_while_a_reconnect_is_opening_leaves_nothing_open`, each on a `TimeoutError` from
-`wait_until` or `wait_for_client_count`. The two new tests that already pass are guards:
-`test_a_failed_first_connect_starts_no_reconnecting` (decision 3) and
-`test_connect_during_the_backoff_connects_at_once` (the loop must not add a second `_Connected`).
+`wait_until` or `wait_for_client_count` (the cancelled request's worker stays blocked until the
+20 s socket timeout, so no `_ConnectionLost` comes). The three new tests that already pass are
+guards: `test_a_failed_first_connect_starts_no_reconnecting` (decision 3),
+`test_connect_during_the_backoff_connects_at_once` (the loop must not add a second `_Connected`)
+and `test_a_request_cancelled_before_it_was_sent_keeps_the_connection` (only a request already on
+the wire costs the connection).
 
 - [ ] **Step 3: Add reconnecting to the gateway**
 
 Edit `anki_miner_game/obs/client.py`:
 
 1. Add `ObsError` to the `anki_miner_game.models.obs` import, between `ObsCredentials` and
-   `ObsEventName`.
+   `ObsEventName`, and replace `from concurrent.futures import ThreadPoolExecutor` with
+   `from concurrent.futures import Future, ThreadPoolExecutor`.
 
 2. Below `NOT_READY: Final = 207` add
 
@@ -3095,10 +3225,74 @@ with
             return
 ```
 
+8. Replace `_run`
+
+```python
+    def _run(self, fn: Callable[..., T], *args: Any) -> "asyncio.Future[T]":
+        """Run blocking obsws-python work on the gateway's one worker thread."""
+        if self._executor is None:
+            self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="obs-gateway")
+        return asyncio.get_running_loop().run_in_executor(self._executor, fn, *args)
+```
+
+with
+
+```python
+    def _submit(self, fn: Callable[..., T], *args: Any) -> "Future[T]":
+        """Queue blocking obsws-python work on the gateway's one worker thread."""
+        if self._executor is None:
+            self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="obs-gateway")
+        return self._executor.submit(fn, *args)
+
+    def _run(self, fn: Callable[..., T], *args: Any) -> "asyncio.Future[T]":
+        """``_submit``, awaitable from the loop (what ``run_in_executor`` does)."""
+        return asyncio.wrap_future(self._submit(fn, *args))
+```
+
+9. Replace `_send`
+
+```python
+    async def _send(self, link: "_Link", name: str, fields: Mapping[str, Any]) -> dict[str, Any]:
+        if link.lost or link.closed:
+            raise ObsConnectError("not connected to OBS")
+        try:
+            return await self._run(_blocking_send, link.req, name, dict(fields))
+        except Exception as exc:
+            self._lose(link, f"{name}: {type(exc).__name__}: {exc}")
+            raise ObsConnectError(f"lost the connection to OBS during {name}") from exc
+```
+
+with
+
+```python
+    async def _send(self, link: "_Link", name: str, fields: Mapping[str, Any]) -> dict[str, Any]:
+        if link.lost or link.closed:
+            raise ObsConnectError("not connected to OBS")
+        job = self._submit(_blocking_send, link.req, name, dict(fields))
+        try:
+            return await asyncio.wrap_future(job)
+        except asyncio.CancelledError:
+            if not job.cancel():  # already sent: OBS's answer would be read as the next request's
+                self._lose(link, f"{name} was cancelled before OBS answered")
+            raise
+        except Exception as exc:
+            self._lose(link, f"{name}: {type(exc).__name__}: {exc}")
+            raise ObsConnectError(f"lost the connection to OBS during {name}") from exc
+```
+
+   `run_in_executor` hides the `concurrent.futures.Future`, and only that future can say whether
+   the job started: `job.cancel()` is `True` for a request still queued behind another (it never
+   runs, the connection stays) and `False` once the worker has it. Then `_lose` announces
+   `_ConnectionLost`, the teardown aborts the socket (which ends the blocked `recv`) and the
+   reconnect loop starts, so the actor reconciles on the next `_Connected`.
+   `test_a_request_cancelled_after_it_was_sent_drops_the_connection` pins it (judge round 1,
+   finding 1: without it the worker stays blocked until the socket timeout and the link survives
+   out of step).
+
 - [ ] **Step 4: Run the tests to see them pass**
 
 Run: `cd /home/light/Projects/anki_miner_game/.worktrees/t12-obs-gateway && ./.venv/bin/pytest tests/obs/test_client.py tests/fakes/test_fake_obs_server.py -n0 -p no:cacheprovider -q`
-Expected: `54 passed` (41 + 13) in about 3 s.
+Expected: `59 passed` (45 + 14) in about 3 s.
 
 - [ ] **Step 5: Check for flakiness**
 
@@ -3108,7 +3302,7 @@ Run the gateway tests ten times in parallel:
 cd /home/light/Projects/anki_miner_game/.worktrees/t12-obs-gateway && for i in 1 2 3 4 5 6 7 8 9 10; do ./.venv/bin/pytest tests/obs/test_client.py -n 16 --dist load -p no:cacheprovider -q 2>&1 | tail -1; done
 ```
 
-Expected: ten lines of `41 passed`. Any failure is a race in the code or the test: fix the cause
+Expected: ten lines of `45 passed`. Any failure is a race in the code or the test: fix the cause
 (the test waits on a state the gateway has not reached yet, as `wait_until(... backoffs() >= 2)`
 does in the auth test), never add sleeps or retries.
 
@@ -3129,16 +3323,14 @@ git -C /home/light/Projects/anki_miner_game/.worktrees/t12-obs-gateway commit -m
 - Modify: `anki_miner_game/obs/client.py` (the provisional block only, Step 5)
 
 The card's "one test per transcript". `replay()` sends every recorded request through the
-gateway once its generation is connected (a 207 run is one request: the gateway retries it),
-compares each answer with the recording (`responseData`, or code and comment for a failure),
-leaves never-answered requests pending until `close()` (they must end as `ObsConnectError`), and
-then compares everything the handlers heard with `Transcript.expected_events(67, ...)`: the
-subscribed events with their recorded `eventData`, `_Connected` per generation and
-`_ConnectionLost` where the recording drops or loses a connection. The sample test pins
-`expected_events` itself against a hand-written list. These tests exercise code Tasks 1-4
-already built, so they are expected to pass on the first run; a failure is a finding, and
-"Which tests need which transcript" above says how to handle the two known shapes the loader does
-not take.
+gateway once its generation is connected, compares each answer with the recording
+(`responseData`, or code and comment for a failure), and then compares everything the handlers
+heard with `Transcript.expected_events(67, ...)`: the subscribed events with their recorded
+`eventData`, `_Connected` per generation and `_ConnectionLost` where the recording drops or loses
+a connection. The sample test pins `expected_events` itself against a hand-written list. These
+tests exercise code Tasks 1-4 already built, so they are expected to pass on the first run; a
+failure is a finding, and "Which tests need which transcript" above says how to handle the shapes
+the loader and the replay do not take.
 
 - [ ] **Step 1: Check the R2 transcripts are on the branch**
 
@@ -3166,7 +3358,7 @@ from pathlib import Path
 
 import pytest
 
-from anki_miner_game.models.obs import ObsConnectError, ObsRequestError
+from anki_miner_game.models.obs import ObsRequestError
 from anki_miner_game.obs.client import EVENT_SUBSCRIPTIONS, ObsClient
 from tests.fakes.fake_obs_server import FakeObsServer, Transcript, load_transcript
 from tests.fakes.obs_transcript_sample import RECORDING_PATH, write_sample_transcript
@@ -3184,16 +3376,13 @@ async def replay(transcript: Transcript) -> tuple[Events, FakeObsServer]:
         gateway = ObsClient(Credentials(server, None), now=clock.now, sleep=clock.sleep)
         events = Events()
         gateway.subscribe(events)
-        unanswered: list[asyncio.Task[dict]] = []
         try:
             async with asyncio.timeout(REPLAY_TIMEOUT_S):
                 await gateway.connect()
                 for exchange in transcript.exchanges():
                     await wait_until(lambda g=exchange.generation: events.count(CONNECTED) > g, REPLAY_TIMEOUT_S)
                     sent = gateway.request(exchange.request_type, **exchange.request_data)
-                    if exchange.response is None:
-                        unanswered.append(asyncio.create_task(sent))
-                    elif exchange.response["requestStatus"]["result"]:
+                    if exchange.response["requestStatus"]["result"]:
                         assert await sent == dict(exchange.response.get("responseData") or {}), exchange
                     else:
                         with pytest.raises(ObsRequestError) as raised:
@@ -3207,8 +3396,6 @@ async def replay(transcript: Transcript) -> tuple[Events, FakeObsServer]:
             pytest.fail(f"replay stuck at {server.replay_position}; heard {events.names()}")
         finally:
             await gateway.close()
-        for outcome in await asyncio.gather(*unanswered, return_exceptions=True):
-            assert isinstance(outcome, ObsConnectError), outcome
         assert server.unscripted == [] and server.errors == []
         return events, server
 
@@ -3236,7 +3423,7 @@ async def test_the_gateway_replays_the_sample_transcript(tmp_path):
         ("ExitStarted", {}),
         (LOST, {}),
     ]
-    assert server.request_types().count("GetStreamStatus") == 3
+    assert server.request_types().count("GetVersion") == 2  # the gateway's own, answered live, one per connection
     assert server.refuse_connections
 
 
@@ -3330,15 +3517,19 @@ Write `/home/light/Projects/anki_miner_game/.orchestration/status/t12-obs-gatewa
 - [ ] **Step 3: Report**
 
 Return the implementer schema. In `notes`, tell the orchestrator:
-- For T15: `request()` raises `ObsAuthError` (not only `ObsConnectError`) while the reconnect loop
-  is failing on the password, so the actor raises the spec 17 password banner from either
-  `connect()` or `request()`; `connect()` during the backoff tries at once; `close()` sends no
+- For T15: `ObsAuthError` comes from `connect()` only (`request()` raises plain `ObsConnectError`
+  while the reconnect loop fails on the password), and `connect()` during the backoff tries at
+  once, so `_ensure_connected` is where the spec 17 password banner starts; cancelling a
+  `request()` after it was sent (the `asyncio.timeout` around `_switch`) drops the connection:
+  `_ConnectionLost`, then the reconnect's `_Connected`, so the actor reconciles; a `connect()`
+  still under way when `close()` runs raises `ObsConnectError`; `close()` sends no
   `_ConnectionLost` and the gateway can `connect()` again after it; events that arrive before
   `_Connected` are delivered right after it with their arrival stamps.
 - For T16: `ObsClient(lambda: discovery.credentials(<current AppConfig>), now=time.monotonic)`;
   the credentials callable runs on the gateway's worker thread.
 - For T14 and T25: `FakeObsServer(transcript=load_transcript(path))` binds clients by role, drops
-  other clients' connections and answers `GetVersion` live (decision 13);
+  other clients' connections, answers `GetVersion` live and refuses a recording whose own client
+  has a request OBS never answered (decision 13);
   `Transcript.exchanges()` and `expected_events()` drive a replay as
   `tests/obs/test_client_transcripts.py::replay` does.
 - For H5 and T30: websocket-client honours `http_proxy` for `ws://127.0.0.1` (decision 15).
