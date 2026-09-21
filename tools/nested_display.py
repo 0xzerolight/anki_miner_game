@@ -548,9 +548,6 @@ class ProcessGroup:
         strays = [pid for pid in marker_holders(self.token) if pid not in members]
         return members, strays
 
-    def alive(self) -> bool:
-        return any(self._targets())
-
     def terminate(self, term_wait_s: float = 10.0, kill_wait_s: float = 5.0) -> list[int]:
         """SIGTERM the group and every marked stray, wait, SIGKILL what is left. Returns survivors."""
         for sig, wait_s in zip(TEARDOWN_SIGNALS, (term_wait_s, kill_wait_s), strict=True):
