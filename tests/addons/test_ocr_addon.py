@@ -4,15 +4,33 @@ No test launches the real owocr: processes are ``tests/fakes/fake_owocr.py`` run
 Python, and the install drives a fake ``uv``. The real install is the one ``network`` test.
 """
 
+import asyncio
+import json
+import os
+import sys
+import time
 from pathlib import Path
 
 import pytest
 
 from anki_miner_game.addons import ocr_addon
-from anki_miner_game.addons.ocr_addon import LogEvent, LogKind, OcrError, owocr_args, parse_log_line
+from anki_miner_game.addons.bootstrap import BootstrapError, uv_environment
+from anki_miner_game.addons.ocr_addon import (
+    LogEvent,
+    LogKind,
+    OcrAddon,
+    OcrError,
+    owocr_args,
+    parse_log_line,
+    uv_install_args,
+)
+from anki_miner_game.models.addons import AddonStatus
 from anki_miner_game.models.profile import OcrEngine, OcrSettings
 
 FIXTURES = Path(__file__).parent.parent / "fixtures" / "owocr"
+FAKES = Path(__file__).parent.parent / "fakes"
+
+posix_only = pytest.mark.skipif(sys.platform == "win32", reason="the fake uv runs through a shebang")
 
 # --- command line ----------------------------------------------------------------------------------
 
@@ -196,3 +214,389 @@ def test_parse_log_line(line, event):
 def test_log_message_is_the_text_after_the_timestamp():
     assert ocr_addon.log_message("15:00:27 | Terminated!\n") == "Terminated!"
     assert ocr_addon.log_message("    self.run()") is None
+
+
+# --- install -----------------------------------------------------------------------------------------
+
+
+def test_uv_install_args_on_linux_override_pygobject_out(tmp_path):
+    overrides = tmp_path / "overrides.txt"
+    assert uv_install_args("linux", overrides) == [
+        "tool",
+        "install",
+        "--python",
+        "3.12",
+        "--overrides",
+        str(overrides),
+        "owocr[meikiocr]==1.26.8",
+    ]
+
+
+def test_uv_install_args_on_windows_take_the_oneocr_extra():
+    assert uv_install_args("win32", None) == ["tool", "install", "--python", "3.12", "owocr[oneocr]==1.26.8"]
+
+
+def _fake_uv(tmp_path: Path) -> Path:
+    uv = tmp_path / "fake-bin" / "uv"
+    uv.parent.mkdir()
+    uv.write_text(
+        f"#!{sys.executable}\nimport runpy\nrunpy.run_path({str(FAKES / 'fake_uv.py')!r}, run_name='__main__')\n",
+        encoding="utf-8",
+    )
+    uv.chmod(0o755)
+    return uv
+
+
+class Progress:
+    def __init__(self) -> None:
+        self.calls: list[tuple[int, int]] = []
+
+    def __call__(self, done: int, total: int) -> None:
+        self.calls.append((done, total))
+
+
+def _addon(home: Path, tmp_path: Path, *, platform: str = "linux", uv_plan: dict | None = None, **environ) -> OcrAddon:
+    env = {"PATH": os.environ.get("PATH", ""), "HOME": str(tmp_path / "real-home"), **environ}
+    if uv_plan is not None:
+        env["FAKE_UV_PLAN"] = json.dumps(uv_plan)
+    uv = _fake_uv(tmp_path) if sys.platform != "win32" else Path("uv-not-used-on-windows")
+    return OcrAddon(home, platform=platform, environ=env, ensure_uv=lambda _home: uv)
+
+
+def _root(home: Path) -> Path:
+    return home / "addons" / "ocr"
+
+
+def test_a_fresh_home_has_no_ocr_addon(tmp_path):
+    assert _addon(tmp_path / "home", tmp_path).status() is AddonStatus.MISSING
+
+
+@posix_only
+async def test_install_runs_uv_tool_install_in_the_addon_folder(tmp_path):
+    home = tmp_path / "home"
+    record = tmp_path / "uv.json"
+    addon = _addon(home, tmp_path, uv_plan={"record": str(record)})
+    progress = Progress()
+    await addon.install(progress)
+    assert addon.status() is AddonStatus.READY
+    seen = json.loads(record.read_text(encoding="utf-8"))
+    overrides = _root(home) / "overrides.txt"
+    assert seen["argv"] == uv_install_args("linux", overrides)
+    assert overrides.read_text(encoding="utf-8") == 'pygobject; sys_platform == "never"\n'
+    for name, value in uv_environment(home, "ocr").items():
+        assert seen["env"][name] == value
+    assert progress.calls[0] == (0, addon.size_bytes)
+    assert progress.calls[-1] == (addon.size_bytes, addon.size_bytes)
+
+
+@posix_only
+async def test_status_is_installing_while_the_install_runs(tmp_path):
+    home = tmp_path / "home"
+    seen: list[AddonStatus] = []
+    uv = _fake_uv(tmp_path)
+
+    def ensure_uv(_home: Path) -> Path:
+        seen.append(addon.status())
+        return uv
+
+    addon = OcrAddon(home, platform="linux", environ={"PATH": os.environ.get("PATH", "")}, ensure_uv=ensure_uv)
+    await addon.install(Progress())
+    assert seen == [AddonStatus.INSTALLING]
+    assert addon.status() is AddonStatus.READY
+
+
+@posix_only
+async def test_a_failed_install_leaves_nothing_behind_and_says_why(tmp_path):
+    home = tmp_path / "home"
+    addon = _addon(home, tmp_path, uv_plan={"fail": True})
+    with pytest.raises(OcrError, match='Dependency "cairo" not found'):
+        await addon.install(Progress())
+    assert not (_root(home) / "tools").exists()
+    assert not (_root(home) / "bin").exists()
+    assert addon.status() is AddonStatus.MISSING
+
+
+@posix_only
+async def test_a_cancelled_install_kills_uv_and_leaves_nothing_behind(tmp_path):
+    home = tmp_path / "home"
+    record = tmp_path / "uv.json"
+    addon = _addon(home, tmp_path, uv_plan={"record": str(record), "hang": True})
+    install = asyncio.create_task(addon.install(Progress()))
+    async with asyncio.timeout(10):
+        while not record.exists() or not (_root(home) / "tools" / "owocr").exists():
+            await asyncio.sleep(0.01)
+    install.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await install
+    pid = json.loads(record.read_text(encoding="utf-8"))["pid"]
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+    assert not (_root(home) / "tools").exists()
+    assert addon.status() is AddonStatus.MISSING
+
+
+@posix_only
+async def test_an_install_of_another_owocr_version_is_broken_and_reinstall_repairs_it(tmp_path):
+    home = tmp_path / "home"
+    _install_fake(home, "linux", version="1.26.7")
+    addon = _addon(home, tmp_path, uv_plan={})
+    assert addon.status() is AddonStatus.BROKEN
+    await addon.install(Progress())
+    assert addon.status() is AddonStatus.READY
+
+
+@posix_only
+async def test_an_install_that_does_not_verify_fails_and_leaves_nothing_behind(tmp_path):
+    home = tmp_path / "home"
+    addon = _addon(home, tmp_path, uv_plan={"version": "1.26.7"})
+    with pytest.raises(OcrError, match="do not check out"):
+        await addon.install(Progress())
+    assert addon.status() is AddonStatus.MISSING
+
+
+@posix_only
+async def test_a_missing_entry_point_or_receipt_is_broken(tmp_path):
+    home = tmp_path / "home"
+    addon = _addon(home, tmp_path, uv_plan={})
+    await addon.install(Progress())
+    (_root(home) / "bin" / "owocr").unlink()
+    assert addon.status() is AddonStatus.BROKEN
+    await addon.install(Progress())
+    (_root(home) / "tools" / "owocr" / "uv-receipt.toml").write_text("not [toml", encoding="utf-8")
+    assert addon.status() is AddonStatus.BROKEN
+
+
+async def test_a_failed_uv_bootstrap_keeps_the_previous_install(tmp_path):
+    home = tmp_path / "home"
+    _install_fake(home, "linux")
+
+    def no_uv(_home: Path) -> Path:
+        raise BootstrapError("uv could not be installed: offline")
+
+    addon = OcrAddon(home, platform="linux", environ={}, ensure_uv=no_uv)
+    with pytest.raises(BootstrapError):
+        await addon.install(Progress())
+    assert addon.status() is AddonStatus.READY
+
+
+async def test_a_second_install_while_one_runs_is_refused(tmp_path):
+    release = asyncio.Event()
+    loop = asyncio.get_running_loop()
+
+    def slow_uv(_home: Path) -> Path:
+        asyncio.run_coroutine_threadsafe(release.wait(), loop).result()
+        raise BootstrapError("stop here")
+
+    addon = OcrAddon(tmp_path / "home", platform="linux", environ={}, ensure_uv=slow_uv)
+    first = asyncio.create_task(addon.install(Progress()))
+    async with asyncio.timeout(5):
+        while addon.status() is not AddonStatus.INSTALLING:
+            await asyncio.sleep(0.01)
+    with pytest.raises(OcrError, match="already"):
+        await addon.install(Progress())
+    release.set()
+    with pytest.raises(BootstrapError):
+        await first
+    assert addon.status() is AddonStatus.MISSING
+
+
+def test_size_and_note_per_platform(tmp_path):
+    linux = OcrAddon(tmp_path, platform="linux", environ={})
+    windows = OcrAddon(tmp_path, platform="win32", environ={})
+    assert linux.size_bytes > windows.size_bytes > 0
+    assert "X11" in (linux.note or "")
+    assert windows.note is None
+
+
+@pytest.mark.network
+@pytest.mark.skipif(sys.platform != "linux", reason="checked on Linux; Windows is H5")
+async def test_real_install_of_the_pinned_owocr(tmp_path):
+    """Downloads uv, a managed CPython and owocr with its dependencies (about 200 MB)."""
+    home = tmp_path / "home"
+    addon = OcrAddon(home)
+    await addon.install(Progress())
+    assert addon.status() is AddonStatus.READY
+    proc = await asyncio.create_subprocess_exec(
+        str(addon.executable), "-h", env=addon.owocr_environment(), stdout=asyncio.subprocess.PIPE
+    )
+    out, _ = await proc.communicate()
+    assert proc.returncode == 0
+    assert b"screen_capture_area" in out
+
+
+# --- private home ------------------------------------------------------------------------------------
+
+
+def _install_fake(home: Path, platform: str, version: str = "1.26.8") -> None:
+    """What a finished install leaves behind, without running uv."""
+    root = _root(home)
+    exe = root / "bin" / ("owocr.exe" if platform == "win32" else "owocr")
+    exe.parent.mkdir(parents=True)
+    exe.write_text("", encoding="utf-8")
+    tool_env = root / "tools" / "owocr"
+    tool_env.mkdir(parents=True)
+    extra = "oneocr" if platform == "win32" else "meikiocr"
+    (tool_env / "uv-receipt.toml").write_text(
+        f'[tool]\nrequirements = [{{ name = "owocr", extras = ["{extra}"], specifier = "=={version}" }}]\n',
+        encoding="utf-8",
+    )
+
+
+def test_owocr_runs_with_a_private_home_holding_a_minimal_config(tmp_path):
+    home, real_home = tmp_path / "home", tmp_path / "real-home"
+    (real_home / ".config").mkdir(parents=True)
+    users_config = real_home / ".config" / "owocr_config.ini"
+    users_config.write_text("[general]\nscreen_capture_frame_stabilization = 0\n", encoding="utf-8")
+    before = users_config.stat()
+    env = OcrAddon(home, platform="linux", environ={"HOME": str(real_home), "LANG": "C.UTF-8"}).owocr_environment()
+    private = _root(home) / "home"
+    assert env["HOME"] == str(private)
+    assert env["LANG"] == "C.UTF-8"
+    assert "USERPROFILE" not in env
+    assert (private / ".config" / "owocr_config.ini").read_text(encoding="utf-8") == "[general]\n"
+    after = users_config.stat()
+    assert (after.st_mtime_ns, after.st_size) == (before.st_mtime_ns, before.st_size)
+
+
+def test_windows_redirects_userprofile_too(tmp_path):
+    env = OcrAddon(tmp_path / "home", platform="win32", environ={"USERPROFILE": "C:/Users/me"}).owocr_environment()
+    private = str(_root(tmp_path / "home") / "home")
+    assert env["USERPROFILE"] == private
+    assert env["HOME"] == private
+    assert "XAUTHORITY" not in env
+
+
+def test_a_changed_private_config_is_put_back(tmp_path):
+    addon = OcrAddon(tmp_path / "home", platform="linux", environ={})
+    addon.owocr_environment()
+    config = _root(tmp_path / "home") / "home" / ".config" / "owocr_config.ini"
+    config.write_text("[general]\nnotifications = True\n", encoding="utf-8")
+    addon.owocr_environment()
+    assert config.read_text(encoding="utf-8") == "[general]\n"
+
+
+def test_x11_keeps_the_users_xauthority_under_the_private_home(tmp_path):
+    real_home = tmp_path / "real-home"
+    real_home.mkdir()
+    (real_home / ".Xauthority").write_bytes(b"cookie")
+    env = OcrAddon(tmp_path / "home", platform="linux", environ={"HOME": str(real_home)}).owocr_environment()
+    assert env["XAUTHORITY"] == str(real_home / ".Xauthority")
+    env = OcrAddon(
+        tmp_path / "home", platform="linux", environ={"HOME": str(real_home), "XAUTHORITY": "/run/xauth"}
+    ).owocr_environment()
+    assert env["XAUTHORITY"] == "/run/xauth"
+    env = OcrAddon(tmp_path / "home", platform="linux", environ={"HOME": str(tmp_path)}).owocr_environment()
+    assert "XAUTHORITY" not in env
+
+
+@pytest.mark.parametrize(
+    ("platform", "environ", "installed", "reason"),
+    [
+        pytest.param("linux", {"XDG_SESSION_TYPE": "x11"}, True, None, id="linux x11"),
+        pytest.param("linux", {"XDG_SESSION_TYPE": "wayland"}, True, "X11", id="linux wayland"),
+        pytest.param("win32", {"XDG_SESSION_TYPE": "wayland"}, True, None, id="windows ignores XDG"),
+        pytest.param("linux", {}, False, "not installed", id="not installed"),
+    ],
+)
+def test_unavailable_reason(tmp_path, platform, environ, installed, reason):
+    if installed:
+        _install_fake(tmp_path, platform)
+    got = OcrAddon(tmp_path, platform=platform, environ=environ).unavailable_reason()
+    assert (got is None) if reason is None else (reason in (got or ""))
+
+
+# --- picker ------------------------------------------------------------------------------------------
+
+
+def _picker(tmp_path: Path, *, platform: str = "linux", **plan) -> tuple[OcrAddon, Path]:
+    home = tmp_path / "home"
+    _install_fake(home, platform)
+    record = tmp_path / "owocr.json"
+    environ = {**os.environ, "FAKE_OWOCR_PLAN": json.dumps({"record": str(record), **plan})}
+    environ.pop("XDG_SESSION_TYPE", None)
+    addon = OcrAddon(home, platform=platform, environ=environ, argv0=[sys.executable, str(FAKES / "fake_owocr.py")])
+    return addon, record
+
+
+async def _gone(pid: int) -> bool:
+    if sys.platform == "win32":
+        return True  # the job-object test covers Windows
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        stat = Path(f"/proc/{pid}/stat")
+        if stat.exists() and stat.read_text().rsplit(")", 1)[1].split()[0] == "Z":
+            return True
+        await asyncio.sleep(0.02)
+    return False
+
+
+async def test_pick_returns_the_screen_rectangles_and_kills_owocr(tmp_path):
+    addon, record = _picker(tmp_path, log_file=str(FIXTURES / "synthetic-screen-picker.log"), grandchild=True)
+    assert await addon.pick(None) == "412,610,1508,1002"
+    seen = json.loads(record.read_text(encoding="utf-8"))
+    assert seen["argv"][-1] == "-sa="
+    assert seen["argv"][seen["argv"].index("-el") + 1] == "meikiocr"
+    assert seen["env"]["HOME"] == str(_root(tmp_path / "home") / "home")
+    assert await _gone(seen["pid"])
+    assert await _gone(seen["grandchild"])
+
+
+async def test_pick_with_a_window_title_on_windows_returns_window_rectangles(tmp_path):
+    addon, record = _picker(tmp_path, platform="win32", log_file=str(FIXTURES / "synthetic-window-picker.log"))
+    assert await addon.pick("Some Game") == "0,540,1280,720"
+    argv = json.loads(record.read_text(encoding="utf-8"))["argv"]
+    assert argv[-2:] == ["-sa=Some Game", "-swa="]
+    assert argv[argv.index("-e") + 1] == "oneocr"
+
+
+@pytest.mark.parametrize(
+    "plan",
+    [
+        pytest.param({"log": ["10:00:00 | Selection is empty, selecting whole screen"]}, id="empty selection"),
+        pytest.param(
+            {"log": ["10:00:00 | Picker window was closed or an error occurred", "10:00:00 | Terminated!"], "exit": 1},
+            id="picker closed",
+        ),
+    ],
+)
+async def test_pick_without_a_selection_returns_none(tmp_path, plan):
+    addon, _ = _picker(tmp_path, **plan)
+    assert await addon.pick(None) is None
+
+
+async def test_pick_reports_owocrs_error(tmp_path):
+    addon, _ = _picker(tmp_path, log_file=str(FIXTURES / "linux-x11-window-name.log"), exit=1)
+    with pytest.raises(OcrError, match="Window capture is only currently supported"):
+        await addon.pick(None)
+
+
+async def test_pick_reports_an_exit_before_any_selection(tmp_path):
+    addon, _ = _picker(tmp_path, log=["10:00:00 | Launching screen coordinate picker"], exit=1)
+    with pytest.raises(OcrError, match="Launching screen coordinate picker"):
+        await addon.pick(None)
+
+
+async def test_a_cancelled_pick_kills_owocr(tmp_path):
+    addon, record = _picker(tmp_path, log=["10:00:00 | Launching screen coordinate picker"], grandchild=True)
+    pick = asyncio.create_task(addon.pick(None))
+    async with asyncio.timeout(10):
+        while not record.exists():
+            await asyncio.sleep(0.01)
+    pick.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await pick
+    seen = json.loads(record.read_text(encoding="utf-8"))
+    assert await _gone(seen["pid"])
+    assert await _gone(seen["grandchild"])
+
+
+async def test_pick_needs_the_addon_and_an_x11_session(tmp_path):
+    with pytest.raises(OcrError, match="not installed"):
+        await OcrAddon(tmp_path, platform="linux", environ={}).pick(None)
+    _install_fake(tmp_path, "linux")
+    with pytest.raises(OcrError, match="X11"):
+        await OcrAddon(tmp_path, platform="linux", environ={"XDG_SESSION_TYPE": "wayland"}).pick(None)

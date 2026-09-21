@@ -29,18 +29,41 @@ import contextlib
 import logging
 import os
 import re
+import shutil
 import signal
+import socket
 import sys
-from collections.abc import Mapping, Sequence
+import tomllib
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
+from pathlib import Path
 from typing import Final
 
-from anki_miner_game.models.profile import OcrSettings
+from anki_miner_game.addons import bootstrap
+from anki_miner_game.interfaces.addons import ProgressCallback
+from anki_miner_game.models.addons import AddonStatus
+from anki_miner_game.models.profile import OcrSettings, default_ocr_engine
 
 logger = logging.getLogger(__name__)
 
 OWOCR_VERSION: Final = "1.26.8"
+PYTHON_VERSION: Final = "3.12"
+"""The managed CPython the tool environment is built on; the one the M0 R3 install used."""
+
+LINUX_OVERRIDES: Final = 'pygobject; sys_platform == "never"\n'
+"""``uv --overrides`` file content on Linux: PyGObject is never installed (see the module docstring)."""
+
+OWOCR_CONFIG: Final = "[general]\n"
+"""The whole ``owocr_config.ini`` in the private home: enough for owocr to parse a file and download
+none; every setting then comes from the command line or owocr's defaults (``config.py:186-217``)."""
+
+SIZE_BYTES: Final = {"win32": 100_000_000, "linux": 210_000_000}
+"""Rough download per platform: uv, a managed CPython 3.12 and the wheels of owocr's dependencies,
+plus on Linux meikiocr's model (45 MB, fetched by owocr's first run) and opencv (58 MB)."""
+
+NOT_INSTALLED: Final = "The OCR add-on is not installed."
+X11_ONLY: Final = "OCR on Linux needs an X11 session; Wayland sessions are not supported."
 
 KILL_GRACE_S: Final = 2.0
 """How long the process group gets after SIGTERM before SIGKILL (M0 R3 amendment 4)."""
@@ -50,13 +73,31 @@ LINE_LIMIT: Final = 1 << 20
 """Longest log line read; a longer one is skipped."""
 _POLL_S: Final = 0.02
 _EXIT_POLL_S: Final = 0.1
+_UV_ERROR_LINES: Final = 12
 
 
 class OcrError(RuntimeError):
     """OCR cannot run as asked; the message says why and is fit for a banner or a dialog."""
 
 
-# --- command line ----------------------------------------------------------------------------------
+# --- command lines ---------------------------------------------------------------------------------
+
+
+def owocr_extra(platform: str) -> str:
+    """The owocr extra installed: ``oneocr`` on Windows, ``meikiocr`` elsewhere (spec 14)."""
+    return "oneocr" if platform == "win32" else "meikiocr"
+
+
+def owocr_requirement(platform: str) -> str:
+    return f"owocr[{owocr_extra(platform)}]=={OWOCR_VERSION}"
+
+
+def uv_install_args(platform: str, overrides: Path | None) -> list[str]:
+    """``uv`` arguments that install the pinned owocr as a tool, with ``overrides`` when given."""
+    args = ["tool", "install", "--python", PYTHON_VERSION]
+    if overrides is not None:
+        args += ["--overrides", str(overrides)]
+    return args + [owocr_requirement(platform)]
 
 
 def owocr_args(ocr: OcrSettings, port: int, *, platform: str, pick: bool = False) -> list[str]:
@@ -436,3 +477,211 @@ else:
         except PermissionError:  # a member we may not signal still counts
             return True
         return True
+
+
+# --- the add-on ----------------------------------------------------------------------------------------
+
+
+def free_port() -> int:
+    """A TCP port nothing listens on now, for owocr's websocket server."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+class OcrAddon:
+    """The OCR add-on: an ``AddonService`` and the ``OcrAreaPicker`` (spec 14).
+
+    Everything lives under ``<home>/addons/ocr/``: uv's managed Python, cache, tool environment and
+    entry point (``bootstrap.uv_environment``), the ``--overrides`` file, and ``home/``, the private
+    home owocr runs with. ``install``, ``launch`` and ``pick`` run on an asyncio loop (the I/O loop);
+    ``status`` may be called from any thread. ``platform``, ``environ``, ``ensure_uv`` and ``argv0``
+    (the command that starts owocr, before its arguments) exist for tests.
+    """
+
+    def __init__(
+        self,
+        home: Path,
+        *,
+        platform: str = sys.platform,
+        environ: Mapping[str, str] | None = None,
+        ensure_uv: Callable[[Path], Path] = bootstrap.ensure_uv,
+        argv0: Sequence[str] | None = None,
+    ) -> None:
+        self._home = home
+        self._root = home / "addons" / "ocr"
+        self._platform = platform
+        self._environ = environ
+        self._ensure_uv = ensure_uv
+        self._argv0 = list(argv0) if argv0 is not None else [str(self.executable)]
+        self._installing = False
+
+    @property
+    def executable(self) -> Path:
+        """owocr's entry point in the add-on's tool bin directory."""
+        return self._root / "bin" / ("owocr.exe" if self._platform == "win32" else "owocr")
+
+    @property
+    def size_bytes(self) -> int:
+        return SIZE_BYTES.get(self._platform, SIZE_BYTES["linux"])
+
+    @property
+    def note(self) -> str | None:
+        """A platform limitation to show beside the status: Linux OCR is X11-only (M0 ruling)."""
+        return X11_ONLY if self._platform == "linux" else None
+
+    def status(self) -> AddonStatus:
+        """``ready`` when uv's receipt records the pinned owocr and extra and the entry point exists;
+        ``broken`` when some of it is there but not that; otherwise ``missing``."""
+        if self._installing:
+            return AddonStatus.INSTALLING
+        if self._verified():
+            return AddonStatus.READY
+        if (self._root / "tools" / "owocr").exists() or (self._root / "bin").exists():
+            return AddonStatus.BROKEN
+        return AddonStatus.MISSING
+
+    def unavailable_reason(self) -> str | None:
+        """Why owocr cannot run now, fit for a banner, or ``None``: not installed, or a Wayland session."""
+        if self.status() is not AddonStatus.READY:
+            return NOT_INSTALLED
+        if self._platform == "linux" and self._env().get("XDG_SESSION_TYPE", "").lower() == "wayland":
+            return X11_ONLY
+        return None
+
+    async def install(self, progress: ProgressCallback) -> None:
+        """``uv tool install`` the pinned owocr into the add-on folder, replacing what was there.
+
+        ``progress`` hears ``(0, size_bytes)`` at the start and ``(size_bytes, size_bytes)`` at the
+        end; uv reports nothing finer. A failure after the old install was removed, cancellation
+        included, removes whatever the attempt left, so ``status`` is ``missing`` again. Raises
+        ``BootstrapError`` (no uv) or ``OcrError`` (uv failed, the message ends with its output).
+        """
+        if self._installing:
+            raise OcrError("The OCR add-on is already being installed.")
+        self._installing = True
+        total = self.size_bytes
+        touched = False
+        try:
+            progress(0, total)
+            uv = await asyncio.to_thread(self._ensure_uv, self._home)
+            touched = True
+            self._remove_install()
+            self._root.mkdir(parents=True, exist_ok=True)
+            overrides = None
+            if self._platform != "win32":
+                overrides = self._root / "overrides.txt"
+                overrides.write_text(LINUX_OVERRIDES, encoding="utf-8")
+            env = {**self._env(), **bootstrap.uv_environment(self._home, "ocr")}
+            await _run_uv([str(uv), *uv_install_args(self._platform, overrides)], env)
+            if not self._verified():
+                raise OcrError("owocr was installed but its files do not check out; install it again.")
+        except BaseException:
+            if touched:
+                self._remove_install()
+            raise
+        finally:
+            self._installing = False
+        progress(total, total)
+
+    def owocr_environment(self) -> dict[str, str]:
+        """The environment owocr runs with: the app's, with ``HOME`` (and ``USERPROFILE`` on Windows)
+        pointing at the private home, whose ``.config/owocr_config.ini`` is (re)written to
+        ``OWOCR_CONFIG`` first. On X11 without ``XAUTHORITY``, it points at the user's
+        ``~/.Xauthority``, which Xlib would otherwise look for under the private home."""
+        private = self._root / "home"
+        config = private / ".config" / "owocr_config.ini"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            current = config.read_text(encoding="utf-8")
+        except OSError:
+            current = None
+        if current != OWOCR_CONFIG:
+            staged = config.with_name(config.name + ".tmp")
+            staged.write_text(OWOCR_CONFIG, encoding="utf-8")
+            os.replace(staged, config)
+        env = self._env()
+        if self._platform != "win32" and not env.get("XAUTHORITY") and env.get("HOME"):
+            xauthority = Path(env["HOME"]) / ".Xauthority"
+            if xauthority.is_file():
+                env["XAUTHORITY"] = str(xauthority)
+        env["HOME"] = str(private)
+        if self._platform == "win32":
+            env["USERPROFILE"] = str(private)
+        return env
+
+    async def launch(self, ocr: OcrSettings, port: int, *, pick: bool = False) -> OwocrProcess:
+        """Start owocr for ``ocr`` with its websocket on ``port``; ``pick`` opens its picker instead
+        of capturing. Raises ``OcrError`` (no area to capture) or ``OSError`` (cannot start)."""
+        argv = [*self._argv0, *owocr_args(ocr, port, platform=self._platform, pick=pick)]
+        return await spawn_owocr(argv, self.owocr_environment())
+
+    async def pick(self, window_title: str | None) -> str | None:
+        """Run owocr's own picker once and return the rectangles it reports (for ``OcrSettings.rects``).
+
+        With ``window_title`` on Windows it is the window picker (window-relative rectangles);
+        otherwise the screen picker (screen rectangles; Linux ignores the title). ``None`` when the
+        picker is closed or returns no rectangle. owocr is killed once it has answered, and when
+        this call is cancelled. Raises ``OcrError`` when owocr cannot run or exits without an answer.
+        """
+        reason = self.unavailable_reason()
+        if reason is not None:
+            raise OcrError(reason)
+        settings = OcrSettings(engine=default_ocr_engine(self._platform), window_title=window_title)
+        proc = await self.launch(settings, free_port(), pick=True)
+        try:
+            while (event := await proc.next_event()) is not None:
+                if event.kind in (LogKind.COORDINATES, LogKind.WINDOW_COORDINATES):
+                    return event.text
+                if event.kind in (LogKind.EMPTY_SELECTION, LogKind.PICKER_CLOSED):
+                    return None
+                if event.kind is LogKind.CONFIG_ERROR:
+                    raise OcrError(f"owocr could not open its picker: {event.text}")
+            raise OcrError(f"owocr exited before an area was selected; its last message: {proc.last_message}")
+        finally:
+            await proc.kill_tree()
+
+    def _env(self) -> dict[str, str]:
+        return dict(os.environ if self._environ is None else self._environ)
+
+    def _verified(self) -> bool:
+        receipt = self._root / "tools" / "owocr" / "uv-receipt.toml"
+        try:
+            requirements = tomllib.loads(receipt.read_text(encoding="utf-8"))["tool"]["requirements"]
+        except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError, KeyError, TypeError):
+            return False
+        pinned = any(
+            isinstance(req, dict)
+            and req.get("name") == "owocr"
+            and req.get("specifier") == f"=={OWOCR_VERSION}"
+            and req.get("extras") == [owocr_extra(self._platform)]
+            for req in requirements
+        )
+        return pinned and self.executable.is_file()
+
+    def _remove_install(self) -> None:
+        for part in ("tools", "bin"):
+            shutil.rmtree(self._root / part, ignore_errors=True)
+
+
+async def _run_uv(argv: Sequence[str], env: Mapping[str, str]) -> None:
+    proc = await asyncio.create_subprocess_exec(
+        *argv,
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+        env=dict(env),
+        creationflags=_CREATE_NO_WINDOW,
+    )
+    try:
+        out, _ = await proc.communicate()
+    except BaseException:
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+        await proc.wait()
+        raise
+    text = out.decode("utf-8", errors="replace").strip()
+    logger.debug("uv %s exited %s:\n%s", " ".join(argv[1:]), proc.returncode, text)
+    if proc.returncode != 0:
+        tail = "\n".join(text.splitlines()[-_UV_ERROR_LINES:])
+        raise OcrError(f"Installing owocr failed (uv exit code {proc.returncode}):\n{tail}")
