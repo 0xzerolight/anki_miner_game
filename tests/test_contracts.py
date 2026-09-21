@@ -3,6 +3,7 @@
 import ast
 import importlib
 import inspect
+import typing
 from collections.abc import Callable
 from pathlib import Path
 
@@ -157,6 +158,7 @@ PROTOCOL_MEMBERS = {
     ("anki_miner_game.interfaces.addons", "AddonService"): {
         "status": sync(),
         "size_bytes": PROPERTY,
+        "note": PROPERTY,
         "install": coro("progress"),
     },
     ("anki_miner_game.interfaces.addons", "VadJobs"): {
@@ -271,6 +273,20 @@ def test_obs_config_failures_are_typed():
 
     for method in (ObsDiscovery.credentials, ObsDiscovery.read_ws_config):
         assert "ObsConfigError" in (method.__doc__ or ""), method.__name__
+
+
+def test_ocr_area_picker_names_the_error_pick_raises():
+    from anki_miner_game.interfaces.addons import OcrAreaPicker
+
+    assert "RuntimeError" in (OcrAreaPicker.pick.__doc__ or "")
+
+
+def test_the_addon_note_is_optional_text_shown_beside_the_status():
+    from anki_miner_game.interfaces.addons import AddonService
+
+    note = inspect.getattr_static(AddonService, "note")
+    assert typing.get_type_hints(note.fget)["return"] == str | None
+    assert "status" in (note.__doc__ or "")
 
 
 def test_wait_ready_defaults_to_30_seconds():

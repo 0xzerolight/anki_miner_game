@@ -36,3 +36,12 @@ Filed by the wave 1 integration fix (`.orchestration/status/wave-1-integration-f
 | `ObsDiscovery.wait_ready`, `ObsGateway.connect`, `ObsGateway.request` (docstrings) | `interfaces/obs.py` | Ready = `GetVersion` succeeds, not "accepts connections"; `connect` and `request` retry 207 `NotReady` until a timeout, then raise `ObsRequestError` (S1 summary 5 and 11) |
 | `WindowItem.enabled: bool` | `models/obs.py` | `itemEnabled` from `GetInputPropertiesListPropertyItems`; `False` on the configured value OBS keeps listing when no live window matches it (S1 summary 12) |
 | `Replaced` (docstring) | `models/pipeline.py` | The merge's base is the previous line accepted since the last `TextPipeline.reset()`; the actor journals a `ReplaceRecord` only when that line is the journal's last `LineRecord` |
+
+## T24 OCR add-on (accepted by the orchestrator)
+
+Filed by T24 (`.orchestration/status/t24-ocr-addon.json`), applied by C2.
+
+| Name | Where | What it is |
+|---|---|---|
+| `AddonService.note -> str \| None` | `interfaces/addons.py` | Property: a platform limitation shown beside the status, or `None`. The OCR add-on on Linux says OCR needs an X11 session; the VAD add-on returns `None` |
+| `OcrAreaPicker.pick` (docstring) | `interfaces/addons.py` | Raises `RuntimeError` (the add-on's `OcrError`) with a message fit for the dialog when owocr cannot run or exits without an answer |

@@ -114,6 +114,11 @@ class VadAddon:
         """The uv download, the environment and the model; approximate."""
         return self._uv_bytes() + ENVIRONMENT_BYTES.get(sys.platform, ENVIRONMENT_BYTES["linux"]) + self._model.size
 
+    @property
+    def note(self) -> str | None:
+        """No platform limitation."""
+        return None
+
     def status(self) -> AddonStatus:
         if self._installing:
             return AddonStatus.INSTALLING
