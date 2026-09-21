@@ -67,9 +67,11 @@ git -C /home/light/Projects/anki_miner_game worktree add \
 ln -sfn /home/light/Projects/anki_miner_game/.venv <worktree>/.venv
 ```
 
-Merge to `main` and remove the worktree once green. Use absolute paths in
-every command; `cd` into the worktree inside each shell call rather than
-relying on a persisted working directory.
+Implementers commit on their own branch only. The orchestrator alone merges
+to `main`, pushes and removes worktrees (this overrides the global rule to
+merge and remove once green). Use absolute paths in every command; `cd` into
+the worktree inside each shell call rather than relying on a persisted
+working directory.
 
 ## Gate command
 
