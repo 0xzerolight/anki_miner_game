@@ -62,7 +62,9 @@ class CueSettings:
 @dataclass(frozen=True)
 class VadSettings:
     enabled: bool = True
-    """Takes effect only while the VAD add-on is installed."""
+    """The user's switch. The effective value is ``enabled and <VAD add-on installed>`` (spec 5: true
+    when the add-on is installed); the VAD add-on enforces it, so a default config never runs a pass
+    without it."""
 
 
 @dataclass(frozen=True, kw_only=True)
