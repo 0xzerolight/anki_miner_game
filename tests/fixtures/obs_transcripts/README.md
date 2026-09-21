@@ -4,8 +4,16 @@ Recorded on 2026-09-21 by the R2 spike from a real OBS Studio **32.2.2** (Flatpa
 **5.7.4**) on Linux, running as an X11 client of the isolated nested display
 (`tools/nested_display.py`). Findings: [`docs/m0/obs-behaviour.md`](../../../docs/m0/obs-behaviour.md).
 `tests/test_obs_transcript_fixtures.py` pins the set, its redaction and the behaviour each file was
-recorded for. T12's `FakeObsServer` replays them; T14 replays `provision.jsonl`; T25 runs one
-scripted session per transcript.
+recorded for. T12's `FakeObsServer` replays them.
+
+R2's own driver provisioned the OBS these transcripts talk to, not `obs/provision.py`: its inputs
+are `Game capture` and `Game audio` (the app's are `Window Capture (X11)` and `Desktop Audio
+Capture`), and its requests come in the driver's order (`arm_disarm.jsonl`'s re-provisioning pass
+reads `Game capture` and never asks for a mute). So no transcript replays `ObsProvisioner` request by
+request: `tests/obs/test_provision_replay.py` replays a copy of `provision.jsonl`'s provisioning
+frames against T14's `FakeObs`, and T25 answers the provisioner from a fake OBS and plays only the
+recording and switch frames and events of a transcript. A transcript of the app's own provisioning
+is E1's to record.
 
 ## Format
 
