@@ -83,6 +83,8 @@ SECTION_4_NAMES = {
     "anki_miner_game.interfaces.presenter": ["Presenter"],
     "anki_miner_game.interfaces.session": ["SessionControl"],
     "anki_miner_game.interfaces.addons": ["AddonService", "VadJobs", "OcrAreaPicker"],
+    "anki_miner_game.paths": ["home"],
+    "anki_miner_game.store": ["load_config", "save_config", "load_profiles", "save_profile"],
 }
 
 PROPERTY = "property"
