@@ -29,10 +29,12 @@ install) may need an owner decision.
   kwin. Every probe process ran as an X11 client of that rootful server with `WAYLAND_DISPLAY`
   unset and `XDG_SESSION_TYPE=x11`. No window opened on the owner desktop, but the nested kwin was
   not isolated from the owner session (section "Owner-environment incident").
-  - The rootless Xwayland that `kwin --xwayland` provides is not enough: mss's `GetImage` on its
-    root window fails with `BadMatch` (X error 8, major opcode 73), so owocr exits with
-    `The window was closed or an error occurred` (`run.py:2544`). S2's `tools/nested_display.py`
-    needs the same rootful step for any screen-grab probe.
+  - Why rootful: the first R3 instance reported that mss's `GetImage` on the root window of kwin's
+    rootless Xwayland failed with `BadMatch` (X error 8, major opcode 73), which owocr turns into
+    `The window was closed or an error occurred` and an exit (`run.py:2544`). That probe's output
+    (`.orchestration/m0/r3/msstest.sh`) was not kept, so this is **unverified**; the only trace is
+    the header of `r3/session.sh`. S2 should re-check it before copying the rootful step into
+    `tools/nested_display.py`.
   - kwin also started an fcitx instance, which tried to take its name on the owner's session bus,
     failed (`Is there another fcitx already running?`, `out-*/kwin.log`) and unloaded.
 - owocr environment: `HOME`, `XDG_CACHE_HOME` and `XDG_CONFIG_HOME` pointed at a scratch dir.
@@ -40,7 +42,9 @@ install) may need an owner decision.
   800x160, Noto Sans CJK JP 48 pt, black on white, showing three sentences 15 s apart and printing
   `time.monotonic()` at each change.
 - Harness (not committed; gitignored scratch): `.orchestration/m0/r3/{nest.sh,session.sh,driver.py,text_window.py}`,
-  raw outputs in `.orchestration/m0/r3/out-*`.
+  raw outputs in `.orchestration/m0/r3/out-*`. Two R3 instances ran at once and wrote the same
+  `out-*` dirs; the kept set is the 14:59:03-15:00:28 one, and the captured fixtures match it byte
+  for byte after redaction. A figure with no file behind it is marked as not kept.
 
 Command used (spec 14 Linux form with explicit rectangles):
 
@@ -136,14 +140,14 @@ thread dies; OCR carries on. The supervisor must not treat a traceback in the lo
 ## Process tree
 
 owocr's process group started with `start_new_session=True` (evidence in
-`.orchestration/m0/r3/out-*/*-events.jsonl`):
+`.orchestration/m0/r3/out-*/*-events.jsonl`; the user `systemd` is pid 2991, `systemd --user`):
 
 | Run | Processes in the group | Kill | Result |
 |---|---|---|---|
-| Explicit rectangles (OCR running) | 1: the tool venv's `python .../bin/owocr` | `os.killpg(pgid, SIGTERM)` | all gone in 16-22 ms, return code -15 |
+| Explicit rectangles (OCR running) | 1: the tool venv's `python .../bin/owocr` | `os.killpg(pgid, SIGTERM)` | all gone in 16 ms (one run), return code -15 |
 | Picker (`-sa ""`) | 3: owocr, `multiprocessing.resource_tracker`, the `spawn_main` picker child (`screen_coordinate_picker.py:484`) | `os.kill(pid, SIGKILL)` on the parent only | **2 orphans** survive, reparented to the user `systemd`, still in the group |
 | same, continued | the 2 orphans | `os.killpg(pgid, SIGKILL)` | all gone |
-| Four `-sa` variants | 1 each | `killpg(SIGKILL)` or own exit | no survivors |
+| Four `-sa` variants | not listed (the driver logged no tree) | `killpg(SIGKILL)` or own exit | no survivors |
 
 - On Linux the `uv tool` entry point is a symlink to a console script whose shebang is the tool
   venv's Python, so there is no separate shim process; owocr's own `multiprocessing` children (spawn
@@ -161,18 +165,22 @@ owocr's process group started with `start_new_session=True` (evidence in
   resolved 2026-09-21: meikiocr 0.3.4, onnxruntime 1.30.0, numpy 2.5.3, opencv-python-headless
   5.0.0.93, mss 10.2.0, websockets 17.1, obsws-python 1.8.0 (43 packages). Only owocr is pinned; the
   rest float with PyPI.
-- **Linux fails as specified.** owocr depends on `PyGObject` on Linux (`pyproject.toml:56`), which
-  ships only an sdist, and it needs `pycairo`, which has Windows wheels only. The build stopped at
-  `Dependency "cairo" not found` (meson, pycairo 1.29.1). A Linux user needs a C toolchain plus
+- **Linux fails as specified.** owocr depends on `PyGObject` on Linux (`pyproject.toml:56`), and
+  uv found no Linux wheel for it or for its `pycairo` dependency, so it built both from source. The
+  build stopped at `Dependency "cairo" not found` (meson, pycairo 1.29.1;
+  `.orchestration/m0/uv-tools/install.log:70`). A Linux user needs a C toolchain plus
   the cairo and GObject-introspection development packages (Debian: `libcairo2-dev`,
   `libgirepository-2.0-dev`) before the add-on can install. `sudo` is not available here, so the
   full list was not confirmed.
 - `PyGObject` is used only by the Wayland capture shim (`wayland_mss_shim.py:8-10`, imported when
   `XDG_SESSION_TYPE=wayland`, `run.py:28,94-96`). With `--overrides` mapping
-  `pygobject; sys_platform == "never"` the install succeeds in about 3 s (warm cache) and X11 capture
-  works, as this spike shows. Wayland capture would then fail at import.
-- Size: tool venv 365 MB; meikiocr models 45 MB in the Hugging Face cache (`$XDG_CACHE_HOME`
-  or `~/.cache/huggingface`); onnxruntime also writes `~/.cache/Microsoft/DeveloperTools`.
+  `pygobject; sys_platform == "never"` the install succeeds (`uv-tools/install-override.log`: 43
+  packages, one download prepared in 3.03 s, the rest from uv's cache) and X11 capture works, as
+  this spike shows. Wayland capture would then fail at import.
+- Size (`du -sh --apparent-size`, after the runs): tool venv 366 MB; meikiocr models 45 MB in the
+  Hugging Face cache. onnxruntime also writes `.cache/Microsoft/DeveloperTools/.onnxruntime/`
+  (`deviceid`, `onnxruntime.db`; the path string is in `libonnxruntime.so.1.30.0`). Both landed in
+  the scratch `HOME`, where `XDG_CACHE_HOME` also pointed, so which of the two they follow is open.
 - uv puts its managed CPython in `~/.local/share/uv/python` and its cache in `~/.cache/uv` unless
   `UV_PYTHON_INSTALL_DIR` / `UV_CACHE_DIR` say otherwise; `UV_TOOL_DIR` alone does not keep the
   add-on inside `~/.anki_miner_game/addons/ocr/`.
@@ -182,30 +190,34 @@ owocr's process group started with `start_new_session=True` (evidence in
 - `Config.__init__` reads `os.path.expanduser('~')/.config/owocr_config.ini` (`config.py:110,186`).
   If the file is missing it creates `~/.config/` and **downloads**
   `https://github.com/AuroraWright/owocr/raw/master/owocr_config.ini` into that path
-  (`config.py:188-195`). Confirmed: the first run logged `A default config file has been downloaded
-  to <owocr-home>/.config/owocr_config.ini`; the second run logged `Parsed config file`.
+  (`config.py:188-195`) and logs `A default config file has been downloaded to <path>`
+  (`run.py:3110`). The first run's log was not kept. What survives: the scratch `HOME` holds
+  `.config/owocr_config.ini` (8233 bytes, 14:58:14), byte-identical to `owocr_config.ini` in the
+  clone, which the harness never writes; every kept run logs `Parsed config file` (`run.py:3106`).
 - So a plain launch writes the user's `~/.config/owocr_config.ini` when they have none and reads it
   when they do, contradicting spec 3.4 and 14 in practice even though the app itself never opens
   the file. It also makes behaviour depend on whatever GitHub master holds on first launch.
-- With `HOME` pointed at a scratch dir the real `~/.config/owocr_config.ini` stayed absent (checked
-  before and after every run). A pre-seeded file containing only `[general]` makes owocr parse it,
-  skip the download and take everything else from the command line and its defaults
-  (`config.py:199-217`; `get_general`, `config.py:209-211`, prefers CLI values).
+- With `HOME` pointed at a scratch dir the real `~/.config/owocr_config.ini` stayed absent (the
+  second R3 instance's check, and `owner-check.sh` after the spike). From source, not run: a
+  pre-seeded file containing only `[general]` makes owocr parse it, skip the download and take
+  everything else from the command line and its defaults (`config.py:199-217`; `get_general`,
+  `config.py:209-211`, prefers CLI values).
 - Every start also contacts `pypi.org` (latest-version check, `run.py:3038-3044`, 5 s timeout) and
   tries to fetch Chrome Screen AI from `chrome-infra-packages.appspot.com` into `~/.config/screen_ai`
-  (`ocr.py:854,933`) even with `-e meikiocr`; offline, both fail and owocr carries on. Other engine
-  paths also hang off `~`: `~/.config/oneocr` (`ocr.py:1876`, OneOCR files copied from the Snipping
+  (`ocr.py:854,933`) even with `-e meikiocr` (both in `out-ocr/ocr-run.log`; the Screen AI fetch
+  failed there). Both sit in bare `try`/`except` blocks (`run.py:3038-3044`, `ocr.py:935-949`), so
+  a failure only logs; an offline start was not run. Other engine paths also hang off `~`: `~/.config/oneocr` (`ocr.py:1876`, OneOCR files copied from the Snipping
   Tool on Windows 11), `~/.config/google_vision.json`, `~/.config/ndlocr_lite`.
 
 ## Timing
 
-Explicit-rectangle run, models cached, `screen_capture_delay_seconds` and stabilisation at their
-defaults:
+Explicit-rectangle run (`out-ocr/`), models cached, `screen_capture_delay_seconds` and
+stabilisation at their defaults. The first-ever run, with the model download, was not kept:
 
 | Event | Time |
 |---|---|
-| spawn -> websocket accepts | 1.0 s (the server starts before the engines load) |
-| spawn -> first frame (text already on screen) | 3.4 s; first-ever run 6 s including the 45 MB model download |
+| spawn -> websocket accepts | at most 1.0 s (the driver retried once a second); the server starts before the engines load |
+| spawn -> first frame (text already on screen) | 3.4 s |
 | text change -> frame, line 2 | 65 ms |
 | text change -> frame, line 3 | 54 ms |
 
