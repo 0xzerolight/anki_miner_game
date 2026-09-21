@@ -167,6 +167,10 @@ Pause passes the 150 ms bound.
 | Advanced, x264 lookahead 60 | 3217-3284 |
 | Encoder overload (x264 veryslow) | 3411-5577 |
 
+The table leaves out samples with `outputDuration` 0 and samples taken while paused
+(`driver/aggregate.py` in the run directory): the sample taken right after `STARTED` read 0 in all
+20 sessions, since no frame had reached the output yet, so it carries no lag.
+
 `outputDuration` counts delivered frames (source findings section 6), so it trails by the
 encoder's whole latency, which
 depends on the encoder, its lookahead and its thread count, and grows under overload. An

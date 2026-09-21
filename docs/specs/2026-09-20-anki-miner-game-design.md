@@ -370,14 +370,21 @@ response, `STARTING`, or `STARTED`) and the value of `capture_latency_ms` are me
 assumed. The default until then is `STARTED` and 0.
 
 `OutputDurationClock` (fallback). Anchors on `(monotonic midpoint of the request round trip,
-GetRecordStatus.outputDuration)` and re-anchors every 10 s. `outputDuration` counts frames delivered
-to the output, so it trails capture time by the encoder's latency; that is why it is the fallback.
-It is used only when reconcile says the event history is incomplete (section 6.3).
+GetRecordStatus.outputDuration + lag)` and re-anchors every 10 s. `outputDuration` counts frames
+delivered to the output, so it trails capture time by the encoder's latency: M0 measured 0.46 to
+3.3 s with a healthy encoder and up to 5.6 s under overload, varying by at most 110 ms within one
+session (`docs/m0/clock.md`). `lag` is `at_ms - output_duration_ms` of the latest drift sample
+whose `output_duration_ms` is above 0 (at start no frame has reached the output yet), which brings
+the fallback back within the 150 ms bound. A session with no such sample has no lag to add: its
+cues may start seconds early, and a banner says so. The fallback is used only when reconcile says
+the event history is incomplete (section 6.3).
 
 Rules for both: offsets are clamped to be non-negative and non-decreasing; a line arriving while
 paused is dropped and counted; the hooker's own `time` field is ignored, since mixing wall-clock
-with monotonic invites skew for a gain of milliseconds on localhost. `outputDuration` is sampled at
-start, at each pause edge and at stop, and stored in `clock.drift_samples` as a check, never as input.
+with monotonic invites skew for a gain of milliseconds on localhost. `outputDuration` is sampled
+while the `EventClock` is in use and the recording runs unpaused: at start, 10 s after start, at
+each resume and at stop. Each sample is written to the manifest's `clock.drift_samples`, and the
+fallback takes its lag from them.
 
 File splitting is off in the app's profile. If `RecordFileChanged` fires anyway, the session is
 finalised against the first file, flagged `split_unsupported`, and a banner says later lines were
