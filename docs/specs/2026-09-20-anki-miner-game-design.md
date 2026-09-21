@@ -899,6 +899,12 @@ sha256. PyAV wheels carry their own FFmpeg libraries, so the app needs no `ffmpe
 is a download rather than part of the bundle: it is optional by decision, and onnxruntime, numpy
 and PyAV would add roughly 80 MB to an app that sits in the tray beside a game.
 
+Every uv call of either add-on runs with `addons.bootstrap.uv_environment(home, addon)`: uv's
+managed Python (`UV_PYTHON_INSTALL_DIR`), cache (`UV_CACHE_DIR`) and tool folders live under the
+add-on's own folder, `UV_NO_CONFIG` keeps the user's `uv.toml` out, and `UV_MANAGED_PYTHON` never
+lets a system Python in. Without them uv puts its Python in `~/.local/share/uv/python` and its cache
+in `~/.cache/uv` (`docs/m0/owocr.md` amendment 2).
+
 ### 13.2 Worker (`vad/worker/vad_worker.py`)
 
 A standalone script shipped as data and run by the add-on's Python:
@@ -910,6 +916,11 @@ stdout, one JSON object per line:
   {"t":"progress","done_ms":600000,"total_ms":5248120}
   {"t":"done"}            or  {"t":"error","message":"…"}
 ```
+
+`total_ms` is `null` when the file states no duration (a recording cut off by a crash, which
+section 6.4 keeps). `--track` counts audio tracks only. Regions are on the file's timeline: a track
+that starts after the file shifts them by its start offset, and audio the demuxer lost is replaced
+by silence so later regions keep their place.
 
 It decodes the first audio track with PyAV, resamples to 16 kHz mono, and feeds fixed 512-sample
 windows through the stateful Silero model, emitting regions as they close. The track is never held
@@ -937,6 +948,18 @@ steps interact.
 3. **Ends.** `end = chain.end + 150 ms`, clamped to `next.final_start - end_gap_ms`, then to the cue
    invariant of section 9 (`end >= start + MIN_CUE_MS` where the next start allows, and never past
    it). No chain: keep the live end. A cue may grow past the live 15 s cap, never past that clamp.
+
+Readings of these steps (`docs/m0/wave-1-amendments.md` item 14):
+
+- Windows are half-open: a region that begins exactly at the next cue's live start belongs to the
+  next cue.
+- OCR mode keeps step 1's skip rule for a cue that finds no snap region.
+- The snap interval of step 2 is `[max(prev.live_end, start - SNAP_LOOKBACK_MS), start]`, and the
+  first cue's interval opens at `max(0, start - SNAP_LOOKBACK_MS)`. `SNAP_LOOKBACK_MS` is 10 s,
+  provisional until tuned against real OCR sessions (M4).
+- A cue whose chain is empty keeps its live start and end, except when the next cue's start snapped
+  back: its live end then gets the step 3 clamp (`next.final_start - end_gap_ms`, with the
+  `MIN_CUE_MS` floor). Hook mode is unchanged.
 
 Worked example, hook mode, regions R1 5.31-8.92 s, R2 9.60-11.05 s, R3 14.2-16.0 s:
 
