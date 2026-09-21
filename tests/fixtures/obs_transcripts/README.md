@@ -1,4 +1,4 @@
-# obs-websocket transcripts (R2)
+# obs-websocket transcripts (R2, E1)
 
 Recorded on 2026-09-21 by the R2 spike from a real OBS Studio **32.2.2** (Flatpak, obs-websocket
 **5.7.4**) on Linux, running as an X11 client of the isolated nested display
@@ -9,11 +9,13 @@ recorded for. T12's `FakeObsServer` replays them.
 R2's own driver provisioned the OBS these transcripts talk to, not `obs/provision.py`: its inputs
 are `Game capture` and `Game audio` (the app's are `Window Capture (X11)` and `Desktop Audio
 Capture`), and its requests come in the driver's order (`arm_disarm.jsonl`'s re-provisioning pass
-reads `Game capture` and never asks for a mute). So no transcript replays `ObsProvisioner` request by
-request: `tests/obs/test_provision_replay.py` replays `provision.jsonl`'s provisioning
+reads `Game capture` and never asks for a mute). So none of R2's transcripts replays `ObsProvisioner`
+request by request: `tests/obs/test_provision_replay.py` replays `provision.jsonl`'s provisioning
 frames against T14's `FakeObs`, and T25 answers the provisioner from a fake OBS and plays only the
-recording and switch frames and events of a transcript. A transcript of the app's own provisioning
-is E1's to record.
+recording and switch frames and events of a transcript. `app_provision.jsonl` is the app's own
+provisioning, recorded by E1 ([`docs/m0/m1-exit-linux.md`](../../../docs/m0/m1-exit-linux.md)) through
+the same proxy with the app's gateway; `tests/obs/test_provision_replay.py` replays it request by request
+against `ObsProvisioner`.
 
 ## Format
 
@@ -53,6 +55,7 @@ straight to OBS and is not in the transcripts.
 
 | File | Scenario | How it was produced |
 |---|---|---|
+| `app_provision.jsonl` | The app's own provisioning, three arms (E1) | Recorded 2026-09-22 by E1 with the same OBS in a rootless nested display, R1's final config root with `[Audio] SampleRate=44100` seeded in `Untitled`'s `basic.ini`, the app (`anki_miner_game.launch`, its gateway on `conn` 1 and 2, then 3 and 4) pointed at the proxy with `obs.port`, game profile `e1-provision` (`capture.kind` `xcomposite`, no window pinned). Arm 1 on an OBS without the app's profile or collection: statuses, lists, provisioning (the audio copy, the rows, the profile re-activation, `CreateSceneCollection`, `SetCurrentProgramScene Game`, two inputs, no special inputs), the reconcile; the app quits and restores `Untitled` / `Untitled`. Between the runs a direct client (not in the transcript) replaced `Window Capture (X11)` with an `xshm_input_v2` of that name, and a muted `Desktop Audio` special input was written into the app's collection file while OBS ran on `Untitled`. Arm 2 (a new app run): the switches, provisioning with `RemoveInput`, the wait for the name (`GetInputSettings` 100, then 600), `CreateInput`, `GetInputMute`; then a direct client unmuted the special input; arm 3 (an `--arm` verb while armed): `GetInputMute` false, `SetInputMute`; the app quits and restores. Host paths rewritten as above: the run's app record folder, and a new profile's default record folder (OBS's default for every profile here, the user's included) as `/home/user/Videos` |
 | `provision.jsonl` | First provisioning (spec 11.3, Linux X11 row) | Fresh OBS on `Untitled`, launched with `--minimize-to-tray`, a probe window open. Four output statuses, profile and collection lists, `CreateProfile`, `SetRecordDirectory`, `SetVideoSettings` (720p, 30/1), `SetProfileParameter` for `SimpleOutput`/`AdvOut` `RecFormat2=mkv`, `AdvOut/RecSplitFile=false`, `Video/AutoRemux=false` with read-backs, `CreateSceneCollection`, `CreateScene Game`, `GetInputKindList`, `CreateInput xcomposite_input` with a placeholder `capture_window`, the window list, `SetInputSettings` to the probe window's item, `CreateInput pulse_output_capture`, `GetSpecialInputs` (all null, so no mute) |
 | `settings_apply.jsonl` | Settings without a restart | Straight after `provision.jsonl`, same OBS: record 5 s, stop; switch to `Untitled` and back to `Anki Miner Game`; record 5 s, stop. The first file holds MP4 data under its `.mkv` name, the second is Matroska (ffprobe, in the findings) |
 | `arm_disarm.jsonl` | Arm and disarm, no output active | Disarmed OBS. Arm step 1 (four statuses; replay buffer and virtual camera answer 604), lists, `SetCurrentProfile` then `SetCurrentSceneCollection`, the read-only re-provisioning pass, then both switched back to `Untitled` |

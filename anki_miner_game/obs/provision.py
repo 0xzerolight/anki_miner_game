@@ -9,8 +9,8 @@ GSM's ``rsplit`` and ``strip``, since OBS never writes a raw colon inside a part
 frozen dataclass instead of a dict.
 
 Values from M0 are named constants below: source reading (``docs/m0/source-findings.md``), R1
-(``docs/m0/clock.md``) and R2 (``docs/m0/obs-behaviour.md``), which confirmed them on a real OBS.
-``INPUT_RELEASE_TIMEOUT_S`` stays provisional until E1 measures it.
+(``docs/m0/clock.md``) and R2 (``docs/m0/obs-behaviour.md``), which confirmed them on a real OBS, and
+E1 (``docs/m0/m1-exit-linux.md``), which measured ``INPUT_RELEASE_TIMEOUT_S``'s delay.
 """
 
 import asyncio
@@ -119,14 +119,16 @@ SWITCH_TIMEOUT_S: Final = 15.0
 """How long a profile or scene collection switch may take, answer and ``...Changed`` event (spec 6.2's
 switch timeout)."""
 
-INPUT_RELEASE_TIMEOUT_S: Final = 5.0
+INPUT_RELEASE_TIMEOUT_S: Final = 1.0
 """How long to wait for OBS to free the name of an input ``RemoveInput`` removed before creating it again.
 
 ``CreateInput`` refuses any name a source still holds (``obs-websocket@1ef34bf4
 src/requesthandler/RequestHandler_Inputs.cpp:154-156``), and a removed source keeps its name until it
 is destroyed, after the scene's next render and the UI have dropped their references
-(``obs-studio@ba2f32bd libobs/obs-source.c:754-755``, ``libobs/obs-scene.c:1015-1021``). Provisional
-until E1 measures the delay on a real OBS."""
+(``obs-studio@ba2f32bd libobs/obs-source.c:754-755``, ``libobs/obs-scene.c:1015-1021``). E1 measured
+3.6 to 33.7 ms over 21 removals on OBS 32.2.2 at 30 fps, idle and while recording, never more than one
+frame (``docs/m0/m1-exit-linux.md``); the app's own second arm found the name free at its second check
+(``tests/fixtures/obs_transcripts/app_provision.jsonl``). One second is about 30 times the longest."""
 
 POLL_S: Final = 0.2
 

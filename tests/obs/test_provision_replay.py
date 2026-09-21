@@ -24,26 +24,34 @@ src/eventhandler/EventHandler_Inputs.cpp:44,53,123,128``,
 OBS's, in OBS's order; at each recorded event the replay yields once, so a switch OBS makes after its
 answer (``CreateProfile``) has landed in the fake before the next request, as it had in OBS.
 
-Follow-up E1-PROVISION-REPLAY (master plan E1 card): no real frame covers ``RemoveInput`` and how
-long OBS then holds the name (``INPUT_RELEASE_TIMEOUT_S``), ``GetInputMute`` and ``SetInputMute``,
-``SetCurrentProgramScene``, ``GetProfileParameter`` on a fresh profile before any write, a setting
-written equal to its default, the audio copy or the profile re-activation. E1 records
-``ObsProvisioner``'s own first and second run through ``tools/obs_transcript_recorder.py``, and that
-transcript is replayed request by request against the provisioner.
+- ``tests/fixtures/obs_transcripts/app_provision.jsonl`` (E1-PROVISION-REPLAY, ``docs/m0/m1-exit-linux.md``):
+  the app's own three arms on the same OBS, recorded through ``tools/obs_transcript_recorder.py``.
+  Arm 1 on an OBS that has never seen the app, its user profile at 44.1 kHz: the audio copy, the
+  profile re-activation, ``SetCurrentProgramScene``, ``GetProfileParameter`` on a fresh profile.
+  Arm 2 after a direct client replaced the app's X11 input with an ``xshm_input_v2`` of that name
+  and a muted special input was added to the collection: ``RemoveInput``, the wait for OBS to free
+  the name, ``CreateInput``, ``GetInputMute``. Arm 3 after the special input was unmuted:
+  ``SetInputMute``. These frames are replayed request by request against ``ObsProvisioner`` itself
+  (``TranscriptGateway``), and arm 1 also against ``FakeObs``.
 """
 
 import asyncio
 import json
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from anki_miner_game.models.config import AppConfig, RecordingSettings
 from anki_miner_game.models.constants import OBS_SCENE_NAME
-from anki_miner_game.models.obs import ObsRequestError, ProvisionResult
-from anki_miner_game.models.profile import CaptureSettings, GameProfile
+from anki_miner_game.models.messages import ObsEvent
+from anki_miner_game.models.obs import ObsInfo, ObsRequestError, ProvisionResult
+from anki_miner_game.models.profile import CaptureKind, CaptureSettings, GameProfile
 from anki_miner_game.obs.provision import (
     CONTAINER_KEYS,
     DESKTOP_AUDIO_INPUT,
+    INPUT_RELEASE_TIMEOUT_S,
     OFF_KEYS,
     XCOMPOSITE_INPUT,
     ObsProvisioner,
@@ -53,6 +61,7 @@ from tests.obs.fake_obs import FakeObs, Sleeps
 FIXTURES = Path(__file__).parents[1] / "fixtures"
 R1_CAPTURE = FIXTURES / "obs_provision" / "r1-trial2-provisioning.jsonl"
 R2_PROVISION = FIXTURES / "obs_transcripts" / "provision.jsonl"
+APP_PROVISION = FIXTURES / "obs_transcripts" / "app_provision.jsonl"
 
 READ_PARAMETERS = frozenset(CONTAINER_KEYS + OFF_KEYS + (("Output", "Mode"), ("SimpleOutput", "RecQuality")))
 """The ``basic.ini`` keys the fake models that the recorded run reads; it models no other key's default."""
@@ -245,3 +254,191 @@ async def test_the_collection_r2_made_on_a_real_obs_gets_game_as_program_scene_a
     # R2's driver named its inputs differently; they are not the app's and stay as they were.
     assert obs.scene_items() == ["Game capture", "Game audio", XCOMPOSITE_INPUT, DESKTOP_AUDIO_INPUT]
     assert obs.collection.inputs[XCOMPOSITE_INPUT].settings["capture_window"] == window
+
+
+# --- the app's own provisioning (E1-PROVISION-REPLAY) ------------------------------------------------
+
+APP_CONFIG = AppConfig(output_root="/home/user/Videos/Anki Miner Game")
+"""The recorded run's settings: defaults, its output root rewritten as in every fixture."""
+APP_PROFILE = GameProfile(
+    slug="e1-provision", title="Provision Probe", capture=CaptureSettings(kind=CaptureKind.XCOMPOSITE)
+)
+"""The game profile the recorded arms used: an X11 capture with no window pinned."""
+TO_OBS, FROM_OBS = "client->obs", "obs->client"
+NOT_READY = 207
+
+
+def app_requests(records: list[dict[str, Any]]) -> list[tuple[int, dict[str, Any]]]:
+    """``(conn, request)`` of every request the app sent, in order."""
+    return [(r["conn"], r["msg"]["d"]) for r in records if r.get("dir") == TO_OBS and r.get("msg", {}).get("op") == 6]
+
+
+def provisioning_starts(records: list[dict[str, Any]]) -> list[int]:
+    """Index in ``app_requests`` of each arm's first provisioning request.
+
+    An arm reads ``GetProfileList`` and ``GetSceneCollectionList``, switches to the app's profile and
+    collection where they exist (``SessionActor._switch_to_app``), and then provisioning begins with
+    ``ensure_profile``'s own ``GetProfileList``.
+    """
+    types = [request["requestType"] for _, request in app_requests(records)]
+    starts = []
+    for i in range(len(types) - 1):
+        if types[i : i + 2] != ["GetProfileList", "GetSceneCollectionList"]:
+            continue
+        j = i + 2
+        while types[j] in ("SetCurrentProfile", "SetCurrentSceneCollection"):
+            j += 1
+        if types[j] == "GetProfileList":
+            starts.append(j)
+    return starts
+
+
+def exchanges(records: list[dict[str, Any]], conn: int) -> list[tuple[float, dict[str, Any], dict[str, Any]]]:
+    """``(t_sent, request, answer)`` on one connection. obsws-python sends one request at a time and
+    its request ids repeat, so each answer is the frame after its request."""
+    frames = [r for r in records if r.get("conn") == conn and r.get("msg", {}).get("op") in (6, 7)]
+    return [(q["t_mono"], q["msg"]["d"], a["msg"]["d"]) for q, a in zip(frames[::2], frames[1::2], strict=True)]
+
+
+class TranscriptGateway:
+    """An ``ObsGateway`` answering from the frames the app exchanged with a real OBS.
+
+    From ``start`` on, every request must be the next one the app sent on that connection, with the
+    same fields, and gets OBS's recorded answer (``ObsRequestError`` with OBS's code for a failure).
+    A request OBS answered 207 was retried by the gateway (``ObsClient``) and is skipped. After each
+    answer, the events OBS sent before the app's next request reach the handlers on the loop, as
+    they reached the app: a switch's ``...Changed`` event may come before or after its answer.
+    """
+
+    def __init__(self, records: list[dict[str, Any]], start: int) -> None:
+        requests = app_requests(records)
+        self.conn = requests[start][0]
+        self._sent = exchanges(records, self.conn)
+        self._events = [
+            (r["t_mono"], r["msg"]["d"])
+            for r in records
+            if r.get("dir") == FROM_OBS and r.get("msg", {}).get("op") == 5
+        ]
+        self._next = sum(1 for conn, _ in requests[:start] if conn == self.conn)
+        self._handlers: list[Callable[[ObsEvent], None]] = []
+        self.sent: list[tuple[str, dict[str, Any]]] = []
+
+    async def connect(self) -> ObsInfo:
+        raise NotImplementedError
+
+    def subscribe(self, handler: Callable[[ObsEvent], None]) -> None:
+        self._handlers.append(handler)
+
+    @property
+    def collection_changing(self) -> bool:
+        return False
+
+    async def close(self) -> None:
+        pass
+
+    def next_request(self) -> str | None:
+        return self._sent[self._next][1]["requestType"] if self._next < len(self._sent) else None
+
+    async def request(self, name: str, **fields: Any) -> dict[str, Any]:
+        while self._sent[self._next][2]["requestStatus"]["code"] == NOT_READY:
+            self._next += 1
+        t_sent, recorded, answer = self._sent[self._next]
+        assert (name, fields) == (recorded["requestType"], recorded.get("requestData") or {})
+        self._next += 1
+        self.sent.append((name, fields))
+        t_next = self._sent[self._next][0] if self._next < len(self._sent) else float("inf")
+        loop = asyncio.get_running_loop()
+        for t, event in self._events:
+            if t_sent < t <= t_next:
+                obs_event = ObsEvent(event["eventType"], event.get("eventData") or {}, t)
+                for handler in self._handlers:
+                    loop.call_soon(handler, obs_event)
+        status = answer["requestStatus"]
+        if status["code"] != 100:
+            raise ObsRequestError(name, status["code"], status.get("comment", ""))
+        return dict(answer.get("responseData") or {})
+
+    def mutating(self) -> list[str]:
+        return [name for name, _ in self.sent if not name.startswith("Get")]
+
+
+async def provision_arm(records: list[dict[str, Any]], arm: int) -> tuple[TranscriptGateway, list[ProvisionResult]]:
+    gateway = TranscriptGateway(records, provisioning_starts(records)[arm])
+    provisioner = ObsProvisioner(gateway, platform="linux", sleep=Sleeps())
+    results = [await provisioner.ensure_profile(APP_CONFIG), await provisioner.ensure_collection(APP_PROFILE)]
+    return gateway, results
+
+
+def test_the_app_transcript_holds_three_arms():
+    assert len(provisioning_starts(load(APP_PROVISION))) == 3
+
+
+@pytest.mark.parametrize("arm", [0, 1, 2])
+async def test_the_provisioner_sends_exactly_what_the_app_sent_to_a_real_obs(arm):
+    gateway, _ = await provision_arm(load(APP_PROVISION), arm)
+
+    # Provisioning ends where the recorded arm's did: next came the reconcile of the app's fresh
+    # connection (arms 1 and 2, started with --arm) or the quit's output check (arm 3).
+    assert gateway.next_request() in {"GetVersion", "GetStreamStatus"}
+
+
+async def test_the_first_arm_copies_the_audio_rate_and_reactivates_the_profile():
+    gateway, results = await provision_arm(load(APP_PROVISION), 0)
+
+    assert results == [ProvisionResult(changed=True, needs_restart=False), ProvisionResult(True, False)]
+    assert (
+        "SetProfileParameter",
+        {"parameterCategory": "Audio", "parameterName": "SampleRate", "parameterValue": "44100"},
+    ) in gateway.sent
+    switches = [(n, f) for n, f in gateway.sent if n == "SetCurrentProfile"]
+    assert switches == [
+        ("SetCurrentProfile", {"profileName": "Untitled"}),
+        ("SetCurrentProfile", {"profileName": "Anki Miner Game"}),
+    ]
+    assert ("SetCurrentProgramScene", {"sceneName": OBS_SCENE_NAME}) in gateway.sent
+
+
+async def test_the_second_arm_only_removes_and_recreates_the_replaced_input():
+    gateway, results = await provision_arm(load(APP_PROVISION), 1)
+
+    assert gateway.mutating() == ["RemoveInput", "CreateInput"]
+    assert [f["inputName"] for n, f in gateway.sent if n in ("RemoveInput", "CreateInput")] == [XCOMPOSITE_INPUT] * 2
+    assert ("GetInputMute", {"inputName": "Desktop Audio"}) in gateway.sent  # the special input, muted already
+    assert results == [ProvisionResult(changed=False, needs_restart=False), ProvisionResult(True, False)]
+
+
+async def test_the_third_arm_only_mutes_the_special_input():
+    gateway, results = await provision_arm(load(APP_PROVISION), 2)
+
+    assert gateway.sent[-1] == ("SetInputMute", {"inputName": "Desktop Audio", "inputMuted": True})
+    assert gateway.mutating() == ["SetInputMute"]
+    assert results == [ProvisionResult(changed=False, needs_restart=False), ProvisionResult(True, False)]
+
+
+def test_obs_freed_the_removed_name_inside_the_release_timeout():
+    records = load(APP_PROVISION)
+    (conn,) = {conn for conn, request in app_requests(records) if request["requestType"] == "RemoveInput"}
+    sent = exchanges(records, conn)
+    i = next(i for i, (_, request, _) in enumerate(sent) if request["requestType"] == "RemoveInput")
+    created = next(j for j in range(i, len(sent)) if sent[j][1]["requestType"] == "CreateInput")
+    checks = [
+        (t, answer["requestStatus"]["code"])
+        for t, request, answer in sent[i:created]
+        if request.get("requestData") == {"inputName": XCOMPOSITE_INPUT}
+        and request["requestType"] == "GetInputSettings"
+    ]
+
+    assert [code for _, code in checks] == [100, 600]  # held at the first check, free at the next
+    assert checks[-1][0] - sent[i][0] < INPUT_RELEASE_TIMEOUT_S
+
+
+async def test_fake_obs_answers_the_apps_first_arm_as_obs_did():
+    records = load(APP_PROVISION)
+    first_close = next(i for i, r in enumerate(records) if r.get("event") == "close")
+    obs = r2_rig()
+    obs.profiles["Untitled"][("Audio", "SampleRate")] = "44100"  # seeded before the run (README)
+
+    checked, mismatches = await replay(obs, records[:first_close])
+
+    assert mismatches == []
+    assert {"CreateProfile", "SetCurrentProfile", "SetCurrentProgramScene", "CreateInput"} <= set(checked)
