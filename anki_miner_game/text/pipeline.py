@@ -23,9 +23,14 @@ _SPEAKER = re.compile(r"^【[^】]*】\s*")
 
 
 def _normalise(raw: str, *, speaker_strip: bool) -> str:
-    """Steps 1-4: NFC, drop control and zero-width characters, collapse whitespace, strip speaker."""
+    """Steps 1-4: NFC, drop control and zero-width characters, collapse whitespace, strip speaker.
+
+    Step 2 also drops lone surrogates (``Cs``): ``json.loads`` keeps a ``\\udXXX`` escape from a
+    UTF-16 pair cut in half, and such a string cannot be encoded to write the journal, the subtitle
+    or the feed.
+    """
     text = unicodedata.normalize("NFC", raw)
-    text = "".join(ch for ch in text if ch == "\n" or unicodedata.category(ch) not in ("Cc", "Cf"))
+    text = "".join(ch for ch in text if ch == "\n" or unicodedata.category(ch) not in ("Cc", "Cf", "Cs"))
     text = " ".join(text.split())
     if speaker_strip:
         text = _SPEAKER.sub("", text, count=1)

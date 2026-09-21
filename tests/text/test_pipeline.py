@@ -14,7 +14,9 @@ from anki_miner_game.models.pipeline import (
     Replaced,
 )
 from anki_miner_game.models.profile import FilterSettings
+from anki_miner_game.session.journal import Journal, LineRecord, read_journal, timed_lines
 from anki_miner_game.text.pipeline import TextPipeline
+from anki_miner_game.text.sources.websocket_source import parse_frame
 
 
 def _pipe(*, speaker_strip: bool = True, typewriter_merge: bool = False) -> TextPipeline:
@@ -65,6 +67,23 @@ def test_step2_removes_tab_and_carriage_return_but_keeps_newline():
 
 def test_step2_line_of_only_zero_width_is_empty():
     _dropped(_pipe().process(_msg("​‍﻿")), DropReason.EMPTY, "no_letters")
+
+
+def test_step2_removes_lone_surrogates():
+    # A hooker that cuts a UTF-16 pair in half sends "\ud83d" in its JSON; json.loads keeps it.
+    assert _text(_pipe().process(_msg(parse_frame('{"sentence": "abc\\ud83d"}')))) == "abc"
+    _dropped(_pipe().process(_msg("\udfff")), DropReason.EMPTY, "no_letters")
+
+
+def test_step2_accepted_text_can_be_journalled(tmp_path):
+    result = _pipe().process(_msg(parse_frame('{"sentence": "こん\\ud83dにちは"}')))
+    assert isinstance(result, Accepted)
+
+    journal = Journal(tmp_path / "session.lines.jsonl")
+    journal.append(LineRecord(offset_ms=0, text=result.line.text, source=result.line.source_id))
+    journal.close()
+
+    assert timed_lines(read_journal(tmp_path / "session.lines.jsonl"))[0].text == "こんにちは"
 
 
 # --- step 3: whitespace ----------------------------------------------------
