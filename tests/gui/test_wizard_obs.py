@@ -245,7 +245,7 @@ async def test_provisions_from_the_users_profile_and_switches_both_back():
     # Back on the user's profile and collection; no restart question on the way (audio copied).
     assert (obs.current_profile, obs.current_collection) == (USER, USER)
     assert obs.restart_questions == []
-    assert obs.events[-2:] == ["CurrentSceneCollectionChanging", "CurrentSceneCollectionChanged"]
+    assert obs.event_names()[-2:] == ["CurrentSceneCollectionChanging", "CurrentSceneCollectionChanged"]
     # The user's names were read before provisioning started.
     names = obs.names()
     assert names.index("GetProfileList") < names.index("CreateProfile")
@@ -284,7 +284,7 @@ async def test_subscribes_to_the_gateway_once():
     setup, _ = make_setup(obs)
     await setup.run(AppConfig())
     await setup.run(AppConfig())
-    assert len(obs.handlers) == 1
+    assert obs.handlers.count(setup._on_event) == 1  # the provisioner subscribes on its own, when built
 
 
 async def test_a_switch_back_answered_first_still_waits_for_its_changed_event():

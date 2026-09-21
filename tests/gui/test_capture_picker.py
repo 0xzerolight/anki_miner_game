@@ -162,7 +162,10 @@ async def test_the_switch_back_is_done_on_the_changed_event_even_after_the_answe
     listing = await picker.list_windows(X11_PROFILE)
 
     assert listing.warning is None
-    assert ("CurrentSceneCollectionChanged", {"sceneCollectionName": "Untitled"}) in obs.events_sent
+    back = obs.names().index("SetCurrentSceneCollection")
+    changed = [(n, data) for n, name, data in obs.events if name == "CurrentSceneCollectionChanged"]
+    # Sent once, after the answer: ``events`` records how many requests had gone out by then.
+    assert changed[1:] == [(back + 1, {"sceneCollectionName": "Untitled"})]
 
 
 async def test_no_switch_back_when_the_app_collection_was_already_current() -> None:

@@ -1,22 +1,21 @@
 """Fakes for the first-run wizard tests (spec 16, 11.1, 11.3).
 
-``WizardObs`` is T14's ``FakeObs`` with the rest of the ``ObsGateway`` surface the wizard uses:
-``connect``, ``subscribe``, the four output status requests (spec 6.2 step 1) and the
-``CurrentProfileChanged`` / ``CurrentSceneCollectionChanged`` events of a switch, sent from another
-thread as obsws-python's event thread would. ``switch_mode`` picks the order R2 saw (item 5) and the
-cases where OBS never answers or never sends the event. ``FakeDiscovery`` models the install, the
+``WizardObs`` is T14's ``FakeObs``, which sends a switch's ``...Changing`` and ``...Changed`` events
+itself, with the rest of the ``ObsGateway`` surface the wizard uses: ``connect`` and the four output
+status requests (spec 6.2 step 1). Its switch events reach the handlers from another thread, as
+obsws-python's event thread delivers them; ``switch_mode`` picks the order R2 saw (item 5) and the
+cases where OBS never answers or never sends the events. ``FakeDiscovery`` models the install, the
 websocket ``config.json`` and the OBS process.
 """
 
 import asyncio
 import threading
-from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 from anki_miner_game.models.config import AppConfig
-from anki_miner_game.models.messages import AppState, ObsEvent
+from anki_miner_game.models.messages import AppState
 from anki_miner_game.models.obs import (
     REQUIRED_REQUESTS,
     ObsCredentials,
@@ -29,24 +28,20 @@ from tests.obs.fake_obs import LINUX_X11_KINDS, FakeObs
 
 INVALID_RESOURCE_STATE = 604
 
-SWITCHES = {
-    "SetCurrentProfile": ("profileName", "CurrentProfileChanging", "CurrentProfileChanged"),
-    "SetCurrentSceneCollection": (
-        "sceneCollectionName",
-        "CurrentSceneCollectionChanging",
-        "CurrentSceneCollectionChanged",
-    ),
-}
+SWITCH_REQUESTS = frozenset({"SetCurrentProfile", "SetCurrentSceneCollection"})
 
 
 class WizardObs(FakeObs):
-    """``FakeObs`` plus ``connect``, events and output statuses.
+    """``FakeObs`` plus ``connect`` and output statuses; switch events come per ``switch_mode``.
 
-    ``switch_mode`` for ``SetCurrentProfile`` and ``SetCurrentSceneCollection``:
+    ``switch_mode`` for every switch whose events ``FakeObs`` announces (``SetCurrentProfile``,
+    ``SetCurrentSceneCollection``, ``CreateSceneCollection``; ``CreateProfile``'s switch is
+    ``FakeObs``'s own):
 
     - ``"event_first"``: ``...Changing`` and ``...Changed`` reach the handlers before the answer.
     - ``"answer_first"``: the answer comes at once; the events wait until ``release_events()``.
-    - ``"no_answer"``: the events come, the answer never does until ``answer_pending()`` (R2 item 3).
+    - ``"no_answer"``: the events come; the answer to a ``Set...`` never does until
+      ``answer_pending()`` (R2 item 3).
     - ``"no_event"``: the answer comes, the events never do.
     """
 
@@ -56,7 +51,6 @@ class WizardObs(FakeObs):
         self.info = ObsInfo("32.2.2", "5.7.4", frozenset(REQUIRED_REQUESTS))
         self.connect_error: Exception | None = None
         self.connects = 0
-        self.handlers: list[Callable[[ObsEvent], None]] = []
         self.active = {"GetStreamStatus": False, "GetRecordStatus": False}
         self.replay_buffer: bool | None = None
         """``None``: not configured, so ``GetReplayBufferStatus`` answers 604 (R2 item 6)."""
@@ -64,8 +58,7 @@ class WizardObs(FakeObs):
         self.fail: dict[str, Exception] = {}
         """Request name -> the error it raises (checked before the request runs)."""
         self.switch_mode = "event_first"
-        self.events: list[str] = []
-        self._held_events: list[ObsEvent] = []
+        self._held_events: list[tuple[str, dict[str, Any]]] = []
         self._pending: list[asyncio.Future[dict[str, Any]]] = []
 
     # ObsGateway surface ----------------------------------------------------------------------
@@ -76,50 +69,39 @@ class WizardObs(FakeObs):
             raise self.connect_error
         return self.info
 
-    def subscribe(self, handler: Callable[[ObsEvent], None]) -> None:
-        self.handlers.append(handler)
-
     async def request(self, name: str, **fields: Any) -> dict[str, Any]:
         if name in self.fail:
             self.calls.append((name, dict(fields)))
             raise self.fail[name]
-        if name not in SWITCHES:
-            return await super().request(name, **fields)
-        field, changing, changed = SWITCHES[name]
-        target = fields[field]
-        before = self.current_profile if name == "SetCurrentProfile" else self.current_collection
+        before = (self.current_profile, self.current_collection)
         result = await super().request(name, **fields)
-        if target == before:
-            return result  # the current one answers at once and sends no event (R2 item 4)
-        events = [ObsEvent(changing, {field: target}, 0.0), ObsEvent(changed, {field: target}, 0.0)]
-        if self.switch_mode == "event_first":
-            self.emit_from_thread(events)
-        elif self.switch_mode == "answer_first":
-            self._held_events.extend(events)
-        elif self.switch_mode == "no_answer":
-            self.emit_from_thread(events)
+        switched = (self.current_profile, self.current_collection) != before
+        if name in SWITCH_REQUESTS and switched and self.switch_mode == "no_answer":
             pending: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
             self._pending.append(pending)
             return await pending
         return result
 
+    def _announce(self, *events: tuple[str, dict[str, Any]]) -> None:
+        """``FakeObs``'s hook for the events of a switch it has made: sent as ``switch_mode`` says."""
+        if self.switch_mode == "answer_first":
+            self._held_events.extend(events)
+        elif self.switch_mode != "no_event":
+            self.emit_from_thread(events)
+
     # Test helpers ----------------------------------------------------------------------------
 
-    def emit_from_thread(self, events: list[ObsEvent]) -> None:
-        """Hand ``events`` to every handler on another thread, as obsws-python does, and wait for it."""
-
-        def deliver() -> None:
-            for event in events:
-                self.events.append(event.name)
-                for handler in list(self.handlers):
-                    handler(event)
-
-        thread = threading.Thread(target=deliver)
+    def emit_from_thread(self, events: tuple[tuple[str, dict[str, Any]], ...]) -> None:
+        """Send ``events`` to every handler on another thread, as obsws-python does, and wait for it."""
+        thread = threading.Thread(target=self._announce_now, args=(events,))
         thread.start()
         thread.join()
 
+    def event_names(self) -> list[str]:
+        return [name for _, name, _ in self.events]
+
     def release_events(self) -> None:
-        held, self._held_events = self._held_events, []
+        held, self._held_events = tuple(self._held_events), []
         self.emit_from_thread(held)
 
     def answer_pending(self, loop: asyncio.AbstractEventLoop) -> None:
