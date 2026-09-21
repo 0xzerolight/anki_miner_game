@@ -1,0 +1,7 @@
+# SYNTHETIC (R3): hand-written from owocr 1.26.8 source (3b9706b1), not captured. Screen picker (-sa "") after the user drags one rectangle: run.py:3159, 2436, 2480. See docs/m0/owocr.md.
+15:10:02 | Starting owocr version 1.26.8
+15:10:02 | Latest available version: 1.26.8
+15:10:02 | Parsed config file
+15:10:02 | Starting websocket server on port 41805
+15:10:02 | Launching screen coordinate picker
+15:10:09 | Selected coordinates: 412,610,1508,1002

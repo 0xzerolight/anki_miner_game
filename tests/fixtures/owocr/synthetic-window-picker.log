@@ -1,0 +1,8 @@
+# SYNTHETIC (R3): hand-written from owocr 1.26.8 source (3b9706b1), not captured. Windows window picker (-sa "<title>" -swa "") after one rectangle: run.py:3159, 2015, 2494, 2517. See docs/m0/owocr.md.
+15:12:40 | Starting owocr version 1.26.8
+15:12:40 | Latest available version: 1.26.8
+15:12:40 | Parsed config file
+15:12:40 | Starting websocket server on port 41806
+15:12:41 | Selected window: Some Game
+15:12:41 | Launching window coordinate picker
+15:12:47 | Selected window coordinates: 0,540,1280,720
