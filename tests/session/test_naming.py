@@ -44,10 +44,15 @@ COUNTEREXAMPLES = [
     ("S1[0123ABCD]E2", "S1[0123ABCD]~E2"),
     ("S1 E[0123ABCD]2", "S1 ~E[0123ABCD]2"),
     ("S[0123ABCD]1 v2 E2", "S[0123ABCD]1 v2 ~E2"),
+    # Shrunk by Hypothesis: a resolution token does the joining; \d takes any Unicode digit.
+    ("S00000x000E0", "S00000x000~E0"),
+    ("S0 000x000E0", "S0 000x000~E0"),
+    ("S000x0000٠000p E0", "S000x0000٠000p ~E0"),
     # ... or leaves a hyphen between spaces.
     ("A 1080p- 5", "A 1080p~ 5"),
     ("A -1080p 5", "A ~1080p 5"),
     ("A 1080p-x264 5", "A 1080p~x264 5"),
+    ("x264 000p- 0", "x264 000p~ 0"),
     # Whitespace that is not a control character, around a hyphen.
     ("A\u3000-\u30005", "A ~ 5"),
     ("A\xa0-\xa05", "A ~ 5"),
