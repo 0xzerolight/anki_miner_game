@@ -1159,7 +1159,9 @@ diffs the vendored copy against a checkout; it is not part of CI, because CI has
   `websockets`, in the style of Anki Miner's `tests/e2e/fake_ankiconnect.py`. It replays
   **transcripts recorded from a real OBS** in M0: normal session, pause and resume, reconnect
   mid-session, missed pause event, OBS exit, profile and collection switch, a refused switch.
-  Hand-written fakes would only encode the author's assumptions.
+  Hand-written fakes would only encode the author's assumptions. R2 recorded them into
+  `tests/fixtures/obs_transcripts/` (23 real, 1 labelled synthetic; its `README.md` says how each
+  was made).
 - `FakeHookerServer`: broadcasts scripted lines on a schedule driven by an injected clock.
 - Integration: scripted session against both fakes, asserting a byte-exact `.srt`, the manifest
   counts and the final file names. One run per transcript.
@@ -1222,19 +1224,23 @@ Copied in shape from Anki Miner, not shared as code:
 Throwaway scripts against a real OBS on the Win11 VM and the Linux host. Each has a pass criterion;
 a failure changes this design before code is written.
 
-| Spike | Pass criterion / output |
-|---|---|
-| Sync probe and clock | Measure the `StartRecord` response, `STARTING` and `STARTED` against flash timestamps on at least two encoders including one hardware encoder, with x264 lookahead on, and under encoder overload. Output: the zero event and `capture_latency_ms`. If the spread across encoders exceeds 100 ms, a per-install calibration step is designed before M1; otherwise one constant ships |
-| Pause | Offsets after a pause and resume stay within the 150 ms bound |
-| Profile and collection switch on a user's live OBS | Duration; behaviour with each kind of output active; restore works; events arrive in the documented order. Record the transcripts |
-| Settings without restart | Which rows of the provisioning table apply to the next `StartRecord`. Confirm the `basic.ini` key names for container and file splitting from a real profile |
-| Application audio capture | The window string format `wasapi_process_output_capture` accepts, and that it matches the `game_capture` string |
-| Rename after `STOPPED` on Windows | How long the handle stays locked; the retry window covers it |
-| `RegisterHotKey` | Fires while a fullscreen game has focus, and while an elevated game has focus |
-| owocr | The coordinate log line parses; the process tree dies through the uv shim on both platforms; exact install floor |
-| QClipboard on Wayland | What is and is not received, for the wizard text |
-| Disk rate | GB per hour at 1080p30 and 720p30 with OBS's default encoder settings, for the user guide and the free-space warning |
-| OBS discovery | Registry key on Windows; Flatpak launch command; the minimum OBS version that has every request |
+Results, 2026-09-21: source research (S1) and three spikes on the Linux host (R1 clock, R2 OBS
+behaviour, R3 owocr) against Flathub OBS 32.2.2. Windows rows wait for pre-release QA (H5, owner
+decision D2); the values they feed are marked provisional where they appear.
+
+| Spike | Pass criterion / output | Result |
+|---|---|---|
+| Sync probe and clock | Measure the `StartRecord` response, `STARTING` and `STARTED` against flash timestamps on at least two encoders including one hardware encoder, with x264 lookahead on, and under encoder overload. Output: the zero event and `capture_latency_ms`. If the spread across encoders exceeds 100 ms, a per-install calibration step is designed before M1; otherwise one constant ships | Linux pass: zero `STARTED`, `capture_latency_ms` 10, spread 50 ms across NVENC and x264 (lookahead on), so one constant and no calibration. Largest residual 50 ms, 133 ms under overload. `OutputDurationClock` trails by 0.46-5.6 s (section 7). Windows: H5 (`docs/m0/clock.md`) |
+| Pause | Offsets after a pause and resume stay within the 150 ms bound | Pass with a separate recording encoder (under 10 ms at the median). OBS's default profile cannot pause at all, hence the recording-encoder row of section 11.3 |
+| Profile and collection switch on a user's live OBS | Duration; behaviour with each kind of output active; restore works; events arrive in the documented order. Record the transcripts | Switches take 24-143 ms; OBS switches under any active output and keeps it running; no event for a switch to the current target; the answer came before `...Changed` twice in 27; unequal sample rates stop a profile switch at a modal restart question. 23 real transcripts in `tests/fixtures/obs_transcripts/` (`docs/m0/obs-behaviour.md`) |
+| Settings without restart | Which rows of the provisioning table apply to the next `StartRecord`. Confirm the `basic.ini` key names for container and file splitting from a real profile | Keys confirmed. All rows apply at the next start except the container, which needs the profile re-activated (switch away and back); no OBS restart |
+| Application audio capture | The window string format `wasapi_process_output_capture` accepts, and that it matches the `game_capture` string | Source: one function builds all three kinds' strings, so they match. Runtime: H5 |
+| Rename after `STOPPED` on Windows | How long the handle stays locked; the retry window covers it | H5 |
+| `RegisterHotKey` | Fires while a fullscreen game has focus, and while an elevated game has focus | H5 |
+| owocr | The coordinate log line parses; the process tree dies through the uv shim on both platforms; exact install floor | Linux: `Selected coordinates:` captured and parsed (the window line is Windows-only, fixtures synthetic); the tree dies with SIGTERM, a grace period and SIGKILL to the process group; the install needs PyGObject overridden out, so Linux OCR is X11-only. Windows: H5 (`docs/m0/owocr.md`) |
+| QClipboard on Wayland | What is and is not received, for the wizard text | Dropped from M0: section 8.1 already fixes the wizard text; behaviour is checked at H5 |
+| Disk rate | GB per hour at 1080p30 and 720p30 with OBS's default encoder settings, for the user guide and the free-space warning | 2.78 GB/h at both 1080p30 and 720p30 (CBR 6000 kb/s video, 160 kb/s audio; NVENC and x264 alike): with OBS's defaults resolution does not change it |
+| OBS discovery | Registry key on Windows; Flatpak launch command; the minimum OBS version that has every request | Registry `HKLM\SOFTWARE\OBS Studio` from the installer source (provisional until H5); `flatpak run com.obsproject.Studio --minimize-to-tray` confirmed; minimum OBS 30.0.0 |
 
 ### M1: core loop, on the app's own profile from the first commit
 
@@ -1271,11 +1277,11 @@ Miner hand-off, troubleshooting), first tagged release.
 
 | Risk | Mitigation |
 |---|---|
-| Cue-to-frame sync is worse than assumed, or varies by encoder | M0 measures it first; the clock is a Protocol with two implementations; calibration is the designed fallback |
+| Cue-to-frame sync is worse than assumed, or varies by encoder | M0 measured a 50 ms spread across encoders on Linux, so one constant ships; the clock is a Protocol with two implementations. A Windows spread over 100 ms would surface only at H5 (accepted risk, D2); calibration stays the designed fallback |
 | Switching a user's OBS profile and collection misbehaves | M0 spike; refusal while outputs are active; restore file; ownership rule |
 | Hook text is not dialogue (menus, choices, narration bursts) | pipeline drops, the skip rule, and Anki Miner's curator downstream. The text feed makes a bad hook visible immediately |
 | Unvoiced games | cards carry music only; the sentence and screenshot are still correct. The VAD pass leaves such cues at their live ends |
-| Disk use | roughly 1.5-3 GB per hour at 1080p30 with OBS defaults (estimate, measured in M0); 720p is one setting away; free-space warning at Arm |
+| Disk use | 2.8 GB per hour at 1080p30 and at 720p30 with OBS's default encoder settings (measured in M0: OBS's default is constant bitrate, so 720p does not reduce it); free-space warning at Arm |
 | owocr changes its flags or log format | pinned version; the parse is covered by a test against captured output; upgrades are deliberate |
 | GSM makes Longplay good | this app still differs by install size, setup time and having no Anki coupling; its output would stay compatible |
 | A second app to release and support | packaging copied from a working pipeline; no macOS lane; no shared library to keep in step |
@@ -1330,11 +1336,21 @@ leave `screenshot_offset` at 1.0 s; keep sentence de-duplication on, since games
 | obs-websocket requests, events and fields | Context7, `/obsproject/obs-websocket` protocol documentation |
 | `websockets` stance on one-port HTTP | upstream FAQ, `docs/faq/server.rst` |
 | faster-whisper VAD symbols and model file | installed package in Anki Miner's environment |
+| OBS facts in sections 3.3, 6, 7, 11 (M0 S1) | read in obs-studio 32.2.2 (`ba2f32bd`), obs-websocket 5.7.4 (`1ef34bf4`), obsws-python 1.8.0, bouf v0.6.5; cites machine-checked; `docs/m0/source-findings.md` |
+| Zero event, `capture_latency_ms`, pause, fallback lag, disk rate (M0 R1) | flash probe against real OBS 32.2.2 on Linux, 20 sessions over five encoder configurations; `docs/m0/clock.md` |
+| Profile keys, restart rows, switches, events, reconnect, exit, window list (M0 R2) | real OBS 32.2.2 on Linux through a logging proxy, `ffprobe` on the files; transcripts in `tests/fixtures/obs_transcripts/`; `docs/m0/obs-behaviour.md` |
+| owocr log lines, process tree, install, config file (M0 R3) | owocr 1.26.8 installed with uv and run on Linux X11; fixtures in `tests/fixtures/owocr/`; `docs/m0/owocr.md` |
+| Sanitiser in section 10.1 (amended) | contract test against the vendored extractor at `ea4a30ce`, 2000 adversarial examples a run; offline campaign of 2 million titles; `docs/m0/sanitiser.md` |
+| Readings from the wave 1 integration review | `docs/m0/wave-1-amendments.md`; the code follows each one |
 
-Not verified, and therefore assigned to M0 rather than stated as fact: the `basic.ini` key names for
-container and file splitting; the OBS registry key on Windows; the pause output-state names; the
-relation between `outputDuration` and file timestamps; whether profile changes need an OBS restart;
-the application-audio window string; the minimum OBS version.
+Not verified before M0, and assigned to it: the `basic.ini` key names for container and file
+splitting; the OBS registry key on Windows; the pause output-state names; the relation between
+`outputDuration` and file timestamps; whether profile changes need an OBS restart; the
+application-audio window string; the minimum OBS version. M0 settled all of them on Linux or in
+source. Still open until H5 (D2), and marked provisional where they appear: the registry key on a
+real install, the application-audio string at runtime, the Windows zero event and latency with
+`game_capture`, the job-object kill of owocr, rename-lock timing, `RegisterHotKey` under a game,
+and `xcomposite_input` capture on a real X11 desktop.
 
 Two adversarial review rounds were run on this design before it was written up (one judge each,
 criteria: correctness, simplicity, reuse, scope, verification). Round 1: 14 findings. Round 2: 8.
