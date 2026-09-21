@@ -70,6 +70,11 @@ def finalise(manifest_path: Path, cfg: AppConfig, *, sleep: Callable[[float], No
     video still locked after the waits leaves the session ``finalise_pending`` in ``_incoming/``,
     which is returned, not raised. Anything else that stops it raises ``FinaliseError``.
 
+    Not safe to run concurrently under one output root, even for different manifests: choosing a
+    free NN is check-then-act, and two sessions of one game bumped to the same NN would both
+    ``os.replace`` onto one video. Run every call on one worker, one at a time (a single-thread
+    executor or a lock), never on a shared pool.
+
     Counts: ``accepted`` becomes the number of cues and ``skip`` the journalled lines the skip rule
     dropped; the other counters are kept as the manifest holds them (the actor's pipeline counts).
     """
