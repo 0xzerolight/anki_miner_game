@@ -32,6 +32,11 @@ REQUIRED_REQUESTS: Final[tuple[str, ...]] = (
     "GetSpecialInputs",
     "SetInputMute",
     "GetInputPropertiesListPropertyItems",
+    "GetSceneList",
+    "SetCurrentProgramScene",
+    "GetInputSettings",
+    "GetInputMute",
+    "RemoveInput",
 )
 """Every request the app sends (spec 3.3); ``GetVersion.availableRequests`` must contain them all."""
 

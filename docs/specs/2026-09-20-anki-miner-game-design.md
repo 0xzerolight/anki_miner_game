@@ -120,7 +120,8 @@ Defaults and the JSON shape are GSM's (`util/config/configuration.py:580-602`, `
   `SetCurrentProfile`, `GetSceneCollectionList`, `CreateSceneCollection`, `SetCurrentSceneCollection`,
   `GetProfileParameter`, `SetProfileParameter`, `GetVideoSettings`, `SetVideoSettings`,
   `GetRecordDirectory`, `SetRecordDirectory`, `CreateScene`, `GetInputKindList`, `CreateInput`,
-  `SetInputSettings`, `GetSpecialInputs`, `SetInputMute`, `GetInputPropertiesListPropertyItems`.
+  `SetInputSettings`, `GetSpecialInputs`, `SetInputMute`, `GetInputPropertiesListPropertyItems`,
+  `GetSceneList`, `SetCurrentProgramScene`, `GetInputSettings`, `GetInputMute`, `RemoveInput`.
 - `GetRecordStatus` returns `outputActive`, `outputPaused`, `outputTimecode`, `outputDuration` (ms),
   `outputBytes`.
 - Events used: `RecordStateChanged {outputActive, outputState, outputPath}` where `outputPath` is

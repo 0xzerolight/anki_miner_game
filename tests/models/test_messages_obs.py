@@ -92,11 +92,11 @@ def test_line_accepted_defaults_to_a_new_line():
     assert UserCommand(kind=CommandKind.START).line is None
 
 
-def test_required_requests_are_the_26_of_spec_3_3():
-    assert len(REQUIRED_REQUESTS) == 26
-    assert len(set(REQUIRED_REQUESTS)) == 26
+def test_required_requests_are_the_31_of_spec_3_3():
+    assert len(REQUIRED_REQUESTS) == 31
+    assert len(set(REQUIRED_REQUESTS)) == 31
     assert REQUIRED_REQUESTS[0] == "GetVersion"
-    assert REQUIRED_REQUESTS[-1] == "GetInputPropertiesListPropertyItems"
+    assert REQUIRED_REQUESTS[-1] == "RemoveInput"
 
 
 def test_missing_requests_keeps_the_required_order():
