@@ -44,6 +44,7 @@ from anki_miner_game.addons import bootstrap
 from anki_miner_game.interfaces.addons import ProgressCallback
 from anki_miner_game.models.addons import AddonStatus
 from anki_miner_game.models.profile import OcrSettings, default_ocr_engine
+from anki_miner_game.runtime.child_env import child_environ
 
 logger = logging.getLogger(__name__)
 
@@ -671,7 +672,7 @@ class OcrAddon:
             await proc.kill_tree()
 
     def _env(self) -> dict[str, str]:
-        return dict(os.environ if self._environ is None else self._environ)
+        return child_environ(self._environ)
 
     def _verified(self) -> bool:
         receipt = self._root / "tools" / "owocr" / "uv-receipt.toml"

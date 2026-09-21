@@ -7,8 +7,8 @@ obs-websocket 5.7.4 uses (``docs/m0/source-findings.md``; ``RequestHandler_Confi
 ``RequestHandler_Inputs.cpp`` at ``obs-websocket@1ef34bf4``):
 
 - ``GetProfileParameter`` returns the effective value when the key has a default, else the user
-  value, else ``null``; ``RecFormat2`` defaults to ``hybrid_mp4``, ``[Audio] SampleRate`` to
-  ``48000`` and ``ChannelSetup`` to ``Stereo``.
+  value, else ``null``; the defaults are OBS's (``PROFILE_DEFAULTS``,
+  ``obs-studio@ba2f32bd frontend/widgets/OBSBasic.cpp:743-778, 871-872``).
 - A profile switch between profiles whose audio values differ is OBS's modal "Restart" question
   (``docs/m0/obs-behaviour.md`` item 3): the running profile's effective values against the values
   saved in the target's file, skipping a key the target lacks, so ``CreateProfile`` never asks. OBS
@@ -16,9 +16,20 @@ obs-websocket 5.7.4 uses (``docs/m0/source-findings.md``; ``RequestHandler_Confi
   ``restart_questions`` and completes the switch, as if the user answered "No".
 - The recording format is fixed when OBS builds its output handler, at launch and at each profile
   activation (source findings section 2, R2 item 2): ``recording_format`` is the running profile's
-  ``[SimpleOutput] RecFormat2`` as it was when the profile was last activated.
-- ``CreateProfile`` answers before the profile exists; the switch lands ``create_profile_delay``
-  ``GetProfileList`` calls later (``CurrentProfileChanged`` has no ordering guarantee).
+  ``[SimpleOutput] RecFormat2`` as it was when the profile was last activated, and
+  ``recording_pausable`` whether the recording had its own encoder then, so that OBS can pause it
+  (``OBSBasic::UpdateIsRecordingPausable``, ``frontend/widgets/OBSBasic_Recording.cpp:371-392``;
+  Advanced mode's FFmpeg recording type is not modelled).
+- Handlers given to ``subscribe`` get the switch events: ``CurrentProfileChanging`` and
+  ``CurrentProfileChanged``, ``CurrentSceneCollectionChanging`` and ``CurrentSceneCollectionChanged``,
+  each ``...Changing`` naming the old profile or collection and each ``...Changed`` the new one, in
+  the usual order before the answer (``docs/m0/obs-behaviour.md`` section 3). With
+  ``events_after_answer`` they come after it (R2 item 5); an event named in ``lost_events`` never
+  comes. A switch to the current profile or collection answers with no event (R2 item 4). Every
+  event sent is recorded in ``events``.
+- ``CreateProfile`` answers before the profile exists; OBS then switches to it
+  ``create_profile_delay`` seconds later with ``CurrentProfileChanged`` and no ``...Changing`` event
+  (R2 section 3); ``None`` never switches.
 - A profile's default output size is its base scaled down to at most 1280x720 pixels
   (``obs-studio@ba2f32bd frontend/widgets/OBSBasic.cpp:599, 830-843``); ``SetVideoSettings`` and
   that default are aligned as libobs aligns them (width to 4, height to 2).
@@ -38,6 +49,7 @@ Every request is recorded in ``calls``; a request whose name does not start with
 # Handler parameters carry obs-websocket's camelCase field names, so a misspelt field fails the call.
 # ruff: noqa: N803
 
+import asyncio
 import copy
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
@@ -51,6 +63,10 @@ RESOURCE_ALREADY_EXISTS = 601
 INVALID_INPUT_KIND = 605
 
 PROFILE_DEFAULTS = {
+    ("Output", "Mode"): "Simple",
+    ("SimpleOutput", "RecQuality"): "Stream",
+    ("AdvOut", "Encoder"): "obs_x264",
+    ("AdvOut", "RecEncoder"): "none",
     ("SimpleOutput", "RecFormat2"): "hybrid_mp4",
     ("AdvOut", "RecFormat2"): "hybrid_mp4",
     ("Audio", "SampleRate"): "48000",
@@ -116,16 +132,23 @@ class FakeObs:
         input_kinds: Iterable[str],
         base_size: tuple[int, int] = (1920, 1080),
         window_lists: Mapping[str, list[dict[str, Any]]] | None = None,
-        create_profile_delay: int = 1,
+        create_profile_delay: float | None = 0.0,
         release_delay: int = 2,
+        events_after_answer: bool = False,
+        lost_events: Iterable[str] = (),
     ) -> None:
         self.input_kinds = list(input_kinds)
         self.window_lists = dict(window_lists or {})
         """Input kind -> ``propertyItems`` of its window list."""
         self.create_profile_delay = create_profile_delay
+        self.events_after_answer = events_after_answer
+        self.lost_events = frozenset(lost_events)
         self.release_delay = release_delay
         """Requests after ``RemoveInput`` during which OBS still holds the removed input's name."""
         self.calls: list[tuple[str, dict[str, Any]]] = []
+        self.events: list[tuple[int, str, dict[str, Any]]] = []
+        """``(len(calls) when it was sent, eventType, eventData)`` of every event sent to the handlers."""
+        self.handlers: list[Callable[[ObsEvent], None]] = []
         self.profiles: dict[str, dict[tuple[str, str], str]] = {"Untitled": {}}
         self.current_profile = "Untitled"
         self.record_dirs: dict[str, str] = {"Untitled": "/home/user/Videos"}
@@ -136,9 +159,8 @@ class FakeObs:
         self.restart_questions: list[tuple[str, str]] = []
         """``(from, to)`` of every profile switch at which OBS asked to restart."""
         self.recording_format = self._effective("Untitled", ("SimpleOutput", "RecFormat2"))
+        self.recording_pausable = self._pausable("Untitled")
         self._base_size = base_size
-        self._pending_profile: str | None = None
-        self._pending_polls = 0
         self._requests = 0
 
     # ObsGateway surface ------------------------------------------------------------------
@@ -147,7 +169,7 @@ class FakeObs:
         raise NotImplementedError
 
     def subscribe(self, handler: Callable[[ObsEvent], None]) -> None:
-        pass
+        self.handlers.append(handler)
 
     @property
     def collection_changing(self) -> bool:
@@ -177,6 +199,7 @@ class FakeObs:
 
     def reset_calls(self) -> None:
         self.calls.clear()
+        self.events.clear()
 
     @property
     def collection(self) -> FakeCollection:
@@ -188,6 +211,24 @@ class FakeObs:
     def add_special_input(self, slot: str, name: str, kind: str, *, muted: bool = False) -> None:
         self.collection.inputs[name] = FakeInput(kind, {}, muted)
         self.collection.special[slot] = name
+
+    def _emit(self, name: str, data: dict[str, Any]) -> None:
+        if name in self.lost_events:
+            return
+        self.events.append((len(self.calls), name, dict(data)))
+        for handler in self.handlers:
+            handler(ObsEvent(name, dict(data), 0.0))
+
+    def _announce(self, *events: tuple[str, dict[str, Any]]) -> None:
+        """Send the events of a switch that is already done: before the answer, or after it."""
+        if self.events_after_answer:
+            asyncio.get_running_loop().call_soon(self._announce_now, events)
+        else:
+            self._announce_now(events)
+
+    def _announce_now(self, events: tuple[tuple[str, dict[str, Any]], ...]) -> None:
+        for name, data in events:
+            self._emit(name, data)
 
     def _effective(self, profile: str, key: tuple[str, str]) -> str | None:
         return self.profiles[profile].get(key, PROFILE_DEFAULTS.get(key))
@@ -204,6 +245,24 @@ class FakeObs:
                 self.profiles[left].setdefault(key, value)
         self.current_profile = target
         self.recording_format = self._effective(target, ("SimpleOutput", "RecFormat2"))
+        self.recording_pausable = self._pausable(target)
+
+    def _pausable(self, profile: str) -> bool:
+        if (self._effective(profile, ("Output", "Mode")) or "").casefold() == "advanced":
+            return (self._effective(profile, ("AdvOut", "RecEncoder")) or "").casefold() != "none"
+        return self._effective(profile, ("SimpleOutput", "RecQuality")) != "Stream"
+
+    def _land_profile(self, target: str) -> None:
+        """OBS switches to the profile ``CreateProfile`` made (``OBSBasic::CreateNewProfile``)."""
+        self._activate(target)
+        self._emit("CurrentProfileChanged", {"profileName": target})
+
+    def _switch_collection(self, target: str) -> None:
+        left, self.current_collection = self.current_collection, target
+        self._announce(
+            ("CurrentSceneCollectionChanging", {"sceneCollectionName": left}),
+            ("CurrentSceneCollectionChanged", {"sceneCollectionName": target}),
+        )
 
     def _default_video(self, base_w: int, base_h: int) -> dict[str, int]:
         out_w, out_h = base_w, base_h
@@ -244,11 +303,6 @@ class FakeObs:
     # Profiles ------------------------------------------------------------------------------
 
     def _GetProfileList(self) -> dict[str, Any]:
-        if self._pending_profile is not None:
-            self._pending_polls -= 1
-            if self._pending_polls <= 0:
-                target, self._pending_profile = self._pending_profile, None
-                self._activate(target)
         return {"currentProfileName": self.current_profile, "profiles": list(self.profiles)}
 
     def _CreateProfile(self, profileName: str) -> None:
@@ -257,14 +311,22 @@ class FakeObs:
         self.profiles[profileName] = {}
         self.record_dirs[profileName] = self.record_dirs[self.current_profile]
         self.video[profileName] = self._default_video(*self._base_size)
-        self._pending_profile = profileName
-        self._pending_polls = self.create_profile_delay
+        loop = asyncio.get_running_loop()
+        if self.create_profile_delay == 0:
+            loop.call_soon(self._land_profile, profileName)  # before the caller's next step
+        elif self.create_profile_delay is not None:
+            loop.call_later(self.create_profile_delay, self._land_profile, profileName)
 
     def _SetCurrentProfile(self, profileName: str) -> None:
         if profileName not in self.profiles:
             raise self._fail("SetCurrentProfile", RESOURCE_NOT_FOUND)
-        if profileName != self.current_profile:  # the current one answers at once (R2 item 4)
+        if profileName != self.current_profile:  # the current one answers at once, no event (R2 item 4)
+            left = self.current_profile
             self._activate(profileName)
+            self._announce(
+                ("CurrentProfileChanging", {"profileName": left}),
+                ("CurrentProfileChanged", {"profileName": profileName}),
+            )
 
     def _GetProfileParameter(self, parameterCategory: str, parameterName: str) -> dict[str, Any]:
         key = (parameterCategory, parameterName)
@@ -301,12 +363,13 @@ class FakeObs:
         if sceneCollectionName in self.collections:
             raise self._fail("CreateSceneCollection", RESOURCE_ALREADY_EXISTS)
         self.collections[sceneCollectionName] = FakeCollection()
-        self.current_collection = sceneCollectionName
+        self._switch_collection(sceneCollectionName)
 
     def _SetCurrentSceneCollection(self, sceneCollectionName: str) -> None:
         if sceneCollectionName not in self.collections:
             raise self._fail("SetCurrentSceneCollection", RESOURCE_NOT_FOUND)
-        self.current_collection = sceneCollectionName
+        if sceneCollectionName != self.current_collection:  # the current one: no event (R2 item 4)
+            self._switch_collection(sceneCollectionName)
 
     def _GetSceneList(self) -> dict[str, Any]:
         names = list(self.collection.scenes)

@@ -37,6 +37,7 @@ from anki_miner_game.addons import bootstrap
 from anki_miner_game.addons.bootstrap import _REDIRECT_STATUSES, MAX_REDIRECTS, BootstrapError, Transport
 from anki_miner_game.interfaces.addons import ProgressCallback
 from anki_miner_game.models.addons import AddonStatus
+from anki_miner_game.runtime.child_env import child_environ
 from anki_miner_game.vad import model_pin
 
 
@@ -202,7 +203,7 @@ class VadAddon:
         progress(total, total)
 
     async def _uv(self, uv: Path, command: str, args: Sequence[str]) -> None:
-        env = {**os.environ, **bootstrap.uv_environment(self._home, "vad")}
+        env = {**child_environ(), **bootstrap.uv_environment(self._home, "vad")}
         code, output = await self._run_uv([str(uv), command, *args], env, self.root)
         if code != 0:
             raise VadAddonError(f"uv {command} failed (exit {code}): {_tail(output)}")

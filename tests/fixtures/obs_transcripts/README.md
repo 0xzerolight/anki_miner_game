@@ -10,7 +10,7 @@ R2's own driver provisioned the OBS these transcripts talk to, not `obs/provisio
 are `Game capture` and `Game audio` (the app's are `Window Capture (X11)` and `Desktop Audio
 Capture`), and its requests come in the driver's order (`arm_disarm.jsonl`'s re-provisioning pass
 reads `Game capture` and never asks for a mute). So no transcript replays `ObsProvisioner` request by
-request: `tests/obs/test_provision_replay.py` replays a copy of `provision.jsonl`'s provisioning
+request: `tests/obs/test_provision_replay.py` replays `provision.jsonl`'s provisioning
 frames against T14's `FakeObs`, and T25 answers the provisioner from a fake OBS and plays only the
 recording and switch frames and events of a transcript. A transcript of the app's own provisioning
 is E1's to record.

@@ -68,6 +68,7 @@ from anki_miner_game.models.obs import (
     ObsInstall,
     WsConfig,
 )
+from anki_miner_game.runtime.child_env import child_environ
 from anki_miner_game.store import write_text_atomic
 
 log = logging.getLogger(__name__)
@@ -131,7 +132,8 @@ class ProcessRunner(Protocol):
 
 
 class SubprocessRunner:
-    """The real ``ProcessRunner``: no console window on Windows, OBS in its own session on POSIX."""
+    """The real ``ProcessRunner``: no console window on Windows, OBS in its own session on POSIX, and
+    the environment of ``runtime.child_env`` (a frozen build's library path is not the child's)."""
 
     def run(self, argv: Sequence[str]) -> tuple[int, str]:
         try:
@@ -143,6 +145,7 @@ class SubprocessRunner:
                 errors="replace",
                 timeout=RUN_TIMEOUT_S,
                 creationflags=_NO_WINDOW,
+                env=child_environ(),
                 check=False,
             )
         except (OSError, subprocess.TimeoutExpired):
@@ -157,6 +160,7 @@ class SubprocessRunner:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             creationflags=_DETACHED,
+            env=child_environ(),
             start_new_session=True,  # POSIX: a signal to this app's process group never reaches OBS
         )
         # Reap OBS when it exits before this app does, so it leaves no zombie behind.
