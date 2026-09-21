@@ -335,8 +335,7 @@ class ObsProvisioner:
         """
         changed = await self._use_collection()
         changed |= await self._use_scene()
-        kinds = frozenset((await self._request("GetInputKindList")).get("inputKinds") or [])
-        plan = plan_collection(profile, kinds, self._current_platform())
+        plan = await self._plan(profile)
         log.info("OBS capture for %s: %s", profile.slug, plan.capture or "none available")
         changed |= await self._apply_inputs(plan)
         changed |= await self._mute_special_inputs()
@@ -382,6 +381,17 @@ class ObsProvisioner:
                 )
             )
         return items
+
+    async def capture_method(self, profile: GameProfile) -> str:
+        """``plan_collection``'s capture kind for ``profile`` on this OBS (``Provisioner.capture_method``).
+
+        Reads ``GetInputKindList`` only and switches nothing; ``""`` when no capture kind is available.
+        """
+        return (await self._plan(profile)).capture or ""
+
+    async def _plan(self, profile: GameProfile) -> CollectionPlan:
+        kinds = frozenset((await self._request("GetInputKindList")).get("inputKinds") or [])
+        return plan_collection(profile, kinds, self._current_platform())
 
     def _current_platform(self) -> str:
         return self._platform or sys.platform
