@@ -256,3 +256,17 @@ def test_the_umask_is_read_without_changing_it_on_linux(monkeypatch):
 
     monkeypatch.setattr(store.os, "umask", no_umask_change)
     assert isinstance(store._read_umask(), int)
+
+
+def test_a_utf8_bom_is_not_corruption():
+    """Windows Notepad offers "UTF-8 with BOM"; one hand edit must not turn every setting into a banner."""
+    cfg = AppConfig(last_game="steins-gate")
+    paths.home().mkdir(parents=True, exist_ok=True)
+    paths.config_path().write_bytes(b"\xef\xbb\xbf" + dump_document(cfg).encode())
+    assert store.load_config() == cfg
+    profile = _profile()
+    paths.games_dir().mkdir()
+    paths.profile_path(profile.slug).write_bytes(b"\xef\xbb\xbf" + dump_document(profile).encode())
+    loaded = store.load_profiles()
+    assert loaded.profiles == {profile.slug: profile}
+    assert loaded.errors == ()

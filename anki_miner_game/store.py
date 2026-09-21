@@ -174,7 +174,7 @@ def _write(path: Path, text: str, *, mode: int = 0o666) -> None:
 def _read[T](cls: type[T], path: Path) -> T:
     """Load one document; ``FileNotFoundError`` passes through, every other failure is a ``StoreError``."""
     try:
-        text = path.read_text(encoding="utf-8")
+        text = path.read_text(encoding="utf-8-sig")  # a BOM (Windows Notepad) is not corruption
     except FileNotFoundError:
         raise
     except UnicodeDecodeError as exc:
