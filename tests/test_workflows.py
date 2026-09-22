@@ -1,7 +1,8 @@
 """The hosted workflows (spec 19, master plan D3 and T29): ``ci.yml`` runs lint, typecheck and the tests on
-Python 3.12 and 3.13 on Linux and Windows; ``release.yml`` builds, smokes and packages the Linux and Windows
-bundles on a ``v*`` tag and publishes them, and a ``workflow_dispatch`` of it is the dry run, which never tags
-or releases (``scripts/release_dryrun.sh`` proves that).
+Python 3.12 and 3.13 on Linux and Windows, for pushes and pull requests to ``main``; ``release.yml`` builds,
+smokes and packages the Linux and Windows bundles on a ``v*`` tag and publishes them, and a
+``workflow_dispatch`` of it is the dry run, which never tags or releases (``scripts/release_dryrun.sh``
+proves that).
 
 The venv has no YAML parser, so the helpers below read the two files by their indentation, which these
 files keep regular. The shell steps whose logic matters (the version check and the matrix filter) are run
@@ -26,6 +27,7 @@ REPO = Path(__file__).resolve().parent.parent
 WORKFLOWS = REPO / ".github" / "workflows"
 CI = WORKFLOWS / "ci.yml"
 RELEASE = WORKFLOWS / "release.yml"
+AUTOMERGE = WORKFLOWS / "dependabot-automerge.yml"
 MATRIX = REPO / ".github" / "release-matrix.json"
 DRYRUN = REPO / "scripts" / "release_dryrun.sh"
 INSTALLER_SMOKE = REPO / "scripts" / "windows_installer_smoke.ps1"
@@ -137,11 +139,12 @@ def matrix() -> list[dict[str, str]]:
 # --- ci.yml (D3) --------------------------------------------------------------------------------
 
 
-def test_ci_runs_on_every_push_to_main_and_on_demand():
+def test_ci_runs_on_pushes_and_pull_requests_to_main_and_on_demand():
     on = text(CI).split("\non:\n", 1)[1].split("\n\n", 1)[0]
     assert re.search(r"^  push:\n    branches: \[main\]$", on, re.M)
+    assert re.search(r"^  pull_request:\n    branches: \[main\]$", on, re.M)
     assert re.search(r"^  workflow_dispatch:$", on, re.M)
-    assert "tags" not in on and "pull_request" not in on
+    assert "tags" not in on
 
 
 def test_ci_lints_typechecks_and_tests_both_pythons_on_linux_and_windows():
@@ -163,7 +166,7 @@ def test_ci_installs_the_validators_the_packaging_tests_otherwise_skip():
 # --- both workflows -----------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("workflow", [CI, RELEASE], ids=lambda p: p.name)
+@pytest.mark.parametrize("workflow", [CI, RELEASE, AUTOMERGE], ids=lambda p: p.name)
 def test_every_action_is_pinned_to_a_commit(workflow):
     found = uses(workflow)
     assert found

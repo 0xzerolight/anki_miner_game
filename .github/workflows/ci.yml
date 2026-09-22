@@ -3,6 +3,9 @@ name: CI
 on:
   push:
     branches: [main]
+  # Dependabot and contributor PRs need the same checks before they merge.
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
