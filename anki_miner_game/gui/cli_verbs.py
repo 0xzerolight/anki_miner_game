@@ -103,7 +103,8 @@ def send(name: str, command: UserCommand | None, *, timeout_ms: int = SEND_TIMEO
         return None
     try:
         sock.write(encode(command))
-        if not sock.waitForBytesWritten(timeout_ms):
+        # False also when the write is done already, as a Windows pipe's can be before this runs.
+        if not sock.waitForBytesWritten(timeout_ms) and sock.bytesToWrite() > 0:
             return False
         while not sock.canReadLine():
             if not sock.waitForReadyRead(timeout_ms) and not sock.canReadLine():

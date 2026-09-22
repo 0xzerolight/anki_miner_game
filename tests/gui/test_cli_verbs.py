@@ -117,6 +117,21 @@ def test_a_second_launch_without_a_verb_shows_the_running_window(qtbot, instance
     assert (instance.commands, instance.shows) == ([], 1)
 
 
+class EagerSocket(QLocalSocket):
+    """A socket whose write is done before ``waitForBytesWritten`` runs, as a Windows pipe's can be."""
+
+    def write(self, data: bytes) -> int:
+        written = super().write(data)
+        self.flush()
+        return written
+
+
+def test_a_write_done_at_once_still_gets_its_answer(qtbot, instance, name, monkeypatch):
+    monkeypatch.setattr(cli_verbs, "QLocalSocket", EagerSocket)
+    assert send_from_another_process(qtbot, name, UserCommand(CommandKind.START)) is True
+    assert instance.commands == [UserCommand(CommandKind.START)]
+
+
 def test_the_instance_leaves_the_connection_open_for_the_client_to_close(qtbot, instance, name):
     # On Windows a server-side disconnect discards the answer the client has not read yet.
     client = QLocalSocket()
