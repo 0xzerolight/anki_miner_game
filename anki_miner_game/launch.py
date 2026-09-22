@@ -3,7 +3,9 @@
 With an instance of this home already running, the verb (or, without one, "show your window") goes
 to it and this process exits: 0 when it was accepted, 1 when not. Otherwise this process becomes the
 instance: it logs to ``<home>/anki_miner_game.log``, starts the app, applies the verb once the
-session actor runs, and quits when the window is closed. The OBS password never reaches the log:
+session actor runs, and quits when the window is closed. A frozen Linux build first makes sure stdlib
+HTTPS has CA certificates (``runtime.ca_bundle``); with ``ANKI_MINER_GAME_SMOKE=1`` the started app
+runs the bundle smoke (``runtime.bundle_smoke``) and quits on its own. The OBS password never reaches the log:
 nothing here or in the composition logs it, and ``obsws-python``'s own logger, which would, is held
 at CRITICAL by the gateway.
 """
@@ -23,11 +25,13 @@ from pathlib import Path
 from types import TracebackType
 from typing import Final
 
+from PyQt6.QtCore import QTimer
 from PyQt6.QtWidgets import QApplication
 
 from anki_miner_game import __version__, paths
 from anki_miner_game.app import App
 from anki_miner_game.gui import cli_verbs
+from anki_miner_game.runtime import bundle_smoke, ca_bundle
 
 log = logging.getLogger(__name__)
 
@@ -95,6 +99,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     restore_hooks = install_exception_hooks()
     try:
         log.info("Anki Miner Game %s starting (home %s)", __version__, home)
+        ca_bundle.use_distro_ca_bundle()  # before any HTTPS request; a no-op unless frozen on Linux
         app = App(server_name=name)
         app.stopped.connect(qapp.quit)
         if isinstance(qapp, QApplication):
@@ -103,7 +108,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             app.start()
             if command is not None:
                 app.post(command)
-            return qapp.exec()
+            smoke = bundle_smoke.BundleSmoke(lambda: app.feed, app.request_quit) if bundle_smoke.requested() else None
+            if smoke is not None:
+                QTimer.singleShot(0, smoke.run)
+            code = qapp.exec()
+            return code if smoke is None or smoke.exit_code is None else smoke.exit_code
         finally:
             app.close()
     finally:
