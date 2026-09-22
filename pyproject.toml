@@ -43,6 +43,11 @@ dev = [
     "ruff>=0.16.8",
     "mypy>=2.3.1",
 ]
+# The PyInstaller build (anki_miner_game.spec) runs from an env of its own:
+# the runtime dependencies plus this extra, never the dev tools.
+build = [
+    "pyinstaller>=6.22.3",
+]
 
 [project.scripts]
 anki_miner_game = "anki_miner_game.launch:main"
@@ -52,6 +57,11 @@ Homepage = "https://github.com/0xzerolight/anki_miner_game"
 
 [tool.setuptools]
 include-package-data = true
+
+# The files the code opens next to its own modules; anki_miner_game.spec bundles the same ones.
+[tool.setuptools.package-data]
+"anki_miner_game.feed" = ["page.html"]
+"anki_miner_game.vad.worker" = ["requirements.txt"]
 
 [tool.setuptools.dynamic]
 version = {attr = "anki_miner_game.__version__"}
