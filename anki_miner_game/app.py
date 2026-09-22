@@ -577,6 +577,7 @@ class App(QObject):
             vad_addon=self._vad_addon,
             ocr_addon=self._ocr_addon,
             start=step,
+            open_url=open_url,
             parent=settings if settings is not None else self.window,
         )
         wizard.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)

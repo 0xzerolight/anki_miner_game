@@ -26,7 +26,8 @@ from enum import IntEnum, StrEnum
 from pathlib import Path, PurePath
 from typing import Any, Final
 
-from PyQt6.QtCore import QObject, Qt, pyqtSignal, pyqtSlot
+from PyQt6.QtCore import QObject, Qt, QUrl, pyqtSignal, pyqtSlot
+from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import (
     QFileDialog,
     QGridLayout,
@@ -491,7 +492,9 @@ class SetupWizard(QWizard):
     confirmed and when a password is typed after OBS refused one. ``source_factory`` builds a text
     source for one configured source; the wizard starts the enabled ones while step 2 is shown and
     stops them when it is left. ``run`` puts coroutines on the I/O loop. ``wayland`` defaults to the
-    current session.
+    current session. ``open_url`` opens the OBS-download link (a frozen Linux build passes one that
+    drops the bundle's ``LD_LIBRARY_PATH``, spec: ``app.open_url``); defaults to
+    ``QDesktopServices.openUrl``.
     """
 
     def __init__(
@@ -506,6 +509,7 @@ class SetupWizard(QWizard):
         ocr_addon: AddonService,
         start: WizardStep = WizardStep.OBS,
         wayland: bool | None = None,
+        open_url: Callable[[QUrl], object] = QDesktopServices.openUrl,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -515,6 +519,7 @@ class SetupWizard(QWizard):
         self._config = config
         self._save_config = save_config
         self._run = run
+        self.open_url = open_url
         self.main_thread = _MainThread(self)
         self.obs_page = ObsPage(self, obs)
         self.sources_page = SourcesPage(self, source_factory, is_wayland_session() if wayland is None else wayland)
@@ -583,7 +588,8 @@ class ObsPage(QWizardPage):
         self.status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.link = QLabel(f'<a href="{OBS_DOWNLOAD_URL}">{OBS_DOWNLOAD_URL}</a>')
         self.link.setTextFormat(Qt.TextFormat.RichText)
-        self.link.setOpenExternalLinks(True)
+        self.link.setOpenExternalLinks(False)
+        self.link.linkActivated.connect(lambda href: wizard.open_url(QUrl(href)))
         self.link.hide()
         self.password = QLineEdit()
         self.password.setEchoMode(QLineEdit.EchoMode.Password)

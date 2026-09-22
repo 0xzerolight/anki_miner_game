@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QUrl
 from PyQt6.QtWidgets import QWizard
 
 import anki_miner_game.gui.wizard as wizard_module
@@ -248,9 +248,24 @@ def test_obs_not_installed_shows_the_download_link(qtbot, io_loop):
     page.button.click()
     qtbot.waitUntil(lambda: not page.link.isHidden())
     assert f'href="{OBS_DOWNLOAD_URL}"' in page.link.text()
-    assert page.link.openExternalLinks()
+    assert not page.link.openExternalLinks()  # routed through the injected open_url instead (spec: app.open_url)
     assert page.button.text() == "Check again"
     assert not h.next_enabled()
+
+
+def test_activating_the_download_link_opens_it_through_the_injected_opener(qtbot, io_loop):
+    opened: list[QUrl] = []
+    h = Harness(
+        qtbot,
+        io_loop,
+        obs=StubObsSetup(ObsCheck(ObsStatus.NOT_INSTALLED, "OBS Studio is not installed.")),
+        open_url=opened.append,
+    )
+    page = h.wizard.obs_page
+    page.button.click()
+    qtbot.waitUntil(lambda: not page.link.isHidden())
+    page.link.linkActivated.emit(OBS_DOWNLOAD_URL)
+    assert opened == [QUrl(OBS_DOWNLOAD_URL)]
 
 
 def test_websocket_server_off_offers_fix(qtbot, io_loop):
