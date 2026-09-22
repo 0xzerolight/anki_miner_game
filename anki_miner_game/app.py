@@ -202,7 +202,13 @@ class App(QObject):
         actor = self._io.submit(self._build()).result()
         games = sorted(((slug, p.title) for slug, p in self._profiles.items()), key=lambda game: game[1].casefold())
         self._window = MainWindow(
-            actor, self.presenter.signals, games, on_quit=self.request_quit, selected=self._config.last_game
+            actor,
+            self.presenter.signals,
+            games,
+            on_quit=self.request_quit,
+            selected=self._config.last_game,
+            text_sources=[(source.id, source.name) for source in self._config.text_sources if source.enabled],
+            output_root=lambda: paths.output_root(self._config),
         )
         for banner in banners:
             self.presenter.banner(banner)

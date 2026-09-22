@@ -7,6 +7,7 @@ import logging
 import socket
 import threading
 from collections.abc import Callable, Iterator
+from dataclasses import replace
 from pathlib import Path
 from types import TracebackType
 from typing import Any
@@ -58,6 +59,8 @@ from anki_miner_game.session.restore import ObsRestore, restore_path, save_resto
 from anki_miner_game.text.sources.websocket_source import WebsocketSource
 from tests.app_rig import SLUG, TITLE, WAIT_MS, Rig
 from tests.fakes.fake_obs_server import FakeObsServer
+from tests.gui.session_fakes import TITLE as SESSION_TITLE
+from tests.gui.session_fakes import manifest, place
 
 
 @pytest.fixture
@@ -99,6 +102,20 @@ def test_a_game_profile_that_cannot_be_read_is_reported(rig):
     rig.wait(lambda: "profiles" in rig.banners())
     assert "broken.json" in rig.banners()["profiles"]
     assert [app.window.game.itemData(i) for i in range(app.window.game.count())] == [SLUG]
+
+
+def test_the_window_shows_the_enabled_sources_and_the_sessions_in_the_output_folder(rig):
+    rig.cfg = replace(
+        rig.cfg,
+        text_sources=(
+            TextSourceConfig(id="textractor", name="Textractor", uri="localhost:6677"),
+            TextSourceConfig(id="agent", name="Agent", uri="localhost:9001", enabled=False),
+        ),
+    )
+    place(rig.output_root, manifest(3))
+    app = rig.start()
+    assert app.window.status_row.names() == ["OBS", "Textractor"]
+    assert [cells[0] for cells in app.window.recent.cells()] == [f"{SESSION_TITLE} - 03"]
 
 
 # Launch duties (spec 6.2, 6.3, 10.3, 17 "Unclean previous exit") ----------------------------------
