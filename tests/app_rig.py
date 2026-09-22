@@ -10,12 +10,13 @@ from anki_miner_game.app import App, HotkeyFactory, ObsServices, SourceFactory
 from anki_miner_game.interfaces.text_source import LineSink, StatusListener
 from anki_miner_game.models.config import AppConfig, FeedSettings
 from anki_miner_game.models.messages import AppState, CommandKind, SourceStatus, UserCommand
-from anki_miner_game.models.profile import GameProfile
+from anki_miner_game.models.profile import AudioMode, AudioSettings, GameProfile
 from tests.session.actor_harness import FakeClock, FakeDiscovery, FakeGateway, FakeObs, FakeProvisioner
 
 SLUG = "steins-gate"
 TITLE = "Steins;Gate"
-PROFILE = GameProfile(slug=SLUG, title=TITLE)
+PROFILE = GameProfile(slug=SLUG, title=TITLE, audio=AudioSettings(mode=AudioMode.DESKTOP))
+"""Desktop audio (the Linux default, fixed so Windows CI arms it too)."""
 WAIT_MS = 10_000
 
 

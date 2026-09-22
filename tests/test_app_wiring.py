@@ -31,7 +31,7 @@ from anki_miner_game.store import StoreWriteError
 from anki_miner_game.text.sources.clipboard_source import CLIPBOARD_SOURCE_ID, ClipboardSource
 from anki_miner_game.text.sources.ocr_source import OCR_SOURCE_ID
 from anki_miner_game.text.sources.websocket_source import WebsocketSource
-from tests.app_rig import SLUG, TITLE, WAIT_MS, Rig
+from tests.app_rig import PROFILE, SLUG, TITLE, WAIT_MS, Rig
 from tests.gui.session_fakes import manifest, place
 from tests.session.actor_harness import T0
 
@@ -98,7 +98,7 @@ def test_ocr_mode_runs_only_owocr_with_the_games_ocr_settings():
 
 def test_an_armed_ocr_game_without_the_add_on_says_so_in_a_banner(rig):
     rig.source_factory = None  # the app's own sources: owocr through the OCR add-on, not installed here
-    rig.profile = GameProfile(slug=SLUG, title=TITLE, text_mode=TextMode.OCR)
+    rig.profile = replace(PROFILE, text_mode=TextMode.OCR)
     rig.start()
     rig.arm()
     rig.wait(lambda: rig.banners().get("ocr") == NOT_INSTALLED)
@@ -108,7 +108,7 @@ def test_an_armed_ocr_game_without_the_add_on_says_so_in_a_banner(rig):
 def test_an_armed_game_that_takes_the_clipboard_listens_to_it(rig):
     rig.source_factory = None
     rig.cfg = replace(rig.cfg, text_sources=())  # no hooker: nothing connects to a default port
-    rig.profile = GameProfile(slug=SLUG, title=TITLE, clipboard=True)
+    rig.profile = replace(PROFILE, clipboard=True)
     app = rig.start()
     rig.arm()
     rig.wait(lambda: ("source_status", (CLIPBOARD_SOURCE_ID, SourceStatus.CONNECTED)) in rig.events)

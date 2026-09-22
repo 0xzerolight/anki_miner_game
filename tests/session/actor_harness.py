@@ -42,7 +42,7 @@ from anki_miner_game.models.obs import (
     OutputState,
     ProvisionResult,
 )
-from anki_miner_game.models.profile import FilterSettings, GameProfile
+from anki_miner_game.models.profile import AudioMode, AudioSettings, FilterSettings, GameProfile
 from anki_miner_game.obs import provision
 from anki_miner_game.obs.recorder import ObsRecorder
 from anki_miner_game.session.session import FinaliseWorker, SessionActor
@@ -387,7 +387,13 @@ class FakeVadJobs:
 
 
 def profile(*, typewriter: bool = False, slug: str = SLUG, title: str = TITLE) -> GameProfile:
-    return GameProfile(slug=slug, title=title, filters=FilterSettings(typewriter_merge=typewriter))
+    """Desktop audio (the Linux default, fixed so Windows CI arms it too)."""
+    return GameProfile(
+        slug=slug,
+        title=title,
+        audio=AudioSettings(mode=AudioMode.DESKTOP),
+        filters=FilterSettings(typewriter_merge=typewriter),
+    )
 
 
 async def _never(_seconds: float) -> None:
