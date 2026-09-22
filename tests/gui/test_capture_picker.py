@@ -41,11 +41,16 @@ class FakeSession:
 
 
 def make(
-    obs: ListingObs, state: AppState = AppState.IDLE, *, platform: str = "linux", timeout_s: float = 2.0
+    obs: ListingObs,
+    state: AppState = AppState.IDLE,
+    *,
+    platform: str = "linux",
+    timeout_s: float = 2.0,
+    obs_lock: asyncio.Lock | None = None,
 ) -> tuple[CapturePicker, FakeSession]:
     session = FakeSession(state)
     provisioner = ObsProvisioner(obs, platform=platform, sleep=_no_sleep)
-    return CapturePicker(obs, provisioner, session, switch_timeout_s=timeout_s), session
+    return CapturePicker(obs, provisioner, session, switch_timeout_s=timeout_s, obs_lock=obs_lock), session
 
 
 async def _no_sleep(seconds: float) -> None:
@@ -381,3 +386,66 @@ async def test_the_capture_method_in_use_comes_from_the_provisioner_and_switches
 
     assert method == expected
     assert obs.names() == ["GetInputKindList"]
+
+
+# The OBS lock shared with arming and the restore (W2b cross review) --------------------------------
+
+
+async def test_an_idle_listing_waits_for_the_obs_lock_and_releases_it() -> None:
+    """An arm or a restore holding the lock switches OBS; the listing touches nothing until it ends."""
+    obs = x11_obs()
+    lock = asyncio.Lock()
+    picker, _ = make(obs, obs_lock=lock)
+    await lock.acquire()
+    task = asyncio.create_task(picker.list_windows(X11_PROFILE))
+    await asyncio.sleep(0.05)
+    assert obs.names() == []
+    lock.release()
+
+    listing = await task
+
+    assert obs.statuses() == list(STATUS_REQUESTS)
+    assert obs.current_collection == "Untitled"
+    assert listing.items
+    assert not lock.locked()
+
+
+async def test_a_game_armed_while_the_listing_waited_lists_at_once_without_provisioning() -> None:
+    obs = x11_obs(BEFORE)
+    armed, _ = make(obs)
+    await armed._provisioner.ensure_collection(X11_PROFILE)  # what the arm that held the lock did
+    obs.reset_calls()
+    lock = asyncio.Lock()
+    picker, session = make(obs, obs_lock=lock)
+    await lock.acquire()
+    task = asyncio.create_task(picker.list_windows(X11_PROFILE))
+    await asyncio.sleep(0.05)
+    session.state = AppState.ARMED
+    lock.release()
+
+    listing = await task
+
+    assert obs.statuses() == []
+    assert obs.mutating() == []
+    assert obs.current_collection == OBS_COLLECTION_NAME
+    assert [item.name for item in listing.items] == [i.name for i in items(BEFORE)]
+
+
+async def test_the_listing_holds_the_obs_lock_until_it_switched_back() -> None:
+    obs = x11_obs()
+    lock = asyncio.Lock()
+    picker, _ = make(obs, obs_lock=lock)
+    held: list[bool] = []
+    provisioner = picker._provisioner
+    real_list = provisioner.list_windows
+
+    async def list_while_checking() -> list[WindowItem]:
+        held.append(lock.locked())
+        return await real_list()
+
+    provisioner.list_windows = list_while_checking  # type: ignore[method-assign]
+
+    await picker.list_windows(X11_PROFILE)
+
+    assert held == [True]
+    assert not lock.locked()

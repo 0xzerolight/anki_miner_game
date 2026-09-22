@@ -10,7 +10,10 @@ scene collection, so the picker never lists the user's collection:
   for the profile (``ensure_collection``), lists, and switches back through the gateway. The switch
   back is done on ``CurrentSceneCollectionChanged``, never on the answer, whose order against the
   event is not fixed (``docs/m0/obs-behaviour.md`` item 5); there is none when the user's collection
-  was the app's already (item 4, no event would come).
+  was the app's already (item 4, no event would come). It holds ``obs_lock``, which the session
+  actor takes to arm and to restore OBS, from the output check to the switch back, and checks the
+  state again once it has it: an arm meanwhile then finds the user's collection current, and a game
+  armed while the listing waited is listed at once.
 
 The picker offers enabled items only (``docs/m0/wave-1-amendments.md`` item 11): OBS keeps listing
 the configured window as a disabled item once no live window matches it, and on X11 a retitled
@@ -113,7 +116,8 @@ class CapturePicker:
     """The profile dialog's OBS calls: the capture method in use and the window list (see the module docstring).
 
     Built once by the composition, since it subscribes to the gateway for the collection-changed
-    event. Its coroutines run on the I/O loop.
+    event. Its coroutines run on the I/O loop. ``obs_lock`` is the one the session actor holds while
+    it arms or restores OBS; its own when ``None``.
     """
 
     def __init__(
@@ -123,11 +127,13 @@ class CapturePicker:
         session: SessionControl,
         *,
         switch_timeout_s: float = SWITCH_TIMEOUT_S,
+        obs_lock: asyncio.Lock | None = None,
     ) -> None:
         self._gateway = gateway
         self._provisioner = provisioner
         self._session = session
         self._switch_timeout_s = switch_timeout_s
+        self._obs_lock = obs_lock if obs_lock is not None else asyncio.Lock()
         self._waiting: tuple[asyncio.AbstractEventLoop, asyncio.Future[None], str] | None = None
         self._running: set[asyncio.Task[Any]] = set()
         """The calls still running; the reference keeps one whose caller was cancelled alive."""
@@ -164,6 +170,12 @@ class CapturePicker:
     async def _list_windows(self, profile: GameProfile) -> WindowListing:
         if self._session.state is not AppState.IDLE:
             return WindowListing(_enabled(await self._provisioner.list_windows()))
+        async with self._obs_lock:
+            if self._session.state is not AppState.IDLE:  # armed while this waited for the lock
+                return WindowListing(_enabled(await self._provisioner.list_windows()))
+            return await self._list_while_idle(profile)
+
+    async def _list_while_idle(self, profile: GameProfile) -> WindowListing:
         await self._refuse_active_outputs()
         home = (await self._gateway.request("GetSceneCollectionList")).get("currentSceneCollectionName")
         try:
