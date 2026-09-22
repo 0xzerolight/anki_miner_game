@@ -2,6 +2,7 @@
 
 import importlib
 import os
+import re
 from pathlib import Path
 
 import anki_miner_game
@@ -26,7 +27,8 @@ _SUBPACKAGES = [
 
 
 def test_version():
-    assert anki_miner_game.__version__ == "0.1.0"
+    # Plain X.Y.Z: release.yml refuses anything else, and the installer carries it as a file version.
+    assert re.fullmatch(r"\d+\.\d+\.\d+", anki_miner_game.__version__)
 
 
 def test_every_package_importable():
