@@ -571,7 +571,8 @@ class FakeObsServer:
                     self.refuse_connections = True
                 await self._close(client, step.code, step.reason)
             elif not transcript.is_last_generation(step.conn):
-                client.conn.transport.abort()
+                # close, not abort: on Windows an RST discards the frames just sent before the client reads them
+                client.conn.transport.close()
         self.replay_position = f"{transcript.name}: finished"
         self.replay_finished.set()
 
