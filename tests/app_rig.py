@@ -102,6 +102,7 @@ class Rig:
         self.app = app
         app.start()
         self.qtbot.addWidget(app.window)
+        self.qtbot.addWidget(app.tray.menu)
         return app
 
     def close(self) -> None:

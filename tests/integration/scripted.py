@@ -245,6 +245,7 @@ class AppRun:
         self.app = app
         app.start()
         qtbot.addWidget(app.window)
+        qtbot.addWidget(app.tray.menu)
         return app
 
     def post(self, message: UserCommand | Tick) -> None:
