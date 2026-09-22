@@ -367,7 +367,7 @@ class VadTrimmer:
                 raise _PassFailedError(f"The VAD worker failed: {error}")
             if code != 0:
                 stderr.seek(0)
-                detail = stderr.read().decode("utf-8", "replace").strip()[-600:]
+                detail = stderr.read().decode("utf-8", "replace").replace("\r\n", "\n").strip()[-600:]
                 raise _PassFailedError(f"The VAD worker exited with code {code}" + (f": {detail}" if detail else ""))
             if not done:
                 raise _PassFailedError("The VAD worker stopped before finishing")

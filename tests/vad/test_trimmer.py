@@ -392,9 +392,15 @@ def test_a_worker_error_fails_the_pass_and_restores_the_live_subtitle(make_trimm
             "Traceback ...\nMemoryError\n",
             "The VAD worker exited with code 3: Traceback ...\nMemoryError",
         ),
+        (
+            [region(5310, 8920)],
+            3,
+            "Traceback ...\r\nMemoryError\r\n",
+            "The VAD worker exited with code 3: Traceback ...\nMemoryError",
+        ),
         ([DONE], 1, "", "The VAD worker exited with code 1"),
     ],
-    ids=["no done", "crash", "done then exit 1"],
+    ids=["no done", "crash", "crash with CRLF", "done then exit 1"],
 )
 def test_a_worker_that_does_not_finish_cleanly_fails_the_pass(make_trimmer, session, lines, code, stderr, message):
     session.script(lines, code=code, stderr=stderr)
