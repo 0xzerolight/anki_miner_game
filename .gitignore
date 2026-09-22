@@ -51,6 +51,7 @@ htmlcov/
 .claude/
 .mypy_cache/
 .ruff_cache/
+docs/
 .claude-runner/
 AGENTS.md
 .agents/

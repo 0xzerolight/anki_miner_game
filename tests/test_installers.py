@@ -304,8 +304,8 @@ def test_the_app_names_the_command_of_every_linux_package():
     assert "the full path of the .AppImage file" in LINUX_CONTROL_NOTE
     assert f"the full path of {APP_NAME}/{COMMAND}" in LINUX_CONTROL_NOTE
     assert "--toggle" in LINUX_CONTROL_NOTE
-    spec = REPO / "docs" / "specs" / "2026-09-20-anki-miner-game-design.md"
-    assert f"`{COMMAND} --arm <slug> | --start |" in spec.read_text(encoding="utf-8")
+    launch = REPO / "anki_miner_game" / "launch.py"  # the entry point's own usage line
+    assert f"``{COMMAND} [--arm <slug> | --start | --stop | --toggle]``" in launch.read_text(encoding="utf-8")
 
 
 def test_every_deb_source_outside_dist_is_in_the_repo():
