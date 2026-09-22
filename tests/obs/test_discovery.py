@@ -259,7 +259,9 @@ def test_no_install_has_no_config_root(tmp_path):
 
 def test_config_root_follows_the_latest_check(tmp_path):
     found: dict[str, str] = {}
-    obs = LocalObsDiscovery(AppConfig, which=found.get, runner=FakeRunner(flatpak_installed), proc_root=tmp_path)
+    obs = LocalObsDiscovery(
+        AppConfig, which=found.get, runner=FakeRunner(flatpak_installed), proc_root=tmp_path, platform="linux"
+    )
     assert obs.config_root() is None
 
     found["flatpak"] = "/usr/bin/flatpak"
@@ -471,7 +473,9 @@ def test_linux_skips_entries_that_are_not_processes_or_vanish(tmp_path):
     (proc / "self").mkdir()
     (proc / "self" / "comm").write_text("obs\n", encoding="utf-8")  # not a pid folder
     (proc / "123").mkdir()  # exited between the listing and the read: no comm
-    obs = LocalObsDiscovery(AppConfig, which=which_from({"obs": "/usr/bin/obs"}), runner=FakeRunner(), proc_root=proc)
+    obs = LocalObsDiscovery(
+        AppConfig, which=which_from({"obs": "/usr/bin/obs"}), runner=FakeRunner(), proc_root=proc, platform="linux"
+    )
 
     assert not obs.is_running()
 
@@ -823,6 +827,7 @@ async def test_reads_the_current_settings_at_every_probe(tmp_path):
     clock, probe = FakeClock(), ScriptedProbe([False, True])
     obs = LocalObsDiscovery(
         lambda: settings[min(len(probe.seen), 1)],
+        platform="linux",
         which=which_from({"obs": "/usr/bin/obs"}),
         runner=FakeRunner(),
         probe=probe,
