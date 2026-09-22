@@ -241,7 +241,7 @@ class AppRun:
     def launch_app(self, qtbot: Any) -> App:
         store.save_config(self.cfg)
         store.save_profile(self.game)
-        app = App(obs=self._services, source_factory=self._sources)
+        app = App(obs=self._services, source_factory=self._sources, hotkey=lambda _parent: None)
         self.app = app
         app.start()
         qtbot.addWidget(app.window)
