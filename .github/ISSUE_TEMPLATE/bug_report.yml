@@ -1,0 +1,128 @@
+name: Bug report
+description: Report a bug to help improve Anki Miner Game.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for taking the time to file a bug report.
+        Please fill in as much detail as you can - it makes the fix faster.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What went wrong? Include what you expected to happen and what actually happened.
+      placeholder: When I do X, Y happens instead of Z.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Minimal steps that reliably trigger the bug.
+      placeholder: |
+        1. Arm a game.
+        2. Press Start.
+        3. Play until a line shows.
+        4. Observe error.
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Anki Miner Game version
+      description: The download's file name carries it, or see the "Anki Miner Game <version> starting" line in the log. Please update to the latest release first to see if that fixes the bug.
+      placeholder: 0.1.0
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      description: e.g. Ubuntu 24.04 (Wayland or X11), Windows 11.
+    validations:
+      required: true
+
+  - type: input
+    id: obs_version
+    attributes:
+      label: OBS version
+      description: Shown in OBS under Help -> About. Say whether it is the Flathub build on Linux.
+      placeholder: 31.0.2
+    validations:
+      required: true
+
+  - type: dropdown
+    id: text_source
+    attributes:
+      label: Text source
+      description: Where do the lines come from?
+      options:
+        - Textractor
+        - Agent
+        - LunaTranslator
+        - Other websocket hooker
+        - Clipboard
+        - OCR add-on
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install_method
+    attributes:
+      label: Install method
+      description: How did you install Anki Miner Game?
+      options:
+        - Windows installer (.exe)
+        - AppImage (Linux)
+        - .deb (Linux)
+        - .tar.gz (Linux)
+        - Run from source
+        - Other
+    validations:
+      required: true
+
+  - type: upload
+    id: log_files
+    attributes:
+      label: Anki Miner Game log files
+      description: |
+        `~/.anki_miner_game/anki_miner_game.log` on Linux, `%USERPROFILE%\.anki_miner_game\anki_miner_game.log` on Windows. Rotated logs use `.1` through `.3`; ZIP the `anki_miner_game.log*` files. Review logs for private information before uploading.
+    validations:
+      required: false
+      accept: ".log,.txt,.zip"
+
+  - type: dropdown
+    id: log_status
+    attributes:
+      label: Log status
+      description: What happened when you tried to collect the log files?
+      options:
+        - Attached above
+        - No log file was created
+        - Could not access the log folder
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / error output (optional paste alternative)
+      description: If you cannot attach log files, paste any relevant log output or the banner text shown in the main window.
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: The game, capture method, whether a pinned window was used, anything else that may be relevant. More detail > less detail.
+    validations:
+      required: false
