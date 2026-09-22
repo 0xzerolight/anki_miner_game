@@ -34,7 +34,8 @@ def main() -> int:
         deadline = time.monotonic() + 30
         while not Path(wait_for).exists() and time.monotonic() < deadline:
             time.sleep(0.01)
-    sys.stderr.write(script.get("stderr", ""))
+    sys.stderr.buffer.write(script.get("stderr", "").encode("utf-8"))  # the scripted bytes, on Windows too
+    sys.stderr.flush()
     return int(script.get("exit", 0))
 
 
