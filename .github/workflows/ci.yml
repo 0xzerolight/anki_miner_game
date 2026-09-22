@@ -5,6 +5,9 @@ on:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -50,11 +53,13 @@ jobs:
       - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
         with:
           python-version: ${{ matrix.python-version }}
-      - name: Install Qt system libraries
+      # Qt's offscreen libraries, and the validators tests/test_installers.py skips when they are
+      # missing (shellcheck, desktop-file-validate, appstreamcli).
+      - name: Install system libraries
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libegl1 libpulse0 libxkbcommon0
+          sudo apt-get install -y libegl1 libpulse0 libxkbcommon0 shellcheck desktop-file-utils appstream
       - run: uv sync --locked --no-install-project --extra dev
       # The marker deselect lives in pyproject addopts. Only the Windows step
       # overrides it (a CLI -m replaces addopts), to also run windows_only tests
