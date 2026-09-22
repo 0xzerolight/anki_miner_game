@@ -491,7 +491,8 @@ class SessionActor:
         Stops every text source and awaits ``wait_closed``. While armed it disarms (OBS goes back
         to the user's profile). While recording it first stops OBS and finalises the session, then
         disarms; if OBS cannot be stopped, the journal is closed and the next launch resumes the
-        session (reconcile row 4) or finalises it (last row). At most about ``QUIT_STOP_TIMEOUT_S``
+        session (reconcile row 4) or finalises it (last row). While idle and connected with
+        ``obs_restore.json`` still present, it restores once. At most about ``QUIT_STOP_TIMEOUT_S``
         plus one finalise (up to 10 s of rename retries on Windows) plus ``RECORD_INACTIVE_WAIT_S``
         plus the restore's two switches (up to ``SWITCH_TIMEOUT_S`` each, plus
         ``RESTART_QUESTION_S`` when OBS asks to restart).
@@ -559,6 +560,11 @@ class SessionActor:
         if s is not None:  # OBS did not stop: the next launch resumes the session (row 4) or finalises it (row 6)
             await self._write_manifest(s)
             s.journal.close()
+        elif self._state is AppState.IDLE and self._connected and restore_path().exists():
+            # A disarm right after STOPPED found the recording still active and left the restore to the
+            # idle tick (R2 item 9); a quit before that tick restores once, when OBS says inactive.
+            await self._await_record_inactive()
+            await self._restore_obs()
 
     async def _on_tick(self, t: float) -> None:
         if self._start_deadline is not None and t >= self._start_deadline:

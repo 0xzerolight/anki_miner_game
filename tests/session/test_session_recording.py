@@ -476,6 +476,22 @@ async def test_quitting_right_after_a_stop_waits_for_obs_to_say_inactive_then_re
     assert not restore_path().exists()
 
 
+async def test_quitting_while_idle_runs_a_restore_a_disarm_put_off_once_obs_says_inactive(h: Harness):
+    """A disarm right after ``STOPPED`` meets ``GetRecordStatus`` still saying active and puts the restore
+    off to the idle tick; a quit before that tick restores once the recording reports inactive."""
+    await h.arm()
+    await h.started(ZERO)
+    await h.stopped(ZERO + 5.0)
+    h.obs.stale_active_reads = 1
+    await h.send(CommandKind.DISARM)
+    assert h.actor.state is AppState.IDLE
+    assert restore_path().exists()  # put off: the disarm read the recording as still active
+    h.obs.stale_active_reads = 1
+    await h.stop()
+    assert (h.obs.profile, h.obs.collection) == ("Untitled", "Untitled")
+    assert not restore_path().exists()
+
+
 async def test_quitting_while_recording_leaves_the_session_to_the_next_launch_when_obs_does_not_stop(h: Harness):
     await h.arm()
     await h.started(ZERO)
