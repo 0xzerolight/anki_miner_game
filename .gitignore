@@ -1,20 +1,69 @@
-.worktrees/
-.orchestration/
-# No trailing slash: each worktree's .venv/.venv-vad is a SYMLINK to the
-# shared venv in the main checkout, and a trailing-slash pattern only matches
-# a real directory, never a symlink to one.
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+env/
+ENV/
+# No trailing slash: each worktree's .venv is a SYMLINK to the shared venv in
+# the main checkout, and a trailing-slash pattern only matches a real directory.
 .venv
 .venv-vad
 .venv-build
 
-__pycache__/
-*.py[cod]
-*.egg-info/
-build/
-dist/
-.mypy_cache/
+# Testing
 .pytest_cache/
-.ruff_cache/
 .coverage
 htmlcov/
-gate.log
+.tox/
+.nox/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Project specific
+*.log
+# ...but keep the owocr log fixtures the R3 spike captured (tests/test_owocr_fixtures.py).
+!tests/fixtures/owocr/*.log
+.claude/
+.mypy_cache/
+.ruff_cache/
+.claude-runner/
+AGENTS.md
+.agents/
+.codex/
+debug/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# subagent-driven-development artifacts
+sdd/
+# multi-agent orchestration state (ledger, status files, reviews)
+.orchestration/
+# git worktrees for isolated feature work (superpowers:using-git-worktrees)
+.worktrees/
