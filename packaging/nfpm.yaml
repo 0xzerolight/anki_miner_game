@@ -1,0 +1,75 @@
+# nfpm config for the .deb. Shaped on Anki Miner's packaging/nfpm.yaml (commit 9959edc9).
+# Before running: pyinstaller built dist/AnkiMinerGame/, and packaging/render_metainfo.sh (or the
+# AppImage build) rendered dist/anki-miner-game.metainfo.xml.
+#   VERSION=X.Y.Z nfpm package --config packaging/nfpm.yaml --packager deb --target dist/
+name: anki-miner-game
+arch: amd64
+platform: linux
+version: "${VERSION}"
+maintainer: "Anki Miner Game Contributors <noreply@github.com>"
+description: "Record a game session with its text as a video and subtitle pair"
+vendor: "Anki Miner Game Contributors"
+homepage: "https://github.com/0xzerolight/anki_miner_game"
+license: "GPL-3.0-only"
+section: "education"
+priority: "optional"
+
+contents:
+  # The PyInstaller bundle, the same tree the AppImage wraps.
+  - src: dist/AnkiMinerGame/
+    dst: /opt/anki-miner-game/
+    type: tree
+
+  # The launcher shim, and the PATH symlink points at it rather than at the binary
+  # (see packaging/linux-launcher.sh). The command is anki_miner_game, the name spec 16 and the
+  # settings dialog tell users to bind for --toggle / --arm / --start / --stop.
+  - src: packaging/linux-launcher.sh
+    dst: /opt/anki-miner-game/anki-miner-game-launcher
+    file_info:
+      mode: 0755
+
+  - src: /opt/anki-miner-game/anki-miner-game-launcher
+    dst: /usr/bin/anki_miner_game
+    type: symlink
+
+  # Debian Policy 12.5: the verbatim licence at /usr/share/doc/<package>/copyright.
+  - src: LICENSE
+    dst: /usr/share/doc/anki-miner-game/copyright
+    file_info:
+      mode: 0644
+
+  - src: packaging/deb/anki-miner-game.desktop
+    dst: /usr/share/applications/anki-miner-game.desktop
+    file_info:
+      mode: 0644
+
+  # AppStream metadata for GNOME Software and KDE Discover.
+  - src: dist/anki-miner-game.metainfo.xml
+    dst: /usr/share/metainfo/io.github._0xzerolight.AnkiMinerGame.metainfo.xml
+    file_info:
+      mode: 0644
+
+  - src: packaging/icons/anki-miner-game.svg
+    dst: /usr/share/icons/hicolor/scalable/apps/anki-miner-game.svg
+    file_info:
+      mode: 0644
+
+  - src: packaging/icons/anki-miner-game-48.png
+    dst: /usr/share/icons/hicolor/48x48/apps/anki-miner-game.png
+    file_info:
+      mode: 0644
+
+  - src: packaging/icons/anki-miner-game-64.png
+    dst: /usr/share/icons/hicolor/64x64/apps/anki-miner-game.png
+    file_info:
+      mode: 0644
+
+  - src: packaging/icons/anki-miner-game-128.png
+    dst: /usr/share/icons/hicolor/128x128/apps/anki-miner-game.png
+    file_info:
+      mode: 0644
+
+  - src: packaging/icons/anki-miner-game-256.png
+    dst: /usr/share/icons/hicolor/256x256/apps/anki-miner-game.png
+    file_info:
+      mode: 0644

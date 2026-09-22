@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Anki Miner Game
+Comment=Record a game session with its text as a video and subtitle pair
+Exec=AnkiMinerGame
+Icon=anki-miner-game
+Categories=Education;Languages;
+Terminal=false
+StartupWMClass=AnkiMinerGame
