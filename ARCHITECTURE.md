@@ -1,6 +1,6 @@
 # Architecture
 
-> Describes Anki Miner Game v0.1.0 (unreleased). Names and file lists were taken from the tree at that point; recount before relying on one.
+> Describes Anki Miner Game v1.0.0 (2026-09-22). Names and file lists were taken from the tree at that release; recount before relying on one.
 
 Anki Miner Game is a PyQt6 desktop application that sits in the tray beside a game. While a game is armed it drives OBS over obs-websocket v5, stamps every line a text source delivers with the monotonic time it arrived, and turns a recording into the `<Game>/<Game> - NN.mkv` + `.srt` pair Anki Miner mines like an anime episode. Anki Miner itself is never modified: the pair is its ordinary input.
 

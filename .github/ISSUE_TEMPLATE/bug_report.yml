@@ -37,7 +37,7 @@ body:
     attributes:
       label: Anki Miner Game version
       description: The download's file name carries it, or see the "Anki Miner Game <version> starting" line in the log. Please update to the latest release first to see if that fixes the bug.
-      placeholder: 0.1.0
+      placeholder: 1.0.0
     validations:
       required: true
 
