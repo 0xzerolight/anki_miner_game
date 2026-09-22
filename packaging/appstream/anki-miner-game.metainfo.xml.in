@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Template: packaging/render_metainfo.sh substitutes @VERSION@ and @DATE@ for each release. -->
+<component type="desktop-application">
+  <id>io.github._0xzerolight.AnkiMinerGame</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-only</project_license>
+
+  <name>Anki Miner Game</name>
+  <summary>Record a game session with its text as a video and subtitle pair</summary>
+
+  <developer id="io.github._0xzerolight">
+    <name>Anki Miner Game Contributors</name>
+  </developer>
+
+  <description>
+    <p>
+      Anki Miner Game records a video game session through OBS Studio and writes the text the
+      game showed as subtitles beside the recording, timed to the moment each line appeared.
+    </p>
+    <p>
+      Text comes from a text hooker over a WebSocket, from the clipboard, or from optional OCR.
+      The finished pair of a video file and a subtitle file can be mined into Anki flashcards
+      the way an anime episode is.
+    </p>
+  </description>
+
+  <launchable type="desktop-id">anki-miner-game.desktop</launchable>
+
+  <categories>
+    <category>Education</category>
+    <category>Languages</category>
+  </categories>
+
+  <keywords>
+    <keyword>Anki</keyword>
+    <keyword>OBS</keyword>
+    <keyword>subtitles</keyword>
+    <keyword>text hooker</keyword>
+    <keyword>Japanese</keyword>
+  </keywords>
+
+  <!-- Only url types AppStream 0.15.2 (ubuntu-22.04, the release runner) knows. -->
+  <url type="homepage">https://github.com/0xzerolight/anki_miner_game</url>
+  <url type="bugtracker">https://github.com/0xzerolight/anki_miner_game/issues</url>
+
+  <content_rating type="oars-1.1"/>
+
+  <releases>
+    <release version="@VERSION@" date="@DATE@"/>
+  </releases>
+</component>
