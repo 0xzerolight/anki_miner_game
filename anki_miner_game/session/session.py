@@ -29,6 +29,10 @@ Rules this module keeps (wave-1 amendments 3 and 8, wave 2a contracts, M0 findin
   events (M0 ruling on R1 finding 1; provisioning gives the app's profile its own recording encoder).
 - Drift samples are taken on the ``EventClock`` only, and the ``OutputDurationClock`` adds the lag
   the latest one measured (spec 7 as amended).
+- Arming and the restore hold ``obs_lock`` while they read and switch OBS's profile and scene
+  collection. The composition shares it with the window picker's idle listing and the wizard's OBS
+  step, which switch them too: an arm never saves the app's collection a listing made current as the
+  user's, and a restore never lands in the middle of their provisioning.
 """
 
 import asyncio
@@ -38,7 +42,7 @@ import logging
 import shutil
 import tempfile
 import time
-from collections.abc import Awaitable, Callable, Iterator, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -381,11 +385,14 @@ class SessionActor:
         utc_now: Callable[[], datetime] = _utc_now,
         disk_free: Callable[[Path], int] = _disk_free,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        obs_lock: asyncio.Lock | None = None,
     ) -> None:
         """``get_profile`` runs on the loop: pass a lookup over the profiles already loaded.
 
         ``source_factory(cfg, profile)`` builds the text sources of an armed game (spec 8.1).
-        ``sleep`` paces only the ``Tick`` timer of ``run``.
+        ``sleep`` paces only the ``Tick`` timer of ``run``. ``obs_lock`` is the lock shared with
+        everything else that switches OBS's profile or collection (module docstring); its own when
+        ``None``.
         """
         self._loop = loop
         self._gateway = gateway
@@ -401,6 +408,9 @@ class SessionActor:
         self._utc_now = utc_now
         self._disk_free = disk_free
         self._sleep = sleep
+        self._obs_lock = obs_lock if obs_lock is not None else asyncio.Lock()
+        self._holding_obs = False
+        """The handler running now holds ``_obs_lock``: an arm, whose undo restores under the same hold."""
 
         self._queue: asyncio.Queue[SessionInput | _Shutdown] = asyncio.Queue()
         self._launched = asyncio.Event()
@@ -708,6 +718,11 @@ class SessionActor:
         if not _writable(incoming):
             self._banner(BannerKey.ARM, BannerLevel.ERROR, f"The output folder {incoming} cannot be written to.")
             return
+        async with self._owning_obs():
+            await self._arm_obs(profile, cfg, incoming)
+
+    async def _arm_obs(self, profile: GameProfile, cfg: AppConfig, incoming: Path) -> None:
+        """Spec 6.2 steps 1-3 and the arm itself, under ``_obs_lock`` until the state is ``armed``."""
         if not await self._ensure_connected():
             return
         try:
@@ -757,6 +772,23 @@ class SessionActor:
         else:
             self._clear(BannerKey.LOW_DISK)
         self._set_state(AppState.ARMED)
+
+    @contextlib.asynccontextmanager
+    async def _owning_obs(self) -> AsyncIterator[None]:
+        """Hold ``_obs_lock`` while OBS's profile and collection are read and switched.
+
+        Inside a hold (an arm's undo restores) it holds nothing more: the actor handles one message at
+        a time, so the flag cannot belong to another handler.
+        """
+        if self._holding_obs:
+            yield
+            return
+        async with self._obs_lock:
+            self._holding_obs = True
+            try:
+                yield
+            finally:
+                self._holding_obs = False
 
     async def _ensure_connected(self) -> bool:
         """Connect, launching OBS first when it is not running (spec 11.1, 17); a banner on failure."""
@@ -949,6 +981,11 @@ class SessionActor:
             return True
         if not self._connected:
             return False
+        async with self._owning_obs():
+            return await self._switch_back(path, saved)
+
+    async def _switch_back(self, path: Path, saved: ObsRestore) -> bool:
+        """``_restore_obs`` once it holds ``_obs_lock``."""
         try:
             if await self._active_outputs():
                 return False

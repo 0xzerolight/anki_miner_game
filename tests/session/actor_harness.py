@@ -402,11 +402,13 @@ class Harness:
         sleep: Callable[[float], Awaitable[None]] | None = None,
         gateway: Any = None,
         provisioner: Any = None,
+        obs_lock: asyncio.Lock | None = None,
     ) -> None:
         """``sleep`` paces the actor's ``Tick`` timer; by default it never fires (tests call ``tick``).
 
         ``gateway`` and ``provisioner`` replace ``FakeGateway`` and ``FakeProvisioner`` (both or neither),
-        for a test that runs the real provisioner against T14's stateful fake OBS.
+        for a test that runs the real provisioner against T14's stateful fake OBS. ``obs_lock`` is the
+        lock the composition shares with the window picker and the wizard.
         """
         self.output_root = tmp_path / "out"
         self.cfg = AppConfig(output_root=str(self.output_root))
@@ -437,6 +439,7 @@ class Harness:
             utc_now=lambda: UTC_NOW,
             disk_free=lambda _folder: self.free_bytes,
             sleep=sleep or _never,
+            obs_lock=obs_lock,
         )
         self.actor.subscribe(self.events.append)
         self.task: asyncio.Task[None] | None = None
