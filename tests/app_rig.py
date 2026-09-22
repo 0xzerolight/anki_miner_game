@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from anki_miner_game import store
-from anki_miner_game.app import App, ObsServices
+from anki_miner_game.app import App, HotkeyFactory, ObsServices, SourceFactory
 from anki_miner_game.interfaces.text_source import LineSink, StatusListener
 from anki_miner_game.models.config import AppConfig, FeedSettings
 from anki_miner_game.models.messages import AppState, CommandKind, SourceStatus, UserCommand
@@ -67,17 +67,35 @@ class Rig:
         self.discovery = FakeDiscovery()
         self.provisioner = FakeProvisioner(self.gateway)
         self.sources = [Source()]
+        self.profile = PROFILE
+        """The one game profile saved before the app starts."""
+        self.source_factory: SourceFactory | None = lambda _cfg, _game: self.sources
+        """``None``: the app's own text sources (``app.game_sources``)."""
+        self.hotkey: HotkeyFactory = lambda _parent: None
+        """No global hotkey unless a test gives one (a real one would register system-wide on Windows)."""
         self.events: list[tuple[str, tuple[Any, ...]]] = []
         self.app: App | None = None
 
     def start(self, *, name: str | None = None, write_config: bool = True) -> App:
         if write_config:
             store.save_config(self.cfg)
-        store.save_profile(PROFILE)
+        store.save_profile(self.profile)
         services = ObsServices(self.discovery, self.gateway, self.provisioner)
-        app = App(obs=lambda _config: services, source_factory=lambda _cfg, _game: self.sources, server_name=name)
+        app = App(
+            obs=lambda _config: services,
+            source_factory=self.source_factory,
+            server_name=name,
+            hotkey=self.hotkey,
+        )
         signals = app.presenter.signals
-        for signal_name in ("state_changed", "source_status", "banner", "banner_cleared", "session_finished"):
+        for signal_name in (
+            "state_changed",
+            "source_status",
+            "banner",
+            "banner_cleared",
+            "session_finished",
+            "vad_finished",
+        ):
             getattr(signals, signal_name).connect(
                 lambda *args, signal_name=signal_name: self.events.append((signal_name, args))
             )
