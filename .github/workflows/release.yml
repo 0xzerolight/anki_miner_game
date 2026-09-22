@@ -40,9 +40,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # anki_miner_game/__init__.py is the one version source. A tag must be v<__version__> and have its
-      # release notes committed (they are the release body). The version must be a plain X.Y.Z either
-      # way: the Windows installer carries it as its numeric file version.
+      # anki_miner_game/__init__.py is the one version source. A tag must be v<__version__>. The version
+      # must be a plain X.Y.Z either way: the Windows installer carries it as its numeric file version.
       - name: Validate the version
         id: version
         shell: bash
@@ -59,10 +58,6 @@ jobs:
           if [ "$EVENT_NAME" = "push" ]; then
             if [ "$REF_NAME" != "v$VERSION" ]; then
               echo "::error::Tag $REF_NAME does not match __version__ $VERSION"
-              exit 1
-            fi
-            if [ ! -s "docs/release_notes/v$VERSION.md" ]; then
-              echo "::error::docs/release_notes/v$VERSION.md is missing; the release body comes from it"
               exit 1
             fi
           fi
@@ -330,10 +325,12 @@ jobs:
         with:
           path: artifacts/
 
+      # GitHub's generated notes; the maintainer then replaces the body with the local release notes
+      # (gh release edit vX.Y.Z --notes-file docs/release_notes/vX.Y.Z.md).
       - name: Create the GitHub Release
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
         with:
-          body_path: docs/release_notes/v${{ needs.setup.outputs.version }}.md
+          generate_release_notes: true
           fail_on_unmatched_files: true
           files: |
             artifacts/**/*-Setup.exe

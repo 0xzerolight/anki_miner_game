@@ -252,13 +252,10 @@ def setup_step(name: str) -> tuple[str, dict[str, str]]:
     return block(found, "run"), env(found)
 
 
-def version_checkout(root: Path, version: str, notes: bool = True) -> Path:
+def version_checkout(root: Path, version: str) -> Path:
     package = root / "anki_miner_game"
     package.mkdir(parents=True)
     (package / "__init__.py").write_text(f'"""Doc."""\n\n__version__ = "{version}"\n', encoding="utf-8")
-    if notes:
-        (root / "docs" / "release_notes").mkdir(parents=True)
-        (root / "docs" / "release_notes" / f"v{version}.md").write_text("### Added\n\n- **X.**\n", encoding="utf-8")
     return root
 
 
@@ -272,7 +269,7 @@ def check_version(root: Path, event: str, ref: str) -> tuple[subprocess.Complete
 
 
 @posix_only
-def test_a_tag_matching_the_version_with_its_release_notes_passes(tmp_path):
+def test_a_tag_matching_the_version_passes(tmp_path):
     result, out = check_version(version_checkout(tmp_path, "1.2.3"), "push", "v1.2.3")
     assert result.returncode == 0, result.stdout + result.stderr
     assert out == {"version": "1.2.3"}
@@ -280,31 +277,30 @@ def test_a_tag_matching_the_version_with_its_release_notes_passes(tmp_path):
 
 @posix_only
 @pytest.mark.parametrize(
-    ("version", "ref", "notes"),
+    ("version", "ref"),
     [
-        ("1.2.3", "v1.2.4", True),  # the tag is not __version__
-        ("1.2.3", "1.2.3", True),  # a tag without its v
-        ("1.2.3", "v1.2.3", False),  # no docs/release_notes/v1.2.3.md for the release body
-        ("1.2.3rc1", "v1.2.3rc1", True),  # the Windows installer needs a plain X.Y.Z
+        ("1.2.3", "v1.2.4"),  # the tag is not __version__
+        ("1.2.3", "1.2.3"),  # a tag without its v
+        ("1.2.3rc1", "v1.2.3rc1"),  # the Windows installer needs a plain X.Y.Z
     ],
 )
-def test_a_tag_push_fails_on_any_mismatch(tmp_path, version, ref, notes):
-    result, out = check_version(version_checkout(tmp_path, version, notes), "push", ref)
+def test_a_tag_push_fails_on_any_mismatch(tmp_path, version, ref):
+    result, out = check_version(version_checkout(tmp_path, version), "push", ref)
     assert result.returncode != 0
     assert "::error::" in result.stdout
     assert "version" not in out
 
 
 @posix_only
-def test_a_dispatch_takes_the_version_from_the_code_without_notes(tmp_path):
-    result, out = check_version(version_checkout(tmp_path, "1.2.3", notes=False), "workflow_dispatch", "feat/x")
+def test_a_dispatch_takes_the_version_from_the_code(tmp_path):
+    result, out = check_version(version_checkout(tmp_path, "1.2.3"), "workflow_dispatch", "feat/x")
     assert result.returncode == 0, result.stdout + result.stderr
     assert out == {"version": "1.2.3"}
 
 
 @posix_only
 def test_a_dispatch_still_refuses_a_version_the_installer_cannot_carry(tmp_path):
-    result, _out = check_version(version_checkout(tmp_path, "1.2", notes=False), "workflow_dispatch", "main")
+    result, _out = check_version(version_checkout(tmp_path, "1.2"), "workflow_dispatch", "main")
     assert result.returncode != 0
 
 
@@ -455,7 +451,7 @@ def test_downloaded_build_tools_are_pinned_and_verified():
     assert "sha256sum -c" in nfpm
 
 
-def test_the_release_publishes_every_uploaded_file_with_the_committed_notes():
+def test_the_release_publishes_every_uploaded_file_with_generated_notes():
     publish = step(job(RELEASE, "release"), "Create the GitHub Release")
     globs = [line.strip() for line in block(publish, "files", indent=10).splitlines()]
     uploaded = [Path(path).name for path in uploads("Linux") + uploads("Windows")]
@@ -463,7 +459,8 @@ def test_the_release_publishes_every_uploaded_file_with_the_committed_notes():
         assert any(fnmatch.fnmatch(f"artifacts/x/{name}", pattern.replace("**/", "")) for pattern in globs), name
     for pattern in globs:
         assert any(fnmatch.fnmatch(f"artifacts/x/{name}", pattern.replace("**/", "")) for name in uploaded), pattern
-    assert rendered(block(publish, "body_path", indent=10)) == "docs/release_notes/v1.2.3.md"
+    assert re.search(r"^          generate_release_notes: true$", publish, re.M)
+    assert "body_path" not in publish
     assert re.search(r"^          fail_on_unmatched_files: true$", publish, re.M)
 
 
