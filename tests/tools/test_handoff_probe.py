@@ -135,6 +135,7 @@ def test_isolation_needs_a_private_anki_miner_home_and_home(tmp_path):
 
 def test_main_refuses_to_run_without_isolation(tmp_path, monkeypatch, capsys):
     monkeypatch.delenv("ANKI_MINER_HOME", raising=False)
+    monkeypatch.setattr(hp, "_owner_home", lambda: tmp_path / "owner")  # pwd is POSIX-only
 
     rc = hp.main(["--game-dir", str(tmp_path), "--work", str(tmp_path / "work")])
 
