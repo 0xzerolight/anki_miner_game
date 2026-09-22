@@ -104,6 +104,16 @@ def test_a_held_line_published_again_is_marked_recorded_not_listed_twice(live):
     assert live.entries() == [("はじまり", 0), ("つぎ", None)]
 
 
+def test_held_lines_read_in_one_clock_tick_are_each_marked_once(live):
+    """Windows' monotonic clock ticks every 15.6 ms: two lines of one burst can share a ``t_mono``."""
+    first, second = line("はじまり", 1.0), line("つづき", 1.0)
+    for held in (first, second):
+        live.add(held, None, False)
+    for held in (first, second):
+        live.add(held, 0, False)
+    assert live.entries() == [("はじまり", 0), ("つづき", 0)]
+
+
 def test_a_merge_journalled_as_a_new_line_takes_its_offset(live):
     early = line("え", 1.2)
     live.add(early, None, False)

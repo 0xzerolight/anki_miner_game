@@ -202,7 +202,7 @@ def test_accepted_lines_are_broadcast_on_the_feed(rig):
         assert client.recv(timeout=5) == "こんにちは"
 
 
-def test_a_line_held_for_an_auto_start_reaches_the_feed_once(rig):
+def test_a_line_held_for_an_auto_start_reaches_the_feed_once_and_the_cue_count(rig):
     """The actor publishes held lines again with their offsets at STARTED; the feed has sent them already."""
     app = rig.start()
     assert app.feed is not None
@@ -221,6 +221,8 @@ def test_a_line_held_for_an_auto_start_reaches_the_feed_once(rig):
         rig.wait(lambda: rig.state() is AppState.RECORDING)
         rig.sources[0].line("つぎ")
         assert client.recv(timeout=5) == "つぎ"
+    rig.wait(lambda: app.window.cues_label.text() == "2 cues")  # both journalled (the window's count)
+    assert [text for text, _offset in app.window.live_list.entries()] == ["はじまり", "つぎ"]
 
 
 # CLI verbs and quitting (spec 16) -----------------------------------------------------------------

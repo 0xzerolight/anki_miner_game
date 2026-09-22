@@ -13,6 +13,7 @@ A merge keeps its base line's ``t_mono`` and ``source_id`` (``TextPipeline``), w
 the line a merge replaces.
 """
 
+from collections.abc import Callable
 from typing import Final
 
 from PyQt6.QtCore import Qt
@@ -66,9 +67,14 @@ class LiveList(QListWidget):
     def add(self, line: GameLine, offset_ms: int | None, replaces_previous: bool) -> None:
         bar = self.verticalScrollBar()
         at_end = bar is None or bar.value() >= bar.maximum()  # follow new lines unless scrolled back
-        item = self._listed(line)
-        if item is not None and (replaces_previous or (offset_ms is not None and item.data(_LINE_ROLE) == line)):
-            self._show(item, line, offset_ms)  # a merge, or a held line journalled at STARTED
+        if replaces_previous:
+            item = self._last(lambda listed, _offset: same_line(listed, line))
+        elif offset_ms is not None:  # a held line journalled at STARTED is listed already, without an offset
+            item = self._last(lambda listed, offset: offset is None and listed == line)
+        else:
+            item = None
+        if item is not None:
+            self._show(item, line, offset_ms)
         else:
             item = QListWidgetItem()
             self._show(item, line, offset_ms)
@@ -87,10 +93,11 @@ class LiveList(QListWidget):
                 rows.append((item.text(), item.data(_OFFSET_ROLE)))
         return rows
 
-    def _listed(self, line: GameLine) -> QListWidgetItem | None:
+    def _last(self, matches: Callable[[GameLine, int | None], bool]) -> QListWidgetItem | None:
+        """The newest listed item whose ``(line, offset_ms)`` matches."""
         for row in range(self.count() - 1, -1, -1):
             item = self.item(row)
-            if item is not None and same_line(item.data(_LINE_ROLE), line):
+            if item is not None and matches(item.data(_LINE_ROLE), item.data(_OFFSET_ROLE)):
                 return item
         return None
 
