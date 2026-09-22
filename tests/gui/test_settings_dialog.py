@@ -12,6 +12,7 @@ from anki_miner_game.gui.settings_dialog import (
     RESERVED_SOURCE_IDS,
     SettingsDialog,
 )
+from anki_miner_game.gui.wizard import WizardStep
 from anki_miner_game.models.addons import AddonStatus
 from anki_miner_game.models.config import (
     AppConfig,
@@ -242,3 +243,25 @@ def test_browse_fills_the_output_folder(qtbot, tmp_path) -> None:
     picker.close()
 
     assert dialog.config().output_root == str(tmp_path)
+
+
+# Re-running setup wizard steps (spec 16: "Every step can be re-run from Settings") -----------------
+
+
+@pytest.mark.parametrize("step", list(WizardStep))
+def test_each_setup_step_can_be_asked_for(qtbot, step: WizardStep) -> None:
+    dialog = open_dialog(qtbot)
+    with qtbot.waitSignal(dialog.setup_step_requested, timeout=1000) as asked:
+        dialog.setup_buttons[step].click()
+    assert asked.args == [step]
+
+
+def test_what_a_setup_step_saved_replaces_those_fields_and_keeps_the_other_edits(qtbot) -> None:
+    dialog = open_dialog(qtbot)
+    dialog.fps_spin.setValue(24)
+    saved = replace(CUSTOM, output_root="/new/folder", obs=replace(CUSTOM.obs, password_override="typed"))
+    dialog.take_setup(saved)
+    cfg = dialog.config()
+    assert cfg.output_root == "/new/folder"
+    assert cfg.obs.password_override == "typed"
+    assert cfg.recording.fps == 24
