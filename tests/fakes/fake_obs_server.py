@@ -26,7 +26,7 @@ import hashlib
 import itertools
 import json
 import secrets
-from collections.abc import Iterable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from http import HTTPStatus
 from pathlib import Path
@@ -321,6 +321,7 @@ class FakeObsServer:
         password: str | None = None,
         version: Mapping[str, Any] | None = None,
         transcript: Transcript | None = None,
+        before_cut: Callable[[], Awaitable[object]] | None = None,
     ) -> None:
         self.password = password
         """Checked at every Identify; ``None`` = authentication off. Change it to refuse later logins."""
@@ -328,6 +329,10 @@ class FakeObsServer:
             version = transcript.version if transcript is not None and transcript.version else version_data()
         self.version: dict[str, Any] = dict(version)
         self.transcript = transcript
+        self.before_cut = before_cut
+        """Replay: awaited before a recorded close. The recorded client had read every answer before the
+        connection closed; a driver that has not yet (its request still in flight) can lose the answer
+        on Windows, where the gateway's loss handling shuts the request socket."""
         self.refuse_connections = False
         """``True``: every handshake gets HTTP 503, as a closed OBS refuses it."""
         self.handshakes = 0
@@ -545,9 +550,9 @@ class FakeObsServer:
         - ``response``: send the recorded answer with the id of the client's oldest unanswered
           request (answers pair by order, as in the loader).
         - ``event``: send it when the client's subscriptions cover its ``eventIntent``.
-        - ``close`` by OBS: close with the recorded code (abort for 1006); after the last
-          generation, refuse further handshakes as a gone OBS does. ``close`` by the recorded
-          client with a later generation: cut the connection, since that client reconnected.
+        - ``close``, once ``before_cut`` returns: by OBS, close with the recorded code (abort for
+          1006) and, after the last generation, refuse further handshakes as a gone OBS does; by the
+          recorded client with a later generation, cut the connection, since that client reconnected.
         """
         bound: dict[int, _Client] = {}
         for number, step in enumerate(transcript.steps):
@@ -567,10 +572,14 @@ class FakeObsServer:
                 if client.subs & step.d["eventIntent"]:
                     await self._send(client, OP_EVENT, step.d)
             elif step.by == "obs":
+                if self.before_cut is not None:
+                    await self.before_cut()
                 if transcript.is_last_generation(step.conn):
                     self.refuse_connections = True
                 await self._close(client, step.code, step.reason)
             elif not transcript.is_last_generation(step.conn):
+                if self.before_cut is not None:
+                    await self.before_cut()
                 # close, not abort: on Windows an RST discards the frames just sent before the client reads them
                 client.conn.transport.close()
         self.replay_position = f"{transcript.name}: finished"

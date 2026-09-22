@@ -24,7 +24,9 @@ REPLAY_TIMEOUT_S = 20.0
 
 async def replay(transcript: Transcript) -> tuple[Events, FakeObsServer]:
     """Drive a gateway through ``transcript`` against a replaying FakeObsServer; return what it heard."""
-    async with FakeObsServer(transcript=transcript) as server:
+    idle = asyncio.Event()  # no request in flight: the server may play a recorded close now
+    idle.set()
+    async with FakeObsServer(transcript=transcript, before_cut=idle.wait) as server:
         clock = FakeClock()
         gateway = ObsClient(Credentials(server, None), now=clock.now, sleep=clock.sleep)
         events = Events()
@@ -35,13 +37,20 @@ async def replay(transcript: Transcript) -> tuple[Events, FakeObsServer]:
                 for exchange in transcript.exchanges():
                     await wait_until(lambda g=exchange.generation: events.count(CONNECTED) > g, REPLAY_TIMEOUT_S)
                     sent = gateway.request(exchange.request_type, **exchange.request_data)
-                    if exchange.response["requestStatus"]["result"]:
-                        assert await sent == dict(exchange.response.get("responseData") or {}), exchange
-                    else:
-                        with pytest.raises(ObsRequestError) as raised:
-                            await sent
-                        status = exchange.response["requestStatus"]
-                        assert (raised.value.code, raised.value.comment) == (status["code"], status.get("comment", ""))
+                    idle.clear()
+                    try:
+                        if exchange.response["requestStatus"]["result"]:
+                            assert await sent == dict(exchange.response.get("responseData") or {}), exchange
+                        else:
+                            with pytest.raises(ObsRequestError) as raised:
+                                await sent
+                            status = exchange.response["requestStatus"]
+                            assert (raised.value.code, raised.value.comment) == (
+                                status["code"],
+                                status.get("comment", ""),
+                            )
+                    finally:
+                        idle.set()
                 await server.replay_finished.wait()
                 expected = transcript.expected_events(EVENT_SUBSCRIPTIONS, CONNECTED, LOST)
                 await wait_until(lambda: len(events.got) >= len(expected), REPLAY_TIMEOUT_S)
