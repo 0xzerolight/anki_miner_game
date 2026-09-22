@@ -1,0 +1,12 @@
+[
+  {
+    "platform": "linux",
+    "os": "ubuntu-22.04",
+    "artifact_name": "AnkiMinerGame-Linux-x86_64"
+  },
+  {
+    "platform": "windows",
+    "os": "windows-latest",
+    "artifact_name": "AnkiMinerGame-Windows-x86_64"
+  }
+]

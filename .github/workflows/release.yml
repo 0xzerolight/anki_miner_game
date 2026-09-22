@@ -1,0 +1,342 @@
+name: Release
+
+# Shaped on Anki Miner's release.yml, for the two supported platforms (macOS is unsupported).
+on:
+  push:
+    tags:
+      - "v*"
+  # A dispatch is the release DRY RUN: the same build, smokes and installers as a tag push, but no
+  # tag and no GitHub Release, because the ci-gate and release jobs run on a tag push only. There is
+  # no dry_run input on purpose: it would change nothing, and `gh workflow run` fails with HTTP 422 on
+  # any -f key not declared here. scripts/release_dryrun.sh dispatches it and proves the negatives.
+  workflow_dispatch:
+    inputs:
+      platforms:
+        description: "Platforms to build (a dispatch is a dry run and never releases)"
+        type: choice
+        default: all
+        options:
+          - all
+          - linux
+          - windows
+
+permissions:
+  contents: read
+
+# One run per ref at a time, and a running release is never cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # The version and the build matrix, once, before any leg starts. The matrix entries live in
+  # .github/release-matrix.json; a tag push always builds them all.
+  setup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # anki_miner_game/__init__.py is the one version source. A tag must be v<__version__> and have its
+      # release notes committed (they are the release body). The version must be a plain X.Y.Z either
+      # way: the Windows installer carries it as its numeric file version.
+      - name: Validate the version
+        id: version
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          VERSION="$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' anki_miner_game/__init__.py)"
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::__version__ in anki_miner_game/__init__.py is '$VERSION', not X.Y.Z"
+            exit 1
+          fi
+          if [ "$EVENT_NAME" = "push" ]; then
+            if [ "$REF_NAME" != "v$VERSION" ]; then
+              echo "::error::Tag $REF_NAME does not match __version__ $VERSION"
+              exit 1
+            fi
+            if [ ! -s "docs/release_notes/v$VERSION.md" ]; then
+              echo "::error::docs/release_notes/v$VERSION.md is missing; the release body comes from it"
+              exit 1
+            fi
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Version $VERSION ($EVENT_NAME)"
+
+      - name: Build the matrix
+        id: matrix
+        shell: bash
+        env:
+          PLATFORMS: ${{ github.event_name == 'push' && 'all' || inputs.platforms }}
+        run: |
+          set -euo pipefail
+          MATRIX="$(jq -c --arg sel "$PLATFORMS" \
+            '{include: [.[] | select($sel == "all" or .platform == $sel)]}' .github/release-matrix.json)"
+          if ! jq -e '.include | length > 0' <<<"$MATRIX" >/dev/null; then
+            echo "::error::No platform matches the selection '$PLATFORMS'"
+            exit 1
+          fi
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+          jq . <<<"$MATRIX"
+
+  # A v* tag does not run ci.yml (it runs on pushes to main), so the release waits for a green CI run
+  # on the tagged commit: tag a commit that main already has. Skipped on a dispatch, which has no
+  # tagged commit; the build job accepts 'skipped'.
+  ci-gate:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    permissions:
+      actions: read
+    steps:
+      - name: Require green CI on the tagged commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # The tag often arrives with its commit, so the CI run may not exist yet. Fail closed: no run
+          # within the grace period, a run that ends without success, or the deadline.
+          GRACE=300
+          DEADLINE=1800
+          while :; do
+            RUNS="$(gh api --paginate \
+              "/repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${GITHUB_SHA}&per_page=100" \
+              --jq '.workflow_runs[] | {status, conclusion}' | jq -s .)"
+            TOTAL="$(jq length <<<"$RUNS")"
+            SUCCESS="$(jq '[.[] | select(.conclusion == "success")] | length' <<<"$RUNS")"
+            PENDING="$(jq '[.[] | select(.status != "completed")] | length' <<<"$RUNS")"
+            if [ "$SUCCESS" -gt 0 ]; then
+              echo "Green CI run found for ${GITHUB_SHA}."
+              break
+            fi
+            if [ "$TOTAL" -gt 0 ] && [ "$PENDING" -eq 0 ]; then
+              echo "::error::CI finished without success on ${GITHUB_SHA}. Fix CI, then tag again."
+              exit 1
+            fi
+            if [ "$TOTAL" -eq 0 ] && [ "$SECONDS" -ge "$GRACE" ]; then
+              echo "::error::No ci.yml run on ${GITHUB_SHA} within ${GRACE}s. Tag a commit pushed to main."
+              exit 1
+            fi
+            if [ "$SECONDS" -ge "$DEADLINE" ]; then
+              echo "::error::Timed out waiting for CI on ${GITHUB_SHA}."
+              exit 1
+            fi
+            echo "CI not finished (runs: ${TOTAL}, pending: ${PENDING}); checking again in 30 s."
+            sleep 30
+          done
+
+  build:
+    name: build ${{ matrix.platform }}
+    needs: [setup, ci-gate]
+    # !cancelled() lets the build run after a skipped ci-gate (a dispatch); the explicit results keep a
+    # failed setup or a red ci-gate from starting it.
+    if: ${{ !cancelled() && needs.setup.result == 'success' && (needs.ci-gate.result == 'success' || needs.ci-gate.result == 'skipped') }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.setup.outputs.matrix) }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      # A uv-managed CPython on both legs, the interpreter the bundle was proved with (T27). Its
+      # OpenSSL looks for CA certificates where most distributions keep them.
+      UV_PYTHON_PREFERENCE: only-managed
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          python-version: "3.12"
+          enable-cache: false
+
+      # The Qt libraries the offscreen smoke loads from the host, and the AppStream validator the
+      # AppImage build runs.
+      - name: Install system libraries (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libegl1 libxkbcommon0 libxkbcommon-x11-0 \
+            libxcb-cursor0 libpulse0 appstream desktop-file-utils
+
+      # The build env is the runtime dependencies plus PyInstaller, never the dev tools.
+      - name: Install the build environment (Linux)
+        if: runner.os == 'Linux'
+        run: uv sync --locked --no-install-project --extra build
+
+      # PyPI's prebuilt Windows bootloader is shared by every PyInstaller app, malware included, so
+      # antivirus products flag it. Building PyInstaller from its locked sdist with the compile switch
+      # gives the bundle a bootloader of its own (MSVC is on the hosted runner).
+      - name: Install the build environment (Windows, bootloader from source)
+        if: runner.os == 'Windows'
+        shell: bash
+        env:
+          PYINSTALLER_COMPILE_BOOTLOADER: "1"
+        run: uv sync --locked --no-install-project --extra build --no-binary-package pyinstaller
+
+      - name: Prove the bootloader is not the prebuilt one (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          uv run --no-sync python - <<'EOF'
+          import hashlib
+          import io
+          import tomllib
+          import urllib.request
+          import zipfile
+          from pathlib import Path
+
+          import PyInstaller
+
+          member = f"PyInstaller/bootloader/{PyInstaller.PLATFORM}/runw.exe"
+          lock = tomllib.loads(Path("uv.lock").read_text(encoding="utf-8"))
+          package = next(p for p in lock["package"] if p["name"] == "pyinstaller")
+          wheel = next(w for w in package["wheels"] if w["url"].endswith("-win_amd64.whl"))
+          data = urllib.request.urlopen(wheel["url"], timeout=120).read()
+          if "sha256:" + hashlib.sha256(data).hexdigest() != wheel["hash"]:
+              raise SystemExit(f"{wheel['url']} does not match its uv.lock hash")
+          prebuilt = hashlib.sha256(zipfile.ZipFile(io.BytesIO(data)).read(member)).hexdigest()
+          installed = hashlib.sha256((Path(PyInstaller.PACKAGEPATH) / "bootloader" / PyInstaller.PLATFORM / "runw.exe").read_bytes()).hexdigest()
+          print(f"runw.exe in the PyPI wheel: {prebuilt}")
+          print(f"runw.exe installed:         {installed}")
+          if installed == prebuilt:
+              raise SystemExit("The installed bootloader is PyPI's prebuilt one; it was not compiled from source")
+          EOF
+
+      - name: Build the bundle
+        run: uv run --no-sync pyinstaller --noconfirm anki_miner_game.spec
+
+      # Launches dist/AnkiMinerGame offscreen in a throwaway home: config.json, the log, the in-app
+      # self-check (no add-on module, the feed page, one HTTPS GET) and no add-on file in the bundle.
+      - name: Bundle smoke
+        shell: bash
+        run: bash scripts/bundle_smoke.sh dist/AnkiMinerGame
+
+      - name: Install Inno Setup (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # The official release asset, pinned by SHA-256 (Chocolatey's package lags behind).
+          $url = 'https://github.com/jrsoftware/issrc/releases/download/is-7_0_2/innosetup-7.0.2-x64.exe'
+          $expectedSha = '5ad54ca3def786f8f4212552e54cc6d8d61329e2d24a1cfee0571d42c2684ff1'
+          $setup = Join-Path $env:RUNNER_TEMP 'innosetup-7.0.2-x64.exe'
+          Invoke-WebRequest -Uri $url -OutFile $setup
+          $actualSha = (Get-FileHash -Algorithm SHA256 $setup).Hash.ToLowerInvariant()
+          if ($actualSha -ne $expectedSha) {
+            throw "Inno Setup download hash mismatch: expected $expectedSha, got $actualSha"
+          }
+          $installDir = 'C:\InnoSetup7'
+          $proc = Start-Process -FilePath $setup -ArgumentList @(
+            '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/DIR=$installDir"
+          ) -Wait -PassThru
+          if ($proc.ExitCode -ne 0) {
+            throw "Inno Setup installer exited with $($proc.ExitCode)"
+          }
+          if (-not (Test-Path (Join-Path $installDir 'ISCC.exe'))) {
+            throw "ISCC.exe not found in $installDir"
+          }
+          $installDir | Out-File -FilePath $env:GITHUB_PATH -Append
+
+      - name: Build the Windows installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          iscc /DAppVersion=${{ needs.setup.outputs.version }} packaging\innosetup\anki_miner_game.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # Installs the Setup.exe per user, runs the installed app's self-check in a throwaway home, then
+      # uninstalls; see the script.
+      - name: Windows installer smoke
+        if: runner.os == 'Windows'
+        shell: pwsh
+        timeout-minutes: 20
+        run: ./scripts/windows_installer_smoke.ps1 -Installer "dist/AnkiMinerGame-${{ needs.setup.outputs.version }}-Windows-x86_64-Setup.exe" -Version "${{ needs.setup.outputs.version }}"
+
+      # The packaging scripts honour SOURCE_DATE_EPOCH: the tarball's member times and the AppStream
+      # release date come from the commit, not the build.
+      - name: Date the Linux packages from the commit (Linux)
+        if: runner.os == 'Linux'
+        run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
+
+      # Also renders dist/anki-miner-game.metainfo.xml, which the .deb reads.
+      - name: Build the AppImage (Linux)
+        if: runner.os == 'Linux'
+        run: packaging/appimage/build-appimage.sh "${{ needs.setup.outputs.version }}"
+
+      - name: Build the .tar.gz (Linux)
+        if: runner.os == 'Linux'
+        run: packaging/build-tarball.sh "${{ needs.setup.outputs.version }}"
+
+      - name: Install nfpm (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          # goreleaser's checksums.txt for v2.46.0.
+          NFPM_SHA256="43b4cb72cde2d6e61c02e5b330e3276882252bf67c057e089957f9dbd2c8de42"
+          ARCHIVE="$RUNNER_TEMP/nfpm_2.46.0_Linux_x86_64.tar.gz"
+          curl -fsSL -o "$ARCHIVE" \
+            https://github.com/goreleaser/nfpm/releases/download/v2.46.0/nfpm_2.46.0_Linux_x86_64.tar.gz
+          echo "${NFPM_SHA256}  ${ARCHIVE}" | sha256sum -c -
+          tar -xzf "$ARCHIVE" -C "$RUNNER_TEMP" nfpm
+
+      - name: Build the .deb (Linux)
+        if: runner.os == 'Linux'
+        env:
+          VERSION: ${{ needs.setup.outputs.version }}
+        run: |
+          "$RUNNER_TEMP/nfpm" package --config packaging/nfpm.yaml --packager deb \
+            --target "dist/anki-miner-game_${VERSION}_amd64.deb"
+
+      # One upload per platform listing every file it must have: a missing one fails the leg instead of
+      # publishing an incomplete release.
+      - name: Upload the artifacts (Linux)
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ${{ matrix.artifact_name }}
+          if-no-files-found: error
+          path: |
+            dist/AnkiMinerGame-${{ needs.setup.outputs.version }}-Linux-x86_64.AppImage
+            dist/AnkiMinerGame-${{ needs.setup.outputs.version }}-Linux-x86_64.tar.gz
+            dist/anki-miner-game_${{ needs.setup.outputs.version }}_amd64.deb
+
+      - name: Upload the artifacts (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ${{ matrix.artifact_name }}
+          if-no-files-found: error
+          path: |
+            dist/AnkiMinerGame-${{ needs.setup.outputs.version }}-Windows-x86_64-Setup.exe
+
+  release:
+    needs: [setup, build]
+    # Tag push only: a dispatch never creates a GitHub Release. No always()/!cancelled() here, so the
+    # implicit success() of `needs` keeps a red build leg from publishing.
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          path: artifacts/
+
+      - name: Create the GitHub Release
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
+        with:
+          body_path: docs/release_notes/v${{ needs.setup.outputs.version }}.md
+          fail_on_unmatched_files: true
+          files: |
+            artifacts/**/*-Setup.exe
+            artifacts/**/*.AppImage
+            artifacts/**/*.tar.gz
+            artifacts/**/*.deb
