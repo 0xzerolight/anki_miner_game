@@ -619,6 +619,8 @@ class App(QObject):
         if self._cli is not None:
             self._cli.close()
         self._put_away()
+        if self._hotkey is not None:
+            self._hotkey.unregister()  # here, not only at aboutToQuit: a QApplication can outlive the app
         if not self._io.isRunning():
             return
         if self._stopping is None:

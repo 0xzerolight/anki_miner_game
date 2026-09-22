@@ -172,13 +172,14 @@ class HotkeyApi:
     def __init__(self, answer: int = 0) -> None:
         self.answer = answer
         self.registered: list[tuple[int, int]] = []
+        self.unregistered = 0
 
     def register(self, hotkey_id: int, modifiers: int, vk: int) -> int:
         self.registered.append((modifiers, vk))
         return self.answer
 
     def unregister(self, hotkey_id: int) -> None:
-        pass
+        self.unregistered += 1
 
 
 def with_hotkey(rig: Rig, api: HotkeyApi) -> list[GlobalHotkey]:
@@ -205,6 +206,16 @@ def test_the_hotkey_is_registered_and_toggles_start_and_stop(rig):
     rig.arm()
     made[0].activated.emit()
     rig.wait(lambda: "StartRecord" in rig.gateway.names())
+
+
+def test_closing_the_app_releases_the_hotkey(rig):
+    # The QApplication outlives the App here, so its quit never comes: a native filter left
+    # installed would outlive its hotkey (an access violation on Windows once freed off-thread).
+    api = HotkeyApi()
+    with_hotkey(rig, api)
+    rig.start()
+    rig.close()
+    assert api.unregistered == 1
 
 
 def test_a_hotkey_another_program_holds_is_a_banner_and_new_settings_register_again(rig):
