@@ -365,7 +365,7 @@ def test_the_obs_password_never_reaches_the_log(qtbot, tmp_path, monkeypatch, ca
             gateway = ObsClient(lambda: discovery.credentials(config()))
             return ObsServices(discovery, gateway, ObsProvisioner(gateway))
 
-        app = App(obs=local)
+        app = App(obs=local, hotkey=lambda _parent: None)
         lights: list[SourceStatus] = []
         app.presenter.signals.source_status.connect(
             lambda source_id, status: lights.append(status) if source_id == OBS_SOURCE_ID else None
