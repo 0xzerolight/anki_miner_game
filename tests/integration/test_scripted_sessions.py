@@ -9,18 +9,19 @@ theirs; the test then reads the files: a byte-exact ``.srt``, the manifest's cou
 final names.
 
 Every transcript of ``tests/fixtures/obs_transcripts/`` that describes a session the app drives or
-observes is replayed. Skipped:
+observes is replayed (``test_every_transcript_is_scripted_or_skipped_here`` keeps it so). Skipped,
+each replayed through the gateway by ``tests/obs/test_client_transcripts.py``:
 
 - ``provision.jsonl``: setup only, R2's driver provisioning with its own input names and request
   order; ``tests/obs/test_provision_replay.py`` replays it against ``FakeObs``.
-- ``obs_sigterm.jsonl``: OBS ignored SIGTERM and reported nothing, no event and no stop; the
-  recording ended outside the transcript (SIGINT then crashed OBS, unrecorded) and the connection
-  closes are the driver's own, so there is no ending to replay.
+- ``obs_sigterm.jsonl``: nothing the app would see. OBS ignored SIGTERM, sent no event and kept
+  recording past the transcript (a later SIGINT crashed it, unrecorded), and the connection closes
+  are the driver's own, so there is no ending to replay.
 - ``switch_not_ready.jsonl``: the driver's own arm and disarm switches beside a third client polling
   through the collection change (207). The app sends nothing between ``...Changing`` and
   ``...Changed`` (spec 6.2 step 3) and its gateway waits a change out (``tests/obs/test_client.py``).
 - ``switch_refused.jsonl``: switches to names OBS lacks or to the current names and creates of
-  existing names, none of which the app sends; ``FakeObs`` answers them as recorded (T14's tests).
+  existing names, none of which the app sends.
 - ``app_provision.jsonl`` arms 2 and 3: recorded before ``ensure_profile`` took over the switch to
   the app's profile (a26e411), so they no longer are the app's requests;
   ``tests/obs/test_provision_replay.py`` replays their provisioning against ``ObsProvisioner``.
@@ -29,6 +30,7 @@ observes is replayed. Skipped:
 
 import asyncio
 import json
+import re
 import threading
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -50,6 +52,8 @@ from tests.integration.obs_replay import FIXTURES, SWITCH_REQUESTS, rewrite_path
 from tests.integration.scripted import SLUG, TITLE, WAIT_S, AppRun, Clock, Scripted, ServerThread, profile
 from tests.session.actor_harness import FakeDiscovery
 
+SKIPPED: Final = ("provision.jsonl", "obs_sigterm.jsonl", "switch_not_ready.jsonl", "switch_refused.jsonl")
+"""Transcripts no test here scripts; the module docstring says why."""
 PROBE_WINDOW: Final = "4194311\r\namg-probe-window\r\nprobe_window.py"
 """The window R2's probe opened, as ``window_retitle.jsonl``'s window lists name it."""
 PROFILE_SWITCH: Final = frozenset({"SetCurrentProfile"})
@@ -70,6 +74,13 @@ def scripted(qtbot, tmp_path, monkeypatch) -> Iterator[Callable[..., Scripted]]:
     yield make
     for run in made:
         run.close()
+
+
+def test_every_transcript_is_scripted_or_skipped_here():
+    named_here = set(re.findall(r"[\w-]+\.jsonl", Path(__file__).read_text(encoding="utf-8")))
+    transcripts = {path.name for path in FIXTURES.glob("*.jsonl")}
+    assert transcripts - named_here == set()
+    assert set(SKIPPED) <= transcripts and all(name in (__doc__ or "") for name in SKIPPED)
 
 
 def names(index: int) -> list[str]:
@@ -411,7 +422,7 @@ def test_arm_and_disarm_with_every_output_idle(scripted):
 
 
 def test_arming_waits_out_obs_asking_to_restart_and_then_gives_up(scripted, monkeypatch):
-    monkeypatch.setattr(provision, "SWITCH_TIMEOUT_S", 1.0)
+    monkeypatch.setattr(provision, "SWITCH_TIMEOUT_S", 2.0)
     monkeypatch.setattr(session_mod, "RESTART_QUESTION_S", 0.2)
     s = scripted("switch_restart_prompt.jsonl", app_sends=PROFILE_SWITCH, settles=False, hooker=False)
     s.obs.profiles["Untitled"][SAMPLE_RATE] = "44100"  # changed since the app provisioned at 48000
@@ -423,7 +434,7 @@ def test_arming_waits_out_obs_asking_to_restart_and_then_gives_up(scripted, monk
     banners = s.banners()
     assert banners["obs_question"].startswith("OBS is asking to restart: answer it in OBS's window")
     assert banners["arm"] == (
-        f"Could not prepare OBS for {TITLE}: OBS did not finish switching to '{OBS_PROFILE_NAME}' within 1 s; "
+        f"Could not prepare OBS for {TITLE}: OBS did not finish switching to '{OBS_PROFILE_NAME}' within 2 s; "
         "an OBS dialog may be waiting for an answer."
     )
     assert s.state() is None

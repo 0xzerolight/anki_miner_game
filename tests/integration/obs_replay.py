@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
-from anki_miner_game.models.obs import ObsConnectError, ObsRequestError
+from anki_miner_game.models.obs import ObsRequestError
 from tests.fakes.fake_obs_server import (
     OP_IDENTIFY,
     OP_RESPONSE,
@@ -299,10 +299,6 @@ class ReplayedObs(FakeObsServer):
             reply = Reply(await self.obs.request(request_type, **data))
         except ObsRequestError as exc:
             reply = Reply(code=exc.code, comment=exc.comment or None)
-        except ObsConnectError:  # FakeObs crashed, as OBS aborts on an empty xcomposite window list
-            self._collecting = None
-            await self.drop_clients(None)
-            return
         except AssertionError as exc:  # a request FakeObs does not model
             self.unscripted.append(f"{self.recording.name}: {exc}")
             reply = Reply(code=UNKNOWN_REQUEST)
@@ -350,7 +346,8 @@ class ReplayedObs(FakeObsServer):
         if request_type == "GetOutputSettings":
             chosen = ([s for s in answers if s.t <= now] or answers[:1] or [None])[-1]
             if chosen is None:
-                return Reply(code=RESOURCE_NOT_FOUND, comment=f"No output was found by the name of `{data}`.")
+                name = data.get("outputName")
+                return Reply(code=RESOURCE_NOT_FOUND, comment=f"No output was found by the name of `{name}`.")
             return self._recorded(chosen)
         event_name = STATE_EVENT[request_type]
         marks = [s for s in self.played_events if s.kind == "reopen" or s.name == event_name]
