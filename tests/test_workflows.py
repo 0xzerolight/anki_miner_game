@@ -28,6 +28,7 @@ WORKFLOWS = REPO / ".github" / "workflows"
 CI = WORKFLOWS / "ci.yml"
 RELEASE = WORKFLOWS / "release.yml"
 AUTOMERGE = WORKFLOWS / "dependabot-automerge.yml"
+CONTRIBUTORS_WF = WORKFLOWS / "contributors.yml"
 MATRIX = REPO / ".github" / "release-matrix.json"
 DRYRUN = REPO / "scripts" / "release_dryrun.sh"
 INSTALLER_SMOKE = REPO / "scripts" / "windows_installer_smoke.ps1"
@@ -166,7 +167,7 @@ def test_ci_installs_the_validators_the_packaging_tests_otherwise_skip():
 # --- both workflows -----------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("workflow", [CI, RELEASE, AUTOMERGE], ids=lambda p: p.name)
+@pytest.mark.parametrize("workflow", [CI, RELEASE, AUTOMERGE, CONTRIBUTORS_WF], ids=lambda p: p.name)
 def test_every_action_is_pinned_to_a_commit(workflow):
     found = uses(workflow)
     assert found
@@ -174,7 +175,7 @@ def test_every_action_is_pinned_to_a_commit(workflow):
         assert re.fullmatch(r"[\w.-]+/[\w.-]+@[0-9a-f]{40} # v[\d.]+", ref), ref
 
 
-@pytest.mark.parametrize("workflow", [CI, RELEASE], ids=lambda p: p.name)
+@pytest.mark.parametrize("workflow", [CI, RELEASE, CONTRIBUTORS_WF], ids=lambda p: p.name)
 def test_the_default_token_is_read_only(workflow):
     assert re.search(r"^permissions:\n  contents: read$", text(workflow), re.M)
 
