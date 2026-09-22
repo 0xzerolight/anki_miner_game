@@ -165,6 +165,7 @@ _COLLECTION: Final = _Switch(
     ObsEventName.CURRENT_SCENE_COLLECTION_CHANGED,
 )
 _APP_NAMES: Final = {_PROFILE: OBS_PROFILE_NAME, _COLLECTION: OBS_COLLECTION_NAME}
+_BUSY: Final = ObsCheck(ObsStatus.BUSY, "A game is armed. Disarm it first, then run this step again.")
 
 
 @dataclass
@@ -183,7 +184,8 @@ class ObsSetup:
     touches nothing. The user's profile and collection names are remembered across runs, so a run
     after a switch back that failed still returns to them rather than to the app's names.
     Subscribes to ``gateway`` once, at the first run; the handler only wakes a switch waiting for
-    that event.
+    that event. A run holds ``obs_lock``, which the session actor takes to arm and to restore OBS,
+    from start to end and asks for the state again once it has it; its own lock when ``None``.
     """
 
     def __init__(
@@ -195,6 +197,7 @@ class ObsSetup:
         session: SessionControl | None = None,
         launch_timeout_s: float = OBS_LAUNCH_TIMEOUT_S,
         switch_timeout_s: float = SWITCH_TIMEOUT_S,
+        obs_lock: asyncio.Lock | None = None,
     ) -> None:
         self._discovery = discovery
         self._gateway = gateway
@@ -202,6 +205,7 @@ class ObsSetup:
         self._session = session
         self._launch_timeout_s = launch_timeout_s
         self._switch_timeout_s = switch_timeout_s
+        self._obs_lock = obs_lock if obs_lock is not None else asyncio.Lock()
         self._home: dict[_Switch, str] = {}
         self._subscribed = False
         self._lock = threading.Lock()
@@ -209,8 +213,19 @@ class ObsSetup:
 
     async def run(self, cfg: AppConfig, report: Callable[[str], None] = lambda _stage: None) -> ObsCheck:
         """One pass of step 1; ``report(stage)`` hears what it is doing, on the loop's thread."""
-        if self._session is not None and self._session.state is not AppState.IDLE:
-            return ObsCheck(ObsStatus.BUSY, "A game is armed. Disarm it first, then run this step again.")
+        if self._busy():
+            return _BUSY
+        if self._obs_lock.locked():
+            report("Waiting for the app to finish switching OBS…")
+        async with self._obs_lock:
+            if self._busy():  # armed while this waited for the lock
+                return _BUSY
+            return await self._run(cfg, report)
+
+    def _busy(self) -> bool:
+        return self._session is not None and self._session.state is not AppState.IDLE
+
+    async def _run(self, cfg: AppConfig, report: Callable[[str], None]) -> ObsCheck:
         if not self._subscribed:
             self._gateway.subscribe(self._on_event)
             self._subscribed = True

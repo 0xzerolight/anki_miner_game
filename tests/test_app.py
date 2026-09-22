@@ -7,6 +7,7 @@ import logging
 import socket
 import threading
 from collections.abc import Callable, Iterator
+from dataclasses import replace
 from pathlib import Path
 from types import TracebackType
 from typing import Any
@@ -19,6 +20,7 @@ from anki_miner_game import paths, store
 from anki_miner_game.app import App, ObsServices, forward, hook_sources
 from anki_miner_game.feed import FeedServer, http_server
 from anki_miner_game.gui.cli_verbs import send, server_name
+from anki_miner_game.lifecycle import auto as auto_mod
 from anki_miner_game.models.config import AppConfig, FeedSettings, TextSourceConfig
 from anki_miner_game.models.constants import OBS_COLLECTION_NAME, OBS_PROFILE_NAME
 from anki_miner_game.models.lines import GameLine
@@ -46,7 +48,8 @@ from anki_miner_game.models.messages import (
     StateChanged,
     UserCommand,
 )
-from anki_miner_game.models.profile import GameProfile, TextMode
+from anki_miner_game.models.obs import ObsEventName, OutputState
+from anki_miner_game.models.profile import AutoSettings, CaptureSettings, GameProfile, TextMode
 from anki_miner_game.obs.client import ObsClient
 from anki_miner_game.obs.discovery import LocalObsDiscovery
 from anki_miner_game.obs.provision import ObsProvisioner
@@ -57,6 +60,9 @@ from anki_miner_game.session.restore import ObsRestore, restore_path, save_resto
 from anki_miner_game.text.sources.websocket_source import WebsocketSource
 from tests.app_rig import SLUG, TITLE, WAIT_MS, Rig
 from tests.fakes.fake_obs_server import FakeObsServer
+from tests.gui.session_fakes import TITLE as SESSION_TITLE
+from tests.gui.session_fakes import manifest, place
+from tests.session.actor_harness import FakeProvisioner
 
 
 @pytest.fixture
@@ -98,6 +104,20 @@ def test_a_game_profile_that_cannot_be_read_is_reported(rig):
     rig.wait(lambda: "profiles" in rig.banners())
     assert "broken.json" in rig.banners()["profiles"]
     assert [app.window.game.itemData(i) for i in range(app.window.game.count())] == [SLUG]
+
+
+def test_the_window_shows_the_enabled_sources_and_the_sessions_in_the_output_folder(rig):
+    rig.cfg = replace(
+        rig.cfg,
+        text_sources=(
+            TextSourceConfig(id="textractor", name="Textractor", uri="localhost:6677"),
+            TextSourceConfig(id="agent", name="Agent", uri="localhost:9001", enabled=False),
+        ),
+    )
+    place(rig.output_root, manifest(3))
+    app = rig.start()
+    assert app.window.status_row.names() == ["OBS", "Textractor"]
+    assert [cells[0] for cells in app.window.recent.cells()] == [f"{SESSION_TITLE} - 03"]
 
 
 # Launch duties (spec 6.2, 6.3, 10.3, 17 "Unclean previous exit") ----------------------------------
@@ -184,6 +204,29 @@ def test_accepted_lines_are_broadcast_on_the_feed(rig):
         assert client.recv(timeout=5) == "こんにちは"
 
 
+def test_a_line_held_for_an_auto_start_reaches_the_feed_once_and_the_cue_count(rig):
+    """The actor publishes held lines again with their offsets at STARTED; the feed has sent them already."""
+    app = rig.start()
+    assert app.feed is not None
+    rig.arm()
+    with connect(f"ws://127.0.0.1:{app.feed.ws_port}", proxy=None) as client:
+        rig.wait(lambda: app.feed is not None and app.feed.client_count == 1)
+        rig.sources[0].line("はじまり")
+        assert client.recv(timeout=5) == "はじまり"
+        app.post(UserCommand(CommandKind.START, line=GameLine("はじまり", "はじまり", 1.0, "textractor")))
+        video = rig.output_root / "_incoming" / "2026-10-02 18-04-11.mkv"
+        video.parent.mkdir(parents=True, exist_ok=True)
+        video.write_bytes(b"\x1a\x45\xdf\xa3 not really matroska")
+        rig.obs.record_active, rig.obs.output_path = True, str(video)
+        rig.obs.stops_on_request = True  # the quit's StopRecord ends the recording
+        rig.gateway.record_event(OutputState.STARTED, str(video))
+        rig.wait(lambda: rig.state() is AppState.RECORDING)
+        rig.sources[0].line("つぎ")
+        assert client.recv(timeout=5) == "つぎ"
+    rig.wait(lambda: app.window.cues_label.text() == "2 cues")  # both journalled (the window's count)
+    assert [text for text, _offset in app.window.live_list.entries()] == ["はじまり", "つぎ"]
+
+
 # CLI verbs and quitting (spec 16) -----------------------------------------------------------------
 
 
@@ -212,6 +255,42 @@ def test_quit_disarms_and_waits_for_every_source_to_close_before_the_loop_stops(
     rig.close()
     assert rig.sources[0].stopped and rig.sources[0].closed_while_the_loop_ran
     assert rig.obs.profile == "Untitled"  # disarm restored the user's OBS
+    assert not restore_path().exists()
+
+
+def test_a_quit_during_auto_modes_window_poll_still_stops_the_recording_and_restores_obs(rig, monkeypatch):
+    """Cancelling auto mode mid-request drops the OBS link (T12), so the session is shut down first."""
+    monkeypatch.setattr(auto_mod, "POLL_S", 0.02)
+    polling = threading.Event()
+
+    class PollOnTheWire(FakeProvisioner):
+        async def list_windows(self) -> list[Any]:
+            polling.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:  # a request cancelled on the wire drops the link
+                self.gateway.connected = False
+                self.gateway.emit(ObsEventName.CONNECTION_LOST)
+                raise
+            return []
+
+    rig.provisioner = PollOnTheWire(rig.gateway)
+    rig.profile = replace(
+        rig.profile, capture=CaptureSettings(window="4194311\r\nGame\r\ngame"), auto=AutoSettings(enabled=True)
+    )
+    rig.start()
+    rig.arm()
+    video = rig.output_root / "_incoming" / "2026-10-02 18-04-11.mkv"
+    video.parent.mkdir(parents=True, exist_ok=True)
+    video.write_bytes(b"\x1a\x45\xdf\xa3 not really matroska")
+    rig.obs.record_active, rig.obs.output_path = True, str(video)
+    rig.obs.stops_on_request = True
+    rig.gateway.record_event(OutputState.STARTED, str(video))
+    rig.wait(lambda: rig.state() is AppState.RECORDING)
+    rig.wait(polling.is_set)
+    rig.close()
+    assert "StopRecord" in rig.gateway.names()
+    assert (rig.obs.profile, rig.obs.collection) == ("Untitled", "Untitled")
     assert not restore_path().exists()
 
 
@@ -286,7 +365,7 @@ def test_the_obs_password_never_reaches_the_log(qtbot, tmp_path, monkeypatch, ca
             gateway = ObsClient(lambda: discovery.credentials(config()))
             return ObsServices(discovery, gateway, ObsProvisioner(gateway))
 
-        app = App(obs=local)
+        app = App(obs=local, hotkey=lambda _parent: None)
         lights: list[SourceStatus] = []
         app.presenter.signals.source_status.connect(
             lambda source_id, status: lights.append(status) if source_id == OBS_SOURCE_ID else None

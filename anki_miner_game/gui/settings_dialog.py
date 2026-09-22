@@ -3,7 +3,9 @@
 The dialog saves nothing: on Save it emits ``config_saved`` with the new config, and the caller
 stores it. The OBS port and password are read from OBS's own websocket settings unless the user
 types an override; only a typed password is ever stored (spec 11.1). The hotkey is Windows only
-(spec 16); on Linux the dialog says how to bind the CLI verbs instead.
+(spec 16); on Linux the dialog says how to bind the CLI verbs instead. Each setup wizard step can be
+run again from here (spec 16): the dialog asks with ``setup_step_requested(WizardStep)``, and
+``take_setup`` shows what such a step saved.
 """
 
 import os
@@ -34,6 +36,7 @@ from PyQt6.QtWidgets import (
 )
 
 from anki_miner_game.gui.hotkey_win import HotkeyError, parse_hotkey
+from anki_miner_game.gui.wizard import WizardStep
 from anki_miner_game.interfaces.addons import AddonService
 from anki_miner_game.models.addons import AddonStatus
 from anki_miner_game.models.config import (
@@ -66,6 +69,13 @@ FEED_NOTE: Final = (
     "A page on this machine shows each line as it arrives, for dictionary lookups while playing; "
     "texthooker pages can connect to the WebSocket port."
 )
+SETUP_STEPS: Final = (
+    (WizardStep.OBS, "OBS"),
+    (WizardStep.SOURCES, "Text sources"),
+    (WizardStep.FOLDER, "Output folder"),
+    (WizardStep.ADDONS, "Add-ons"),
+)
+SETUP_NOTE: Final = "Run a step of the setup wizard again."
 LINUX_CONTROL_NOTE: Final = (
     "Linux has no global hotkey. Bind the command anki_miner_game --toggle (or --start, --stop, "
     "--arm <game>) to a key in your desktop's keyboard shortcut settings."
@@ -115,6 +125,8 @@ class SettingsDialog(QDialog):
     """Edit the app's settings (spec 5); emits ``config_saved(AppConfig)`` on Save."""
 
     config_saved = pyqtSignal(object)
+    setup_step_requested = pyqtSignal(object)
+    """A ``WizardStep`` to run again."""
 
     def __init__(
         self,
@@ -137,6 +149,7 @@ class SettingsDialog(QDialog):
         column.addWidget(self._build_subtitles(cfg, vad_addon))
         column.addWidget(self._build_feed(cfg))
         column.addWidget(self._build_control(cfg))
+        column.addWidget(self._build_setup())
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setWidget(content)
@@ -263,6 +276,28 @@ class SettingsDialog(QDialog):
         else:
             form.addRow(_note(LINUX_CONTROL_NOTE))
         return box
+
+    def _build_setup(self) -> QWidget:
+        box = QGroupBox("Setup wizard")
+        row = QHBoxLayout(box)
+        row.addWidget(_note(SETUP_NOTE), 1)
+        self.setup_buttons: dict[WizardStep, QPushButton] = {}
+        for step, label in SETUP_STEPS:
+            button = QPushButton(label)
+            button.clicked.connect(lambda _checked=False, step=step: self.setup_step_requested.emit(step))
+            row.addWidget(button)
+            self.setup_buttons[step] = button
+        return box
+
+    def take_setup(self, cfg: AppConfig) -> None:
+        """A setup step run from here saved ``cfg``: show its output folder and OBS password.
+
+        The other fields keep what the form shows; ``cfg`` becomes the base for the fields the form
+        does not show.
+        """
+        self._cfg = cfg
+        self.output_edit.setText(cfg.output_root)
+        self.password_edit.setText(cfg.obs.password_override or "")
 
     def _add_row(self, source_id: str | None, name: str, uri: str, enabled: bool) -> None:
         row = self.sources_table.rowCount()

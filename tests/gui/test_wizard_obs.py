@@ -454,3 +454,49 @@ async def test_names_that_cannot_be_read_stop_before_anything_changes():
     assert check.status is ObsStatus.FAILED
     assert "odd" in check.text
     assert obs.mutating() == []
+
+
+# The OBS lock shared with arming and the restore (W2b cross review) --------------------------------
+
+
+async def test_step_1_waits_for_the_obs_lock_and_touches_nothing_meanwhile():
+    """An arm or a restore holding the lock switches OBS; step 1 starts once it has ended."""
+    obs = WizardObs()
+    lock = asyncio.Lock()
+    setup, discovery = make_setup(obs, session=FakeSession(), obs_lock=lock)
+    stages: list[str] = []
+    await lock.acquire()
+    task = asyncio.create_task(setup.run(AppConfig(), stages.append))
+    await asyncio.sleep(0.05)
+    assert discovery.calls == [] and obs.calls == []
+    assert stages and "waiting" in stages[0].lower()
+    lock.release()
+    check = await task
+    assert check.status is ObsStatus.READY
+    assert not lock.locked()
+
+
+async def test_a_game_armed_while_step_1_waited_for_the_lock_is_left_alone():
+    obs = WizardObs()
+    lock = asyncio.Lock()
+    session = FakeSession()
+    setup, discovery = make_setup(obs, session=session, obs_lock=lock)
+    await lock.acquire()
+    task = asyncio.create_task(setup.run(AppConfig()))
+    await asyncio.sleep(0.05)
+    session.state = AppState.ARMED
+    lock.release()
+    check = await task
+    assert check.status is ObsStatus.BUSY
+    assert discovery.calls == [] and obs.calls == []
+
+
+async def test_step_1_holds_the_obs_lock_until_it_switched_back():
+    obs = WizardObs()
+    lock = asyncio.Lock()
+    held: list[bool] = []
+    setup, _ = make_setup(obs, obs_lock=lock, after_provisioning=lambda: held.append(lock.locked()))
+    check = await setup.run(AppConfig())
+    assert check.status is ObsStatus.READY
+    assert held == [True]
+    assert not lock.locked()

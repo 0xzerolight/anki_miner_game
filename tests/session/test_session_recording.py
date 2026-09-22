@@ -16,6 +16,7 @@ from anki_miner_game.models.messages import (
     RecordingStarted,
     RecordingStopped,
     SourceStatus,
+    StateChanged,
 )
 from anki_miner_game.models.obs import ObsRequestError, OutputState
 from anki_miner_game.session import session as session_mod
@@ -272,6 +273,29 @@ async def test_auto_start_holds_lines_until_started_and_journals_them_at_zero(h:
     ]
 
 
+async def test_held_lines_are_published_again_with_their_offsets_between_the_state_and_the_start(h: Harness):
+    """The window counts journalled lines from the events; the feed skips this second publication."""
+    await h.arm()
+    await h.line("はじまり", T0 + 0.2)
+    await h.send(CommandKind.START, line=h.accepted()[0].line)
+    await h.line("つづき", T0 + 0.6)
+    held = [event.line for event in h.accepted()]
+    mark = len(h.events)
+    await h.started(ZERO)
+    after = h.events[mark:]
+    recording = after.index(StateChanged(AppState.RECORDING, SLUG))
+    started = next(i for i, event in enumerate(after) if isinstance(event, RecordingStarted))
+    assert after[recording + 1 : started] == [LineAccepted(held[0], 0), LineAccepted(held[1], 0)]
+
+
+async def test_a_start_without_held_lines_publishes_no_line_at_started(h: Harness):
+    await h.arm()
+    await h.send(CommandKind.START)
+    mark = len(h.events)
+    await h.started(ZERO)
+    assert not [event for event in h.events[mark:] if isinstance(event, LineAccepted)]
+
+
 async def test_a_merge_into_a_held_line_replaces_it(rig: Harness):
     rig.profiles[SLUG] = profile(typewriter=True)
     await rig.start()
@@ -446,6 +470,22 @@ async def test_quitting_right_after_a_stop_waits_for_obs_to_say_inactive_then_re
     await h.arm()
     await h.started(ZERO)
     await h.stopped(ZERO + 5.0)
+    h.obs.stale_active_reads = 1
+    await h.stop()
+    assert (h.obs.profile, h.obs.collection) == ("Untitled", "Untitled")
+    assert not restore_path().exists()
+
+
+async def test_quitting_while_idle_runs_a_restore_a_disarm_put_off_once_obs_says_inactive(h: Harness):
+    """A disarm right after ``STOPPED`` meets ``GetRecordStatus`` still saying active and puts the restore
+    off to the idle tick; a quit before that tick restores once the recording reports inactive."""
+    await h.arm()
+    await h.started(ZERO)
+    await h.stopped(ZERO + 5.0)
+    h.obs.stale_active_reads = 1
+    await h.send(CommandKind.DISARM)
+    assert h.actor.state is AppState.IDLE
+    assert restore_path().exists()  # put off: the disarm read the recording as still active
     h.obs.stale_active_reads = 1
     await h.stop()
     assert (h.obs.profile, h.obs.collection) == ("Untitled", "Untitled")
