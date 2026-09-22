@@ -8,7 +8,7 @@ asks it to show its window instead of starting a second one.
 The running instance listens on a ``QLocalServer`` whose name is derived from the app's home folder,
 so two homes (tests, a second user profile) never reach each other, and whose socket only this user
 may open. One message per connection: a JSON object on one line, ``{"verb": "arm", "slug": "..."}``,
-answered with ``ok`` or ``error``.
+answered with ``ok`` or ``error``; the client then closes the connection.
 """
 
 import argparse
@@ -178,5 +178,6 @@ class CliServer(QObject):
             else:
                 self._on_command(command)
             answer = OK
+        # The client closes once it has read this: on Windows a server-side disconnect
+        # (DisconnectNamedPipe) discards an answer the client has not read yet.
         sock.write(answer + b"\n")
-        sock.disconnectFromServer()

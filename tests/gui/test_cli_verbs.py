@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 from PyQt6.QtCore import QDir
+from PyQt6.QtNetwork import QLocalSocket
 
 from anki_miner_game.gui import cli_verbs
 from anki_miner_game.gui.cli_verbs import CliServer, parse_verb, send, server_name
@@ -114,6 +115,19 @@ def test_a_verb_reaches_the_running_instance(qtbot, instance, name):
 def test_a_second_launch_without_a_verb_shows_the_running_window(qtbot, instance, name):
     assert send_from_another_process(qtbot, name, None) is True
     assert (instance.commands, instance.shows) == ([], 1)
+
+
+def test_the_instance_leaves_the_connection_open_for_the_client_to_close(qtbot, instance, name):
+    # On Windows a server-side disconnect discards the answer the client has not read yet.
+    client = QLocalSocket()
+    client.connectToServer(name)
+    assert client.waitForConnected(1000)
+    client.write(cli_verbs.encode(UserCommand(CommandKind.START)))
+    qtbot.waitUntil(client.canReadLine)
+    assert bytes(client.readLine().data()).strip() == cli_verbs.OK
+    qtbot.wait(200)  # time for a server-side close to arrive
+    assert client.state() is QLocalSocket.LocalSocketState.ConnectedState
+    client.abort()
 
 
 def test_nothing_answers_when_no_instance_runs(qapp, name):
