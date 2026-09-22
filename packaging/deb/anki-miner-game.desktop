@@ -2,7 +2,7 @@
 Type=Application
 Name=Anki Miner Game
 Comment=Record a game session with its text as a video and subtitle pair
-Exec=/usr/bin/anki-miner-game
+Exec=/usr/bin/anki_miner_game
 Icon=anki-miner-game
 Categories=Education;Languages;
 Terminal=false

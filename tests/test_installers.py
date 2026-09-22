@@ -12,14 +12,19 @@ import struct
 import subprocess
 import sys
 import tarfile
+import tomllib
 from pathlib import Path
 
 import pytest
+
+from anki_miner_game.gui.settings_dialog import LINUX_CONTROL_NOTE
 
 REPO = Path(__file__).resolve().parent.parent
 PACKAGING = REPO / "packaging"
 APP_NAME = "AnkiMinerGame"  # the bundle folder and executable anki_miner_game.spec builds
 PACKAGE = "anki-miner-game"
+# The command users bind for global control on Linux (spec 16): the pip entry point's name.
+COMMAND = next(iter(tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))["project"]["scripts"]))
 APP_ID = "io.github._0xzerolight.AnkiMinerGame"
 VERSION = "1.2.3"
 
@@ -95,12 +100,12 @@ def test_the_launcher_runs_the_bundle_with_its_arguments_and_exit_code(tmp_path)
 
 @posix_only
 def test_the_launcher_finds_the_bundle_beside_itself_through_a_symlink(tmp_path):
-    """The .deb puts /usr/bin/anki-miner-game -> /opt/anki-miner-game/anki-miner-game-launcher."""
+    """The .deb puts /usr/bin/anki_miner_game -> /opt/anki-miner-game/anki-miner-game-launcher."""
     bundle = fake_bundle(tmp_path)
     launcher = bundle / "anki-miner-game-launcher"
     shutil.copy(LAUNCHER, launcher)
     (tmp_path / "bin").mkdir()
-    link = tmp_path / "bin" / PACKAGE
+    link = tmp_path / "bin" / COMMAND
     link.symlink_to(launcher)
     result = run_launcher(link, "stop")
     assert result.returncode == 7, result.stderr
@@ -156,7 +161,7 @@ def test_the_tarball_holds_the_bundle_the_launcher_and_the_licence_under_one_fol
     assert {name.split("/")[0] for name in members} == {APP_NAME}
     app = members[f"{APP_NAME}/{APP_NAME}"]
     assert app.isfile() and app.mode & 0o111
-    launcher = members[f"{APP_NAME}/{PACKAGE}"]
+    launcher = members[f"{APP_NAME}/{COMMAND}"]
     assert launcher.isfile() and launcher.mode & 0o111
     assert f"{APP_NAME}/LICENSE" in members
     assert all(m.uid == 0 and m.gid == 0 for m in members.values())
@@ -215,7 +220,7 @@ def test_the_appimage_tool_is_pinned_to_a_version_and_a_sha256():
 def test_the_desktop_entries_name_the_installed_icon_and_launcher():
     appimage, deb = (desktop_entry(path) for path in DESKTOP_FILES)
     assert appimage["Icon"] == deb["Icon"] == PACKAGE
-    assert deb["Exec"] == f"/usr/bin/{PACKAGE}"
+    assert deb["Exec"] == f"/usr/bin/{COMMAND}"
     assert appimage["Name"] == deb["Name"] == "Anki Miner Game"
 
 
@@ -284,11 +289,18 @@ def test_the_deb_installs_the_bundle_under_opt_and_the_launcher_on_path():
     by_dst = {entry["dst"]: entry for entry in entries}
     assert by_dst[f"/opt/{PACKAGE}/"] == {"src": f"dist/{APP_NAME}/", "dst": f"/opt/{PACKAGE}/", "type": "tree"}
     assert by_dst[f"/opt/{PACKAGE}/{PACKAGE}-launcher"]["src"] == "packaging/linux-launcher.sh"
-    link = by_dst[f"/usr/bin/{PACKAGE}"]
-    assert link == {"src": f"/opt/{PACKAGE}/{PACKAGE}-launcher", "dst": f"/usr/bin/{PACKAGE}", "type": "symlink"}
+    link = by_dst[f"/usr/bin/{COMMAND}"]
+    assert link == {"src": f"/opt/{PACKAGE}/{PACKAGE}-launcher", "dst": f"/usr/bin/{COMMAND}", "type": "symlink"}
     assert by_dst[f"/usr/share/doc/{PACKAGE}/copyright"]["src"] == "LICENSE"
     assert by_dst[f"/usr/share/metainfo/{APP_ID}.metainfo.xml"]["src"] == f"dist/{PACKAGE}.metainfo.xml"
     assert by_dst[f"/usr/share/applications/{PACKAGE}.desktop"]["src"] == f"packaging/deb/{PACKAGE}.desktop"
+
+
+def test_the_linux_command_is_the_one_the_app_tells_users_to_bind():
+    assert COMMAND == "anki_miner_game"
+    assert f"{COMMAND} --toggle" in LINUX_CONTROL_NOTE
+    spec = REPO / "docs" / "specs" / "2026-09-20-anki-miner-game-design.md"
+    assert f"`{COMMAND} --arm <slug> | --start |" in spec.read_text(encoding="utf-8")
 
 
 def test_every_deb_source_outside_dist_is_in_the_repo():

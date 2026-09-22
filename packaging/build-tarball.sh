@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Pack the Linux PyInstaller bundle as dist/AnkiMinerGame-<version>-Linux-x86_64.tar.gz: one
-# AnkiMinerGame/ folder holding the bundle, the launcher shim as `anki-miner-game` (start the app
-# with it, see packaging/linux-launcher.sh) and the licence.
+# AnkiMinerGame/ folder holding the bundle, the launcher shim as `anki_miner_game` (start the app
+# and send it --toggle / --arm / --start / --stop with it, see packaging/linux-launcher.sh) and the
+# licence.
 #
 # Usage: packaging/build-tarball.sh <version>      (after pyinstaller built dist/AnkiMinerGame/)
 set -euo pipefail
@@ -20,7 +21,7 @@ STAGE="$(mktemp -d)"
 trap 'rm -rf -- "$STAGE"' EXIT
 
 cp -a "$BUNDLE" "$STAGE/AnkiMinerGame"
-install -m 0755 "$REPO_ROOT/packaging/linux-launcher.sh" "$STAGE/AnkiMinerGame/anki-miner-game"
+install -m 0755 "$REPO_ROOT/packaging/linux-launcher.sh" "$STAGE/AnkiMinerGame/anki_miner_game"
 install -m 0644 "$REPO_ROOT/LICENSE" "$STAGE/AnkiMinerGame/LICENSE"
 
 # Root-owned, name-sorted members; mtimes from SOURCE_DATE_EPOCH when set (reproducible builds).

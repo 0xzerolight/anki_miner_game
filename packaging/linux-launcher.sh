@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Launcher shim for the Linux PyInstaller bundle: the AppImage's AppRun, the .deb's
-# /usr/bin/anki-miner-game and the .tar.gz's anki-miner-game all start the app through it.
+# /usr/bin/anki_miner_game and the .tar.gz's anki_miner_game all start the app through it.
 # Ported from Anki Miner packaging/linux-launcher.sh at commit 9959edc9.
 #
 # PyInstaller's bootloader puts the bundle's _internal directory on LD_LIBRARY_PATH, and Qt pulls

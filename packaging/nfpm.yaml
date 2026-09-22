@@ -21,14 +21,15 @@ contents:
     type: tree
 
   # The launcher shim, and the PATH symlink points at it rather than at the binary
-  # (see packaging/linux-launcher.sh).
+  # (see packaging/linux-launcher.sh). The command is anki_miner_game, the name spec 16 and the
+  # settings dialog tell users to bind for --toggle / --arm / --start / --stop.
   - src: packaging/linux-launcher.sh
     dst: /opt/anki-miner-game/anki-miner-game-launcher
     file_info:
       mode: 0755
 
   - src: /opt/anki-miner-game/anki-miner-game-launcher
-    dst: /usr/bin/anki-miner-game
+    dst: /usr/bin/anki_miner_game
     type: symlink
 
   # Debian Policy 12.5: the verbatim licence at /usr/share/doc/<package>/copyright.
