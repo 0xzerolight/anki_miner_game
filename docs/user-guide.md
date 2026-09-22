@@ -116,18 +116,29 @@ The tray menu has **Arm**, **Start**, **Open text feed**, **Show window** and
 
 - Windows: a global hotkey starts and stops while armed, `Ctrl+Shift+F9` by default
   (**Hotkey (Start/Stop while armed)** in **Settings…**).
-- Linux has no global hotkey. Bind one of these commands to a key in your desktop's keyboard
-  shortcut settings; this also works on Wayland:
+- Linux has no global hotkey. In your desktop's keyboard shortcut settings, bind the app's command
+  followed by `--toggle`, `--start`, `--stop` or `--arm <game>`; this also works on Wayland. The
+  command depends on the download:
+  - `.deb`: `anki_miner_game`.
+  - `.AppImage`: the full path of the `.AppImage` file.
+  - `.tar.gz`: the full path of `AnkiMinerGame/anki_miner_game` in the folder you extracted it to.
+
+  For example:
 
   ```
   anki_miner_game --toggle
-  anki_miner_game --start
-  anki_miner_game --stop
-  anki_miner_game --arm <game>
+  /home/you/Applications/AnkiMinerGame-<version>-Linux-x86_64.AppImage --toggle
+  /home/you/Apps/AnkiMinerGame/anki_miner_game --toggle
   ```
 
   `<game>` is the game's slug, the file name of its profile in `~/.anki_miner_game/games/` without
-  `.json`. The same commands work on Windows.
+  `.json`.
+- Windows takes the same verbs after the full path of `AnkiMinerGame.exe`, for a shortcut or a
+  script. With the default install folder:
+
+  ```
+  "%LOCALAPPDATA%\Programs\AnkiMinerGame\AnkiMinerGame.exe" --toggle
+  ```
 
 **Recent sessions** lists the latest sessions with their duration, cue count and VAD state. Each
 row has **Open folder**. With the VAD add-on installed, a row with a subtitle also offers

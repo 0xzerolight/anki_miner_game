@@ -296,9 +296,14 @@ def test_the_deb_installs_the_bundle_under_opt_and_the_launcher_on_path():
     assert by_dst[f"/usr/share/applications/{PACKAGE}.desktop"]["src"] == f"packaging/deb/{PACKAGE}.desktop"
 
 
-def test_the_linux_command_is_the_one_the_app_tells_users_to_bind():
+def test_the_app_names_the_command_of_every_linux_package():
+    # Only the .deb puts the command on PATH; the AppImage is its own file, and the tarball's
+    # launcher sits in the extracted folder (the layout the tarball test above pins).
     assert COMMAND == "anki_miner_game"
-    assert f"{COMMAND} --toggle" in LINUX_CONTROL_NOTE
+    assert f"{COMMAND} for the .deb" in LINUX_CONTROL_NOTE
+    assert "the full path of the .AppImage file" in LINUX_CONTROL_NOTE
+    assert f"the full path of {APP_NAME}/{COMMAND}" in LINUX_CONTROL_NOTE
+    assert "--toggle" in LINUX_CONTROL_NOTE
     spec = REPO / "docs" / "specs" / "2026-09-20-anki-miner-game-design.md"
     assert f"`{COMMAND} --arm <slug> | --start |" in spec.read_text(encoding="utf-8")
 

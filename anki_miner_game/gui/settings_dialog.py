@@ -77,9 +77,12 @@ SETUP_STEPS: Final = (
 )
 SETUP_NOTE: Final = "Run a step of the setup wizard again."
 LINUX_CONTROL_NOTE: Final = (
-    "Linux has no global hotkey. Bind the command anki_miner_game --toggle (or --start, --stop, "
-    "--arm <game>) to a key in your desktop's keyboard shortcut settings."
+    "Linux has no global hotkey. In your desktop's keyboard shortcut settings, bind the app's command "
+    "followed by --toggle (or --start, --stop, --arm <game>). The command is anki_miner_game for the "
+    ".deb, the full path of the .AppImage file for the AppImage, and, for the .tar.gz, the full path "
+    "of AnkiMinerGame/anki_miner_game in the folder you extracted it to."
 )
+"""Only the .deb puts ``anki_miner_game`` on PATH (packaging/nfpm.yaml)."""
 
 _VAD_STATUS_TEXT: Final = {
     AddonStatus.READY: "VAD add-on installed.",
