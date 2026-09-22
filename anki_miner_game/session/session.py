@@ -16,7 +16,10 @@ Rules this module keeps (wave-1 amendments 3 and 8, wave 2a contracts, M0 findin
   journal's last ``LineRecord``; otherwise as a ``LineRecord`` at ``clock.offset_ms(line.t_mono)``.
 - A ``START`` carrying ``UserCommand.line`` (auto mode) holds that line and every line accepted
   until ``STARTED``; on ``STARTED`` they are journalled in order (the clamp puts every line from
-  before the zero at offset 0) with no pipeline reset. A failed start drops them.
+  before the zero at offset 0) with no pipeline reset. A failed start drops them. They went out as
+  ``LineAccepted`` without an offset when accepted, so each is published once more with its offset,
+  between ``StateChanged(RECORDING)`` and ``RecordingStarted``: the window counts the journalled
+  lines from these events, and the text feed does not send them a second time.
 - Finalise runs on ``FinaliseWorker``, one call at a time, never on the default executor pool.
 - Text sources' ``start``/``stop``/``wait_closed`` run on the actor's thread; their status listener
   runs on the source's thread and is handed to the loop with ``call_soon_threadsafe``.
@@ -1252,13 +1255,17 @@ class SessionActor:
             files.manifest, manifest, files, journal, clock, next_sample=ev.t_mono + DRIFT_SAMPLE_AFTER_S
         )
         self._clear(START_FAILED_BANNER_KEY, BannerKey.FOREIGN_RECORDING, BannerKey.SESSION_FILES)
+        journalled: list[LineAccepted] = []
         if held:
             for line in held:
-                self._journal_line(s, line)
+                if (offset := self._journal_line(s, line)) is not None:
+                    journalled.append(LineAccepted(line, offset))
         else:
             self._counts = Counts()
             self._pipeline.reset()
         self._set_state(AppState.RECORDING)
+        for event in journalled:  # shown when accepted; now with their offsets (module docstring)
+            self._publish(event)
         self._publish(RecordingStarted(files.video.stem))
         if not any(status in _LIVE for status in self._source_status.values()):
             self._banner(

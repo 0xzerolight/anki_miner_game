@@ -42,11 +42,13 @@ from anki_miner_game.interfaces.text_source import TextSource
 from anki_miner_game.lifecycle.auto import AutoMode
 from anki_miner_game.models.config import AppConfig
 from anki_miner_game.models.messages import (
+    AppState,
     Banner,
     BannerCleared,
     BannerLevel,
     BannerRaised,
     LineAccepted,
+    RecordingStarted,
     SessionEvent,
     SessionFinalised,
     SourceStatusChanged,
@@ -168,6 +170,8 @@ class App(QObject):
         self._feed: FeedServer | None = None
         self._stopping: concurrent.futures.Future[None] | None = None
         self._closed = False
+        self._journalling_held = False
+        """Between ``StateChanged(RECORDING)`` and ``RecordingStarted``; read and written on the loop."""
 
     @property
     def config(self) -> AppConfig:
@@ -198,7 +202,13 @@ class App(QObject):
         actor = self._io.submit(self._build()).result()
         games = sorted(((slug, p.title) for slug, p in self._profiles.items()), key=lambda game: game[1].casefold())
         self._window = MainWindow(
-            actor, self.presenter.signals, games, on_quit=self.request_quit, selected=self._config.last_game
+            actor,
+            self.presenter.signals,
+            games,
+            on_quit=self.request_quit,
+            selected=self._config.last_game,
+            text_sources=[(source.id, source.name) for source in self._config.text_sources if source.enabled],
+            output_root=lambda: paths.output_root(self._config),
         )
         for banner in banners:
             self.presenter.banner(banner)
@@ -299,8 +309,16 @@ class App(QObject):
         self.presenter.banner(Banner(FEED_BANNER_KEY, BannerLevel.WARNING, text))
 
     def _broadcast(self, event: SessionEvent) -> None:
-        """On the loop: every accepted line, a typewriter merge's longer text too, goes to the feed."""
-        if isinstance(event, LineAccepted) and self._feed is not None:
+        """On the loop: every accepted line, a typewriter merge's longer text too, goes to the feed once.
+
+        Lines held for an auto start come again with their offsets between ``StateChanged(RECORDING)``
+        and ``RecordingStarted`` (``session.session`` docstring); the feed sent them when accepted.
+        """
+        if isinstance(event, StateChanged):
+            self._journalling_held = event.state is AppState.RECORDING
+        elif isinstance(event, RecordingStarted):
+            self._journalling_held = False
+        elif isinstance(event, LineAccepted) and self._feed is not None and not self._journalling_held:
             self._feed.broadcast(event.line.text)
 
     def _show_window(self) -> None:
