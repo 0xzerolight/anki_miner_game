@@ -67,13 +67,15 @@ class Rig:
         self.discovery = FakeDiscovery()
         self.provisioner = FakeProvisioner(self.gateway)
         self.sources = [Source()]
+        self.profile = PROFILE
+        """The one game profile saved before the app starts."""
         self.events: list[tuple[str, tuple[Any, ...]]] = []
         self.app: App | None = None
 
     def start(self, *, name: str | None = None, write_config: bool = True) -> App:
         if write_config:
             store.save_config(self.cfg)
-        store.save_profile(PROFILE)
+        store.save_profile(self.profile)
         services = ObsServices(self.discovery, self.gateway, self.provisioner)
         app = App(obs=lambda _config: services, source_factory=lambda _cfg, _game: self.sources, server_name=name)
         signals = app.presenter.signals

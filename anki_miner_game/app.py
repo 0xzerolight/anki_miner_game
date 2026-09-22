@@ -12,7 +12,7 @@ finalises orphans once reconcile allows it (``SessionActor._launch``), on the on
 defaults when there is none; one that cannot be read is left alone and the defaults run with a
 banner. A feed port in use turns the feed off for the run with a banner (spec 17).
 
-Quit (``request_quit`` from the window, or ``close`` after the Qt loop ends): auto mode stops, the
+Quit (``request_quit`` from the window, or ``close`` after the Qt loop ends): the
 actor shuts down (a recording is stopped and finalised, OBS restored, and every started text source
 stopped with its ``wait_closed`` awaited), then the finalise worker, the OBS connection and the
 feed stop, and only then the I/O loop.
@@ -364,12 +364,14 @@ class App(QObject):
         if running is None:
             return
         actor_task, auto_task = running.tasks or (None, None)
+        if actor_task is not None and not actor_task.done():
+            # Before auto mode: cancelling its window poll mid-request drops the OBS link (T12), and
+            # the session could then neither stop the recording nor restore OBS.
+            await _step("the session", running.actor.shutdown())
+            await asyncio.gather(actor_task, return_exceptions=True)
         if auto_task is not None:
             auto_task.cancel()
             await asyncio.gather(auto_task, return_exceptions=True)
-        if actor_task is not None and not actor_task.done():
-            await _step("the session", running.actor.shutdown())
-            await asyncio.gather(actor_task, return_exceptions=True)
         await _step("the finalise worker", asyncio.to_thread(running.finaliser.shutdown))
         await _step("the OBS connection", running.services.gateway.close())
         feed, self._feed = self._feed, None

@@ -20,6 +20,7 @@ from anki_miner_game import paths, store
 from anki_miner_game.app import App, ObsServices, forward, hook_sources
 from anki_miner_game.feed import FeedServer, http_server
 from anki_miner_game.gui.cli_verbs import send, server_name
+from anki_miner_game.lifecycle import auto as auto_mod
 from anki_miner_game.models.config import AppConfig, FeedSettings, TextSourceConfig
 from anki_miner_game.models.constants import OBS_COLLECTION_NAME, OBS_PROFILE_NAME
 from anki_miner_game.models.lines import GameLine
@@ -47,8 +48,8 @@ from anki_miner_game.models.messages import (
     StateChanged,
     UserCommand,
 )
-from anki_miner_game.models.obs import OutputState
-from anki_miner_game.models.profile import GameProfile, TextMode
+from anki_miner_game.models.obs import ObsEventName, OutputState
+from anki_miner_game.models.profile import AutoSettings, CaptureSettings, GameProfile, TextMode
 from anki_miner_game.obs.client import ObsClient
 from anki_miner_game.obs.discovery import LocalObsDiscovery
 from anki_miner_game.obs.provision import ObsProvisioner
@@ -61,6 +62,7 @@ from tests.app_rig import SLUG, TITLE, WAIT_MS, Rig
 from tests.fakes.fake_obs_server import FakeObsServer
 from tests.gui.session_fakes import TITLE as SESSION_TITLE
 from tests.gui.session_fakes import manifest, place
+from tests.session.actor_harness import FakeProvisioner
 
 
 @pytest.fixture
@@ -253,6 +255,42 @@ def test_quit_disarms_and_waits_for_every_source_to_close_before_the_loop_stops(
     rig.close()
     assert rig.sources[0].stopped and rig.sources[0].closed_while_the_loop_ran
     assert rig.obs.profile == "Untitled"  # disarm restored the user's OBS
+    assert not restore_path().exists()
+
+
+def test_a_quit_during_auto_modes_window_poll_still_stops_the_recording_and_restores_obs(rig, monkeypatch):
+    """Cancelling auto mode mid-request drops the OBS link (T12), so the session is shut down first."""
+    monkeypatch.setattr(auto_mod, "POLL_S", 0.02)
+    polling = threading.Event()
+
+    class PollOnTheWire(FakeProvisioner):
+        async def list_windows(self) -> list[Any]:
+            polling.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:  # a request cancelled on the wire drops the link
+                self.gateway.connected = False
+                self.gateway.emit(ObsEventName.CONNECTION_LOST)
+                raise
+            return []
+
+    rig.provisioner = PollOnTheWire(rig.gateway)
+    rig.profile = replace(
+        rig.profile, capture=CaptureSettings(window="4194311\r\nGame\r\ngame"), auto=AutoSettings(enabled=True)
+    )
+    rig.start()
+    rig.arm()
+    video = rig.output_root / "_incoming" / "2026-10-02 18-04-11.mkv"
+    video.parent.mkdir(parents=True, exist_ok=True)
+    video.write_bytes(b"\x1a\x45\xdf\xa3 not really matroska")
+    rig.obs.record_active, rig.obs.output_path = True, str(video)
+    rig.obs.stops_on_request = True
+    rig.gateway.record_event(OutputState.STARTED, str(video))
+    rig.wait(lambda: rig.state() is AppState.RECORDING)
+    rig.wait(polling.is_set)
+    rig.close()
+    assert "StopRecord" in rig.gateway.names()
+    assert (rig.obs.profile, rig.obs.collection) == ("Untitled", "Untitled")
     assert not restore_path().exists()
 
 
