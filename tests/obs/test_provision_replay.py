@@ -37,6 +37,7 @@ answer (``CreateProfile``) has landed in the fake before the next request, as it
 
 import asyncio
 import json
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -264,6 +265,7 @@ APP_PROFILE = GameProfile(
     slug="e1-provision", title="Provision Probe", capture=CaptureSettings(kind=CaptureKind.XCOMPOSITE)
 )
 """The game profile the recorded arms used: an X11 capture with no window pinned."""
+LINUX_RUN = pytest.mark.skipif(sys.platform == "win32", reason="replays a Linux OBS run: POSIX record directory")
 TO_OBS, FROM_OBS = "client->obs", "obs->client"
 NOT_READY = 207
 
@@ -375,6 +377,7 @@ def test_the_app_transcript_holds_three_arms():
 
 
 @pytest.mark.parametrize("arm", [0, 1, 2])
+@LINUX_RUN
 async def test_the_provisioner_sends_exactly_what_the_app_sent_to_a_real_obs(arm):
     gateway, _ = await provision_arm(load(APP_PROVISION), arm)
 
@@ -383,6 +386,7 @@ async def test_the_provisioner_sends_exactly_what_the_app_sent_to_a_real_obs(arm
     assert gateway.next_request() in {"GetVersion", "GetStreamStatus"}
 
 
+@LINUX_RUN
 async def test_the_first_arm_copies_the_audio_rate_and_reactivates_the_profile():
     gateway, results = await provision_arm(load(APP_PROVISION), 0)
 
@@ -399,6 +403,7 @@ async def test_the_first_arm_copies_the_audio_rate_and_reactivates_the_profile()
     assert ("SetCurrentProgramScene", {"sceneName": OBS_SCENE_NAME}) in gateway.sent
 
 
+@LINUX_RUN
 async def test_the_second_arm_only_removes_and_recreates_the_replaced_input():
     gateway, results = await provision_arm(load(APP_PROVISION), 1)
 
@@ -408,6 +413,7 @@ async def test_the_second_arm_only_removes_and_recreates_the_replaced_input():
     assert results == [ProvisionResult(changed=False, needs_restart=False), ProvisionResult(True, False)]
 
 
+@LINUX_RUN
 async def test_the_third_arm_only_mutes_the_special_input():
     gateway, results = await provision_arm(load(APP_PROVISION), 2)
 

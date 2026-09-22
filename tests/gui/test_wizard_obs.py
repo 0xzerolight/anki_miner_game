@@ -7,6 +7,7 @@ back is checked against the provisioner's own switching.
 
 import asyncio
 from collections.abc import Callable
+from pathlib import Path
 
 import pytest
 
@@ -19,7 +20,7 @@ from anki_miner_game.gui.wizard import (
     obs_changes_text,
 )
 from anki_miner_game.models.config import AppConfig, RecordingSettings
-from anki_miner_game.models.constants import OBS_COLLECTION_NAME, OBS_PROFILE_NAME
+from anki_miner_game.models.constants import INCOMING_DIRNAME, OBS_COLLECTION_NAME, OBS_PROFILE_NAME
 from anki_miner_game.models.messages import AppState
 from anki_miner_game.models.obs import (
     ObsAuthError,
@@ -239,7 +240,7 @@ async def test_provisions_from_the_users_profile_and_switches_both_back():
     assert check.notes == ()
     # Provisioned: the app's profile and collection exist with their settings.
     assert APP in obs.profiles and OBS_COLLECTION_NAME in obs.collections
-    assert obs.record_dirs[APP] == "/games/_incoming"
+    assert obs.record_dirs[APP] == str(Path("/games") / INCOMING_DIRNAME)
     assert obs.profiles[APP][("SimpleOutput", "RecFormat2")] == "mkv"
     assert "Game" in obs.collections[OBS_COLLECTION_NAME].scenes
     # Back on the user's profile and collection; no restart question on the way (audio copied).
@@ -429,7 +430,7 @@ async def test_stages_are_reported_while_it_runs():
 def test_the_changes_text_names_every_change_including_the_auto_configuration_offer():
     text = obs_changes_text(AppConfig(output_root="/games", recording=RecordingSettings(max_height=720, fps=30)))
     assert f'"{OBS_PROFILE_NAME}"' in text and f'"{OBS_COLLECTION_NAME}"' in text
-    assert "_incoming" in text and "/games" in text
+    assert str(Path("/games") / INCOMING_DIRNAME) in text
     assert "720" in text and "30 fps" in text and ".mkv" in text
     assert "websocket server" in text
     assert "auto-configuration wizard" in text  # R2 item 14: CreateProfile sets ConfigOnNewProfile=false
