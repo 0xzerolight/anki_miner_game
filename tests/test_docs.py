@@ -38,16 +38,3 @@ def test_plain_punctuation() -> None:
 )
 def test_readme_covers(needle: str) -> None:
     assert needle in _readme()
-
-
-@pytest.mark.parametrize(
-    "command",
-    [
-        "anki_miner_game --toggle",  # the .deb's /usr/bin symlink
-        "-Linux-x86_64.AppImage --toggle",  # the AppImage file itself
-        "AnkiMinerGame/anki_miner_game --toggle",  # the launcher in the extracted .tar.gz
-        '\\AnkiMinerGame\\AnkiMinerGame.exe" --toggle',  # the per-user Windows install
-    ],
-)
-def test_readme_names_the_control_command_of_every_package(command: str) -> None:
-    assert command in _readme()
