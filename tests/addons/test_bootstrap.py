@@ -10,6 +10,7 @@ import io
 import os
 import platform
 import re
+import ssl
 import subprocess
 import sys
 import tarfile
@@ -23,6 +24,7 @@ import pytest
 
 from anki_miner_game.addons import bootstrap
 from anki_miner_game.addons.bootstrap import BootstrapError, Reply, UvPin, ensure_uv
+from tests.fakes import os_verifier
 
 RELEASE = "https://github.com/astral-sh/uv/releases/download/0.0.0"
 ASSET_HOST_URL = "https://release-assets.githubusercontent.com/github-production-release-asset/1/abc?sig=x"
@@ -560,6 +562,21 @@ def test_urllib_transport_streams_the_body(local_server):
 def test_urllib_transport_returns_error_statuses(local_server):
     with bootstrap.urllib_transport(f"{local_server}/missing") as reply:
         assert reply.status == 404
+
+
+def test_urllib_transport_checks_certificates_with_the_os_verifier(local_server, monkeypatch):
+    """A new Windows PC lacks the root github.com chains to until Windows' own chain check fetches it."""
+    made = os_verifier.install(monkeypatch)
+    https = local_server.replace("http://", "https://", 1)
+
+    with pytest.raises(os_verifier.HandshakeStoppedError), bootstrap.urllib_transport(f"{https}/file"):
+        pass
+
+    [context] = made
+    assert context.protocol == ssl.PROTOCOL_TLS_CLIENT
+    assert context.verify_mode == ssl.CERT_REQUIRED
+    assert context.check_hostname
+    assert context.server_hostname == "127.0.0.1"
 
 
 # --- uv environment for the add-ons -----------------------------------------

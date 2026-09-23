@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+### Fixed
+
+- **Add-on installs work on a new Windows PC.** The uv and voice-model downloads, and the bundle's HTTPS self-check, now check certificates through the OS verifier (`truststore`); on Windows that is the chain check browsers use, which fetches a trusted root the machine does not hold yet from Windows Update. A fresh Windows 11 root store lacks Sectigo Public Server Authentication Root E46, the root github.com chains to, and Python's own check only reads the store, so the VAD and OCR installs failed with `CERTIFICATE_VERIFY_FAILED` until some other program had made Windows fetch that root.
+
 ## [1.0.0] - 2026-09-22
 
 First release. Records a video-game session through OBS as the `.mkv` + `.srt` pair Anki Miner mines like an anime episode, on Windows and Linux. Lines come from a websocket text hooker, the clipboard or the OCR add-on, and the voice detection add-on trims each line to where the voice stops.

@@ -36,6 +36,7 @@ from anki_miner_game.runtime.bundle_smoke import (
     check_https,
     requested,
 )
+from tests.fakes import os_verifier
 
 REPO = Path(__file__).resolve().parents[2]
 RUN_TIMEOUT_S = 60
@@ -165,6 +166,26 @@ def test_the_https_check_uses_the_bootstraps_transport_by_default(monkeypatch):
     monkeypatch.setattr(bootstrap, "urllib_transport", transport_answering(302, seen))
     check_https()
     assert seen == [HTTPS_URL]
+
+
+def test_the_https_check_verifies_with_the_os_verifier(monkeypatch):
+    """What the self-check verifies is what a new PC's add-on install needs: Windows' own chain check."""
+    for var in ("https_proxy", "HTTPS_PROXY", "all_proxy", "ALL_PROXY"):
+        monkeypatch.delenv(var, raising=False)
+    made = os_verifier.install(monkeypatch)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _WrongPage)  # plain HTTP: a real handshake fails fast
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with pytest.raises(os_verifier.HandshakeStoppedError):
+            check_https(url=f"https://127.0.0.1:{server.server_address[1]}/")
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+    [context] = made
+    assert context.verify_mode == ssl.CERT_REQUIRED
+    assert context.server_hostname == "127.0.0.1"
 
 
 # --- one run ------------------------------------------------------------------------------------

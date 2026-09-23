@@ -4,10 +4,12 @@ With ``ANKI_MINER_GAME_SMOKE=1`` the app starts as usual (offscreen, in the isol
 sets up) and, once started, checks from inside the bundle what only the frozen build can show:
 onnxruntime, numpy, PyAV and owocr cannot be imported (the spec ``excludes`` them); the text feed
 it started serves ``page.html`` with the websocket port written in; and one real HTTPS GET through
-the add-on bootstrap's transport verifies a certificate with the bundle's OpenSSL (the frozen Linux
-build may need ``runtime.ca_bundle``). Each result goes to the log, and to stdout when there is
-one, as a ``BUNDLED_SMOKE_PASS`` or ``BUNDLED_SMOKE_FAIL`` line; then the app quits, and the launch
-exits 1 when anything failed. The script checks ``config.json``, the log and the markers.
+the add-on bootstrap's transport verifies a certificate the way an add-on download does: through
+the OS verifier (``truststore``), which on Linux is the bundle's OpenSSL with the system CA
+certificates (the frozen Linux build may need ``runtime.ca_bundle``). Each result goes to the log,
+and to stdout when there is one, as a ``BUNDLED_SMOKE_PASS`` or ``BUNDLED_SMOKE_FAIL`` line; then
+the app quits, and the launch exits 1 when anything failed. The script checks ``config.json``, the
+log and the markers.
 """
 
 import http.client

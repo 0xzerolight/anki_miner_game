@@ -21,6 +21,7 @@ import contextlib
 import hashlib
 import os
 import platform
+import ssl
 import subprocess
 import sys
 import tarfile
@@ -35,6 +36,8 @@ from http.client import HTTPException
 from pathlib import Path, PurePosixPath
 from typing import IO, Final, Literal
 from urllib.parse import urljoin, urlsplit
+
+import truststore
 
 from anki_miner_game.interfaces.addons import ProgressCallback
 
@@ -130,8 +133,16 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 @contextlib.contextmanager
 def urllib_transport(url: str) -> Iterator[Reply]:
-    """The real transport: stdlib ``urllib``, TLS verified, system proxies honoured."""
-    opener = urllib.request.build_opener(_NoRedirect)
+    """The real transport: stdlib ``urllib``, TLS verified by the OS, system proxies honoured.
+
+    ``truststore`` hands the certificate check to the OS. On Windows that is the chain check a
+    browser uses, which fetches a trusted root the machine does not hold yet from Windows Update:
+    a new PC lacks the one github.com chains to until something asks for it, and Python's own
+    check only reads the store. On Linux it is OpenSSL with the system CA certificates
+    (``runtime.ca_bundle``).
+    """
+    tls = urllib.request.HTTPSHandler(context=truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT))
+    opener = urllib.request.build_opener(_NoRedirect, tls)
     try:
         response = opener.open(url, timeout=TIMEOUT_S)
     except urllib.error.HTTPError as err:  # every non-2xx status, unfollowed redirects included

@@ -29,6 +29,7 @@ dependencies = [
     "PyQt6>=6.11.0",
     "obsws-python>=1.8.0",
     "websockets>=17.1",
+    "truststore>=0.10.4",
 ]
 
 [project.optional-dependencies]

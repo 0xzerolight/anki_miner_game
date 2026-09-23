@@ -22,9 +22,9 @@ DATA_FILES = [
     "anki_miner_game/vad/worker/vad_worker.py",
 ]
 
-# The frozen app carries PyQt6, obsws-python and websockets and nothing else (spec 4.3). The VAD
-# and OCR add-ons install these into environments of their own; excluding them makes their absence
-# a guarantee, and scripts/bundle_smoke.sh asserts it (runtime/bundle_smoke.py ABSENT_MODULES).
+# The frozen app carries PyQt6, obsws-python, websockets and truststore and nothing else (spec 4.3).
+# The VAD and OCR add-ons install these into environments of their own; excluding them makes their
+# absence a guarantee, and scripts/bundle_smoke.sh asserts it (runtime/bundle_smoke.py ABSENT_MODULES).
 EXCLUDES = ["onnxruntime", "numpy", "av", "owocr"]
 
 # obsws-python imports tomli only where the stdlib has no tomllib (Python < 3.11), but PyInstaller
