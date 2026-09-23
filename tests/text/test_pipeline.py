@@ -139,8 +139,18 @@ def test_step4_strips_colon_prefixed_speaker_before_kagi_quote():
     )
 
 
-def test_step4_strips_fullwidth_colon_prefixed_speaker():
-    assert _text(_pipe().process(_msg("太郎：「はい」"))) == "「はい」"
+def test_step4_fullwidth_colon_prefixed_speaker_is_kept():
+    # Agent emits an ASCII colon and one ASCII space; a full-width colon is Japanese prose
+    # punctuation (narration, a label), never Agent's speaker prefix.
+    assert _text(_pipe().process(_msg("太郎：「はい」"))) == "太郎：「はい」"
+
+
+def test_step4_fullwidth_colon_narration_before_quote_is_kept():
+    assert _text(_pipe().process(_msg("太郎はこう言った：「行くぞ」"))) == "太郎はこう言った：「行くぞ」"
+
+
+def test_step4_fullwidth_colon_label_before_quote_is_kept():
+    assert _text(_pipe().process(_msg("警告：「セーブを忘れずに」"))) == "警告：「セーブを忘れずに」"
 
 
 def test_step4_strips_colon_prefixed_speaker_before_double_bracket_quote():

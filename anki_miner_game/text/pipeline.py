@@ -35,10 +35,14 @@ _SPEAKER_NAME_MAX = 16
 # (no bracket follows the colon) or "A: B" (no bracket at all) can never match up to that point.
 _SPEAKER_NAME_CHARS = r"[^\s:：【】「」『』()（）\"]"
 
+# Agent's libPCMAGES writes exactly "<name>: " (ASCII colon, one ASCII space) before the quote.
+# A full-width "：" is ordinary Japanese punctuation used in narration and labels
+# ("太郎はこう言った：「行くぞ」", "警告：「セーブを忘れずに」"), never Agent's own prefix, so
+# only the ASCII form is stripped.
 _SPEAKER = re.compile(
     r"^(?:"
     r"【[^】]*】\s*"  # 【name】 group (LunaTranslator and similar)
-    rf"|{_SPEAKER_NAME_CHARS}{{1,{_SPEAKER_NAME_MAX}}}[:：]\s*(?=[「『（\"])"  # name: (Agent and similar)
+    rf"|{_SPEAKER_NAME_CHARS}{{1,{_SPEAKER_NAME_MAX}}}: (?=[「『（\"])"  # "name: " (Agent)
     r")"
 )
 
@@ -51,9 +55,11 @@ def _normalise(raw: str, *, speaker_strip: bool) -> str:
     or the feed.
 
     The speaker strip covers two prefix shapes: a bracketed ``【name】`` group (LunaTranslator), and
-    a bare ``name:``/``name：`` prefix (Agent's STEINS;GATE script) that is only removed when it is
-    immediately followed by an opening quote bracket, so a real line containing a colon (``注意：
-    これは…``, ``A: B``) is left untouched.
+    a bare ``name: `` prefix with an ASCII colon and one ASCII space (Agent's STEINS;GATE script)
+    that is only removed when it is immediately followed by an opening quote bracket. A full-width
+    colon is Japanese punctuation, not Agent's prefix, so it is always left untouched (``注意：これ
+    は…``, ``太郎はこう言った：「行くぞ」``), as is any colon with nothing that looks like an
+    opening quote right after it (``A: B``).
     """
     text = unicodedata.normalize("NFC", raw)
     text = "".join(ch for ch in text if ch == "\n" or unicodedata.category(ch) not in ("Cc", "Cf", "Cs"))
