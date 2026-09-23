@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-Record a video-game session through OBS and mine it in <a href="https://github.com/0xzerolight/anki_miner">Anki Miner</a> like an anime episode.
+Record a video-game session through OBS and mine it in <a href="https://github.com/0xzerolight/anki_miner">Anki Miner</a>.
 </p>
 
 <p align="center">
