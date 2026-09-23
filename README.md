@@ -24,7 +24,7 @@ Please leave a ⭐ star if Anki Miner Game helped you - it helps others find it 
 
 - **Windows 10 or 11**, or **Linux**. macOS is not supported.
 - **OBS Studio 30.0 or newer** ([download](https://obsproject.com/download)). On Linux the Flathub build works too.
-- A **text hooker** with a websocket server (Textractor, Agent, LunaTranslator), the clipboard, or the OCR add-on for games no hooker can read.
+- A **text hooker**: Textractor with a websocket extension on port 6677, Agent with its websocket server on, or LunaTranslator with its network service on. Or the clipboard, or the OCR add-on for games no hooker can read.
 - **[Anki Miner](https://github.com/0xzerolight/anki_miner)**, to turn sessions into cards.
 
 Grab the download for your platform from the [latest release](https://github.com/0xzerolight/anki_miner_game/releases/latest):

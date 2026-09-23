@@ -34,6 +34,9 @@ def test_plain_punctuation() -> None:
         "Textractor",
         "Agent",
         "LunaTranslator",
+        "websocket extension on port 6677",  # what to turn on in each hooker (spec M5 quick start)
+        "websocket server on",
+        "network service on",
     ],
 )
 def test_readme_covers(needle: str) -> None:
