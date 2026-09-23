@@ -28,9 +28,6 @@ def test_plain_punctuation() -> None:
         "pkill",  # ending an owocr left running by a crash on Linux
         "Video -> Single",  # Anki Miner hand-off (Appendix C)
         "Video -> Batch",
-        "Audio Padding",  # Anki Miner settings (Appendix A)
-        "Screenshot Offset",
-        "Deduplicate by Sentence",
         "Textractor",
         "Agent",
         "LunaTranslator",
