@@ -76,12 +76,6 @@ For full development setup, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 </details>
 
-## Recommended Anki Miner Settings
-
-- Settings -> Card Media -> Audio Padding: 0.3 seconds. The app's **Gap before the next cue** assumes it; raise both together.
-- Settings -> Card Media -> Screenshot Offset: 1.0 seconds.
-- Settings -> Filtering -> Deduplicate by Sentence: on, since games repeat lines.
-
 <details>
 <summary><strong>OCR add-on notes</strong></summary>
 
