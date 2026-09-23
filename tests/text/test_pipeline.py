@@ -128,6 +128,60 @@ def test_step4_disabled_keeps_group():
     assert _text(_pipe(speaker_strip=False).process(_msg("【太郎】はい"))) == "【太郎】はい"
 
 
+# --- step 4: colon-prefixed speaker (Agent hooker form) ---------------------
+
+
+def test_step4_strips_colon_prefixed_speaker_before_kagi_quote():
+    raw = "倫太郎: 「ああ、ドクター中鉢は抜け駆けをした。たっぷりとその考えについて聞かせてもらうつもりさ」"
+    assert (
+        _text(_pipe().process(_msg(raw)))
+        == "「ああ、ドクター中鉢は抜け駆けをした。たっぷりとその考えについて聞かせてもらうつもりさ」"
+    )
+
+
+def test_step4_strips_fullwidth_colon_prefixed_speaker():
+    assert _text(_pipe().process(_msg("太郎：「はい」"))) == "「はい」"
+
+
+def test_step4_strips_colon_prefixed_speaker_before_double_bracket_quote():
+    assert _text(_pipe().process(_msg("太郎: 『はい』"))) == "『はい』"
+
+
+def test_step4_strips_colon_prefixed_speaker_before_fullwidth_paren():
+    assert _text(_pipe().process(_msg("太郎: （はい）"))) == "（はい）"
+
+
+def test_step4_strips_colon_prefixed_speaker_before_double_quote():
+    assert _text(_pipe().process(_msg('太郎: "はい"'))) == '"はい"'
+
+
+def test_step4_bracket_group_form_still_stripped_alongside_colon_form():
+    assert _text(_pipe().process(_msg("【太郎】「行こう」"))) == "「行こう」"
+
+
+def test_step4_colon_line_without_following_quote_is_kept():
+    assert _text(_pipe().process(_msg("注意：これは危険だ"))) == "注意：これは危険だ"
+
+
+def test_step4_ascii_colon_without_following_quote_is_kept():
+    assert _text(_pipe().process(_msg("A: B"))) == "A: B"
+
+
+def test_step4_overlong_name_before_colon_is_kept():
+    raw = "あ" * 17 + ": 「はい」"
+    assert _text(_pipe().process(_msg(raw))) == raw
+
+
+def test_step4_colon_prefix_disabled_keeps_prefix():
+    assert _text(_pipe(speaker_strip=False).process(_msg("太郎: 「はい」"))) == "太郎: 「はい」"
+
+
+def test_order_colon_speaker_strip_before_duplicate_check():
+    pipe = _pipe()
+    pipe.process(_msg("太郎: 「はい」", 1.0))
+    _dropped(pipe.process(_msg("花子: 「はい」", 2.0)), DropReason.DUPLICATE, "duplicate")
+
+
 # --- step 5: empty ---------------------------------------------------------
 
 

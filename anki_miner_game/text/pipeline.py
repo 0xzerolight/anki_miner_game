@@ -26,7 +26,21 @@ from anki_miner_game.models.pipeline import (
 )
 from anki_miner_game.models.profile import FilterSettings
 
-_SPEAKER = re.compile(r"^【[^】]*】\s*")
+# Max length of a colon-prefixed name (below): long enough for a full name plus an honorific or
+# title (e.g. "岡部倫太郎", "ドクター中鉢"), short enough that an unrelated sentence fragment
+# ending in ": <quote>" is not mistaken for one.
+_SPEAKER_NAME_MAX = 16
+
+# A name has no whitespace, colon or bracket character, so a real sentence such as "注意：これは…"
+# (no bracket follows the colon) or "A: B" (no bracket at all) can never match up to that point.
+_SPEAKER_NAME_CHARS = r"[^\s:：【】「」『』()（）\"]"
+
+_SPEAKER = re.compile(
+    r"^(?:"
+    r"【[^】]*】\s*"  # 【name】 group (LunaTranslator and similar)
+    rf"|{_SPEAKER_NAME_CHARS}{{1,{_SPEAKER_NAME_MAX}}}[:：]\s*(?=[「『（\"])"  # name: (Agent and similar)
+    r")"
+)
 
 
 def _normalise(raw: str, *, speaker_strip: bool) -> str:
@@ -35,6 +49,11 @@ def _normalise(raw: str, *, speaker_strip: bool) -> str:
     Step 2 also drops lone surrogates (``Cs``): ``json.loads`` keeps a ``\\udXXX`` escape from a
     UTF-16 pair cut in half, and such a string cannot be encoded to write the journal, the subtitle
     or the feed.
+
+    The speaker strip covers two prefix shapes: a bracketed ``【name】`` group (LunaTranslator), and
+    a bare ``name:``/``name：`` prefix (Agent's STEINS;GATE script) that is only removed when it is
+    immediately followed by an opening quote bracket, so a real line containing a colon (``注意：
+    これは…``, ``A: B``) is left untouched.
     """
     text = unicodedata.normalize("NFC", raw)
     text = "".join(ch for ch in text if ch == "\n" or unicodedata.category(ch) not in ("Cc", "Cf", "Cs"))
