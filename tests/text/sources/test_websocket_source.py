@@ -33,6 +33,23 @@ def test_conforms_to_the_text_source_protocol():
             "行くぞ",
             id="dict with sentence",
         ),
+        pytest.param(
+            '{"process_path": "PC_Steam_MAGES_Steins;Gate.js", "id": 1790197147243,'
+            ' "sentence": "この場であれこれ雑談するのは危険すぎる。", "type": "copyText"}',
+            "この場であれこれ雑談するのは危険すぎる。",
+            id="Agent copyText frame delivers its sentence",
+        ),
+        pytest.param(
+            '{"process_path": "PC_Steam_MAGES_Steins;Gate.js", "id": 1790197147243,'
+            ' "sentence": "It\'s too dangerous to chat about anything here.", "type": "translate"}',
+            None,
+            id="Agent translate frame is dropped",
+        ),
+        pytest.param(
+            '{"sentence": "行くぞ", "type": "romaji"}',
+            "行くぞ",
+            id="dict with an unrecognised type keeps its sentence",
+        ),
         pytest.param('{"text": "行くぞ"}', '{"text": "行くぞ"}', id="dict without sentence is the frame"),
         pytest.param('{"sentence": 5}', '{"sentence": 5}', id="non-string sentence is the frame"),
         pytest.param('["行くぞ"]', '["行くぞ"]', id="JSON list is the frame"),
@@ -143,6 +160,37 @@ async def test_json_frame_delivers_its_sentence(make_source):
         await hooker.wait_for_clients(1)
         await hooker.broadcast(json.dumps({"sentence": "行くぞ", "time": "2026-09-21T10:00:00", "source": "GSM"}))
         assert await sink.next() == ("行くぞ", 1.0, "textractor")
+
+
+async def test_agents_translate_frame_never_reaches_the_sink(make_source):
+    """Agent (default settings) sends a copyText frame then a translate frame per line (P2-1)."""
+    sink = Sink()
+    async with FakeHookerServer() as hooker:
+        make_source(hooker.uri, now=lambda: 1.0).start(sink)
+        await hooker.wait_for_clients(1)
+        await hooker.broadcast(
+            json.dumps(
+                {
+                    "process_path": r"C:\Tools\hookers\Agent\data\scripts\PC_Steam_MAGES_Steins;Gate.js",
+                    "id": 1790197147243,
+                    "sentence": "この場であれこれ雑談するのは危険すぎる。",
+                    "type": "copyText",
+                }
+            )
+        )
+        await hooker.broadcast(
+            json.dumps(
+                {
+                    "process_path": r"C:\Tools\hookers\Agent\data\scripts\PC_Steam_MAGES_Steins;Gate.js",
+                    "id": 1790197147243,
+                    "sentence": "It's too dangerous to chat about anything here.",
+                    "type": "translate",
+                }
+            )
+        )
+        await hooker.broadcast("次の行")
+        assert (await sink.next())[0] == "この場であれこれ雑談するのは危険すぎる。"
+        assert (await sink.next())[0] == "次の行"
 
 
 async def test_t_mono_is_read_from_the_injected_now_once_per_frame_at_receipt(make_source):

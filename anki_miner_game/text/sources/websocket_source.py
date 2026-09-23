@@ -5,8 +5,12 @@ commit 479747fe82d64f66980797a50bd6782ea06f58fa (GPL-3.0). Kept: connect to ``ws
 LunaTranslator path fallback, ``ping_interval=None``, plain/JSON frame parsing and reconnecting.
 Changed: the non-dict JSON guard (GSM calls ``.get`` on any JSON value), the spec's 1, 2, 5, 10 s
 backoff, and the JSON ``source`` and ``time`` fields are not used: a line belongs to the configured
-source and its time is read here at receipt. Dropped: rate limiting, overlay, database and pause
-plumbing.
+source and its time is read here at receipt. Also changed: a JSON object with ``"type":
+"translate"`` is dropped, not GSM behaviour but needed for the Agent hooker (0xDC00/agent), whose
+default settings send it as a second frame per line carrying its own machine translation
+(``libWebSocket.js``: ``broadcast`` fires on both its ``copyText`` and ``translate`` events, the
+only two types it ever sends); the ``copyText`` frame beside it already carries the line. Dropped:
+rate limiting, overlay, database and pause plumbing.
 """
 
 import asyncio
@@ -35,20 +39,27 @@ LUNA_PATH: Final = "/api/ws/text/origin"
 """Where LunaTranslator serves its text; tried once when the handshake on the plain URI is refused."""
 
 
-def parse_frame(frame: str | bytes) -> str:
-    """The line a hooker frame carries.
+def parse_frame(frame: str | bytes) -> str | None:
+    """The line a hooker frame carries, or ``None`` for a frame that is never a line.
 
     A JSON object's ``sentence`` string is the line; any other frame (plain text, invalid JSON, a
     JSON value that is not an object, an object without a string ``sentence``) is the line itself.
-    Binary frames are decoded as UTF-8.
+    Binary frames are decoded as UTF-8. The one exception: a JSON object with ``"type":
+    "translate"`` is a machine translation, not a line, and parses to ``None`` regardless of its
+    ``sentence`` (Agent, the only hooker known to send a ``type`` field, sends it as a second frame
+    beside the ``copyText`` frame that already carries the line; every other ``type``, known or not,
+    is left alone so a real line is never dropped on a guess).
     """
     text = frame.decode("utf-8", errors="replace") if isinstance(frame, bytes) else frame
     try:
         data = json.loads(text)
     except (ValueError, RecursionError):
         return text
-    if isinstance(data, dict) and isinstance(data.get("sentence"), str):
-        return str(data["sentence"])
+    if isinstance(data, dict):
+        if data.get("type") == "translate":
+            return None
+        if isinstance(data.get("sentence"), str):
+            return str(data["sentence"])
     return text
 
 
@@ -154,8 +165,11 @@ class WebsocketSource:
                 async for frame in ws:
                     t_mono = self._now()
                     self._set_status(SourceStatus.RECEIVING)
+                    line = parse_frame(frame)
+                    if line is None:
+                        continue
                     try:
-                        sink(parse_frame(frame), t_mono, self._id)
+                        sink(line, t_mono, self._id)
                     except Exception:
                         logger.exception("%s: the text sink failed; line dropped", self._id)
         except (OSError, WebSocketException) as exc:

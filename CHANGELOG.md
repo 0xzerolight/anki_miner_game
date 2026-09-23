@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Fixed
 
+- **Agent's machine translation no longer lands in the subtitle.** With Agent's default settings (Machine Translate on), its English translation frame reached the pipeline as its own line beside the hooked Japanese one; the translation frame is now dropped.
 - **Add-on installs work on a new Windows PC.** The uv and voice-model downloads, and the bundle's HTTPS self-check, now check certificates through the OS verifier (`truststore`); on Windows that is the chain check browsers use, which fetches a trusted root the machine does not hold yet from Windows Update. A fresh Windows 11 root store lacks Sectigo Public Server Authentication Root E46, the root github.com chains to, and Python's own check only reads the store, so the VAD and OCR installs failed with `CERTIFICATE_VERIFY_FAILED` until some other program had made Windows fetch that root.
 
 ## [1.0.0] - 2026-09-22
