@@ -9,10 +9,12 @@ around it show whether one constant fits every flash::
     python -m tools.sync_probe.analyse --raw --recording REC.mkv \\
         --flasher-log FLASHER.jsonl --obs-transcript TRANSCRIPT.jsonl [--json REPORT.json]
 
-``--app`` (E1 and every release): compare each flash with the matching cue start in the app's
-``.srt``. Pass when every flash has a cue and every cue a flash, each within 150 ms::
+``--app`` (E1 and every release): compare each flash with the arrival of the matching line in the
+app's ``.srt``: its cue start less the session's start shift, ``START_SHIFT_MS`` of the manifest's
+``text_mode`` (the ``.session.json`` beside the subtitle unless ``--manifest`` names one). Pass when
+every flash has a cue and every cue a flash, each within 150 ms::
 
-    python -m tools.sync_probe.analyse --app --recording REC.mkv --srt REC.srt
+    python -m tools.sync_probe.analyse --app --recording REC.mkv --srt REC.srt [--manifest REC.session.json]
 
 Inputs come from ``tools.sync_probe.flasher`` (flash ``t_mono`` values) and
 ``tools.obs_transcript_recorder`` (OBS frames with ``t_mono``). All ``t_mono`` values are
@@ -30,6 +32,9 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from anki_miner_game.models.constants import START_SHIFT_MS
+from anki_miner_game.session.manifest import MANIFEST_SUFFIX, load_manifest
+from anki_miner_game.store import StoreError
 from tools.sync_probe import video
 
 PASS_BOUND_MS = 150
@@ -113,10 +118,16 @@ class Pair:
     detection_ms: int
     cue_ms: int
     text: str
+    shift_ms: int = 0
+    """The session's start shift: the cue starts this far from its line's arrival."""
+
+    @property
+    def arrival_ms(self) -> int:
+        return self.cue_ms - self.shift_ms
 
     @property
     def diff_ms(self) -> int:
-        return self.cue_ms - self.detection_ms
+        return self.arrival_ms - self.detection_ms
 
 
 @dataclass(frozen=True)
@@ -138,7 +149,7 @@ class AppReport:
         return {
             "passed": self.passed,
             "bound_ms": self.bound_ms,
-            "pairs": [{**asdict(p), "diff_ms": p.diff_ms} for p in self.pairs],
+            "pairs": [{**asdict(p), "arrival_ms": p.arrival_ms, "diff_ms": p.diff_ms} for p in self.pairs],
             "unmatched_flashes": self.unmatched_flashes,
             "unmatched_cues": self.unmatched_cues,
         }
@@ -210,6 +221,14 @@ def load_obs_timeline(path: Path, session: int = 0) -> ObsTimeline:
     return ObsTimeline({k: candidates[k] for k in sorted(candidates, key=order.index)}, pauses, end)
 
 
+def load_shift_ms(manifest: Path) -> int:
+    """The start shift the session's cues were built with: ``START_SHIFT_MS`` of its ``text_mode``."""
+    try:
+        return START_SHIFT_MS[load_manifest(manifest).text_mode]
+    except FileNotFoundError:
+        raise AnalysisError(f"{manifest}: no session manifest (pass --manifest)") from None
+
+
 def load_cues(path: Path) -> list[tuple[int, str]]:
     import pysubs2  # dev dependency; the analyser is a dev tool
 
@@ -267,11 +286,17 @@ def analyse_app(
     cues: Sequence[tuple[int, str]],
     detections_ms: Sequence[int],
     *,
+    shift_ms: int = 0,
     bound_ms: int = PASS_BOUND_MS,
     window_ms: float = MATCH_WINDOW_MS,
 ) -> AppReport:
-    starts = dict(cues)
-    pool = [start for start, _ in cues]
+    """Pair each flash with the nearest line arrival, ``cue start - shift_ms``.
+
+    ``shift_ms`` is the session's start shift, so the probe measures the app's own timing whatever
+    the shift. A cue clamped at 0 (a line in the recording's first ``-shift_ms``) reads as late.
+    """
+    texts = dict(cues)
+    pool = [start - shift_ms for start, _ in cues]
     pairs, unmatched = [], []
     for detection in detections_ms:
         found = _nearest(detection, pool, window_ms)
@@ -279,8 +304,8 @@ def analyse_app(
             unmatched.append(detection)
             continue
         pool.remove(found)
-        pairs.append(Pair(detection, found, starts[found]))
-    left = [(start, text) for start, text in cues if start in pool]
+        pairs.append(Pair(detection, found + shift_ms, texts[found + shift_ms], shift_ms))
+    left = [(start, text) for start, text in cues if start - shift_ms in pool]
     return AppReport(pairs, unmatched, left, bound_ms)
 
 
@@ -297,6 +322,7 @@ def _parse(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument("--obs-transcript", type=Path, help="--raw: the transcript recorder's JSONL")
     parser.add_argument("--session", type=int, default=0, help="--raw: which StartRecord in the transcript")
     parser.add_argument("--srt", type=Path, help="--app: the app's subtitle file")
+    parser.add_argument("--manifest", type=Path, help="--app: the session's manifest (default: beside --srt)")
     parser.add_argument("--threshold", type=float, help="luma threshold (default: midway, per recording)")
     parser.add_argument("--window-ms", type=float, default=MATCH_WINDOW_MS, help="max distance to pair")
     parser.add_argument("--bound-ms", type=int, default=PASS_BOUND_MS, help="--app pass bound")
@@ -316,6 +342,7 @@ def _fmt(value: float | None) -> str:
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parse(argv)
     try:
+        shift_ms = load_shift_ms(args.manifest or args.srt.with_suffix(MANIFEST_SUFFIX)) if args.app else 0
         detection = video.detect_flashes(video.frame_lumas(args.recording), args.threshold)
         detections = [f.t_ms for f in detection.flashes]
         report: dict[str, Any] = {
@@ -343,19 +370,23 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             rc = 0
         else:
-            app = analyse_app(load_cues(args.srt), detections, bound_ms=args.bound_ms, window_ms=args.window_ms)
-            report |= {"mode": "app", **app.to_dict()}
+            cues = load_cues(args.srt)
+            app = analyse_app(cues, detections, shift_ms=shift_ms, bound_ms=args.bound_ms, window_ms=args.window_ms)
+            report |= {"mode": "app", "shift_ms": shift_ms, **app.to_dict()}
+            print(f"start shift {shift_ms} ms: each flash is compared with its cue start - shift")
             for pair in app.pairs:
                 print(
-                    f"flash {pair.detection_ms:>8} ms  cue {pair.cue_ms:>8} ms  diff {pair.diff_ms:>+5} ms  {pair.text}"
+                    f"flash {pair.detection_ms:>8} ms  cue {pair.cue_ms:>8} ms  line {pair.arrival_ms:>8} ms  "
+                    f"diff {pair.diff_ms:>+5} ms  {pair.text}"
                 )
             for detection_ms in app.unmatched_flashes:
                 print(f"flash {detection_ms:>8} ms  no cue")
             for cue_ms, text in app.unmatched_cues:
                 print(f"cue   {cue_ms:>8} ms  no flash  {text}")
-            print(("PASS" if app.passed else "FAIL") + f": |cue start - flash| < {args.bound_ms} ms for every flash")
+            verdict = "PASS" if app.passed else "FAIL"
+            print(f"{verdict}: |cue start - shift - flash| < {args.bound_ms} ms for every flash")
             rc = 0 if app.passed else 1
-    except (video.VideoError, AnalysisError, OSError, ValueError, KeyError) as exc:
+    except (video.VideoError, AnalysisError, StoreError, OSError, ValueError, KeyError) as exc:
         print(f"analyse: {exc}", file=sys.stderr)
         return 2
     if args.json:

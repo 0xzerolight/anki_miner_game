@@ -4,6 +4,9 @@ import json
 
 import pytest
 
+from anki_miner_game.models.manifest import GameRef, ManifestState, ObsRecord, SessionManifest
+from anki_miner_game.models.profile import TextMode
+from anki_miner_game.session.manifest import write_manifest_atomic
 from tests.tools.lavfi import make_flash_video, needs_ffmpeg
 from tools import obs_transcript_recorder as rec
 from tools.sync_probe import analyse as an
@@ -150,6 +153,15 @@ def test_app_mode_passes_when_every_cue_starts_within_150_ms_of_its_flash():
     assert [p.diff_ms for p in result.pairs] == [0, -13]
 
 
+def test_app_mode_compares_each_flash_with_its_lines_arrival():
+    # A hook session's cues start 400 ms before their lines arrive; the probe measures the arrival.
+    cues = [(700, "sync probe flash 000"), (2720, "sync probe flash 001")]
+    result = an.analyse_app(cues, [1100, 3133], shift_ms=-400)
+    assert result.passed
+    assert [(p.cue_ms, p.arrival_ms, p.diff_ms) for p in result.pairs] == [(700, 1100, 0), (2720, 3120, -13)]
+    assert not an.analyse_app(cues, [1100, 3133]).passed  # read as arrivals, both are 400 ms early
+
+
 @pytest.mark.parametrize(
     ("cues", "detections"),
     [
@@ -202,22 +214,72 @@ def test_cli_raw_mode_on_a_synthetic_recording(tmp_path, capsys):
     assert "started" in capsys.readouterr().out
 
 
+def _write_manifest(path, text_mode):
+    """The session manifest the app writes beside its subtitle; the probe reads only ``text_mode``."""
+    obs = ObsRecord(
+        version="31.0.2",
+        websocket="5.5.4",
+        profile="Anki Miner Game",
+        collection="Anki Miner Game",
+        output_path="/v/_incoming/2026-09-24 10-00-00.mkv",
+    )
+    manifest = SessionManifest(
+        app_version="1.0.0",
+        game=GameRef(slug="probe", title="Probe"),
+        index=1,
+        state=ManifestState.READY,
+        started_at="2026-09-24T10:00:00Z",
+        obs=obs,
+        text_mode=text_mode,
+    )
+    write_manifest_atomic(path, manifest)
+    return path
+
+
 @needs_ffmpeg
 def test_cli_app_mode_passes_and_fails_on_a_synthetic_recording(tmp_path):
+    # A hook session (manifest beside the subtitle): each cue starts 400 ms before its line arrived.
     video = make_flash_video(tmp_path / "rec.mkv", [1.1, 3.1], duration_s=5)
     good, late = tmp_path / "good.srt", tmp_path / "late.srt"
     good.write_text(
-        "1\n00:00:01,050 --> 00:00:02,000\nsync probe flash 000\n\n"
-        "2\n00:00:03,200 --> 00:00:04,000\nsync probe flash 001\n",
+        "1\n00:00:00,650 --> 00:00:02,000\nsync probe flash 000\n\n"
+        "2\n00:00:02,800 --> 00:00:04,000\nsync probe flash 001\n",
         encoding="utf-8",
     )
     late.write_text(
-        "1\n00:00:01,050 --> 00:00:02,000\nsync probe flash 000\n\n"
-        "2\n00:00:03,300 --> 00:00:04,000\nsync probe flash 001\n",
+        "1\n00:00:00,650 --> 00:00:02,000\nsync probe flash 000\n\n"
+        "2\n00:00:02,900 --> 00:00:04,000\nsync probe flash 001\n",
         encoding="utf-8",
     )
-    assert an.main(["--app", "--recording", str(video), "--srt", str(good)]) == 0
+    for srt in (good, late):
+        _write_manifest(srt.with_suffix(".session.json"), TextMode.HOOK)
+    out = tmp_path / "report.json"
+    assert an.main(["--app", "--recording", str(video), "--srt", str(good), "--json", str(out)]) == 0
+    report = json.loads(out.read_text(encoding="utf-8"))
+    assert report["shift_ms"] == -400
+    assert [p["diff_ms"] for p in report["pairs"]] == [-50, 100]
     assert an.main(["--app", "--recording", str(video), "--srt", str(late)]) == 1
+
+
+@needs_ffmpeg
+def test_cli_app_mode_takes_the_shift_from_the_manifest_named(tmp_path):
+    # An OCR session's cues start one second before their lines arrived.
+    video = make_flash_video(tmp_path / "rec.mkv", [1.1, 3.1], duration_s=5)
+    srt = tmp_path / "s.srt"
+    srt.write_text(
+        "1\n00:00:00,100 --> 00:00:02,000\nsync probe flash 000\n\n"
+        "2\n00:00:02,150 --> 00:00:04,000\nsync probe flash 001\n",
+        encoding="utf-8",
+    )
+    manifest = _write_manifest(tmp_path / "elsewhere.session.json", TextMode.OCR)
+    assert an.main(["--app", "--recording", str(video), "--srt", str(srt), "--manifest", str(manifest)]) == 0
+
+
+def test_cli_app_mode_needs_the_sessions_manifest(tmp_path, capsys):
+    srt = tmp_path / "s.srt"
+    srt.write_text("1\n00:00:01,100 --> 00:00:02,000\nsync probe flash 000\n", encoding="utf-8")
+    assert an.main(["--app", "--recording", str(tmp_path / "rec.mkv"), "--srt", str(srt)]) == 2
+    assert "s.session.json" in capsys.readouterr().err
 
 
 def test_cli_needs_exactly_one_mode(capsys):

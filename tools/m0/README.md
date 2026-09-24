@@ -226,7 +226,9 @@ E1 and releases, `--app`: the app connects to the flasher's port as its hooker s
 python -m tools.sync_probe.analyse --app --recording SESSION.mkv --srt SESSION.srt
 ```
 
-It passes (exit 0) when every flash has a cue and every cue a flash, each within 150 ms.
+It passes (exit 0) when every flash has a cue and every cue a flash, each within 150 ms. A flash is
+compared with its line's arrival: the cue start less the session's start shift (`START_SHIFT_MS` of
+the `text_mode` in the `.session.json` beside the `.srt`; `--manifest` names another).
 
 The luma threshold defaults to midway between the darkest and the brightest frame, so a window
 smaller than the canvas is still found; `--threshold` overrides it.
