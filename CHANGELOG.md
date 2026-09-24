@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Fixed
 
+- **Cards no longer lose the first words of a voiced line.** In hook mode each cue now starts 0.4 s before its line arrives: games start the voice before drawing the text, and hookers send the line later still (LunaTranslator about 0.24 s after the first glyph, Textractor about 0.5 s), so the clip began after the voice had started.
 - **A game window smaller than the screen now fills the recording and card screenshots.** OBS placed it unscaled in the top-left corner with black around it; each capture input is now fitted to the canvas, aspect kept and centred.
 - **A windowed game with no window pinned is recorded on Windows, not a black screen.** Automatic capture now keeps a Display Capture of the primary monitor underneath Game Capture, which records only fullscreen games.
 - **Agent's machine translation no longer lands in the subtitle.** With Agent's default settings (Machine Translate on), its English translation frame reached the pipeline as its own line beside the hooked Japanese one; the translation frame is now dropped.

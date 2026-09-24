@@ -112,10 +112,10 @@ def test_normal_session(scripted):
     s.until_end()
 
     assert s.srt(1) == (
-        "1\n00:00:00,847 --> 00:00:02,997\nおはよう、まゆり。\n\n"
-        "2\n00:00:03,347 --> 00:00:05,797\nトゥットゥルー♪\n\n"
-        "3\n00:00:06,147 --> 00:00:11,497\nここは秋葉原だ。\n\n"
-        "4\n00:00:11,847 --> 00:00:14,667\nエル・プサイ・コングルゥ\n"
+        "1\n00:00:00,447 --> 00:00:02,597\nおはよう、まゆり。\n\n"
+        "2\n00:00:02,947 --> 00:00:05,397\nトゥットゥルー♪\n\n"
+        "3\n00:00:05,747 --> 00:00:11,097\nここは秋葉原だ。\n\n"
+        "4\n00:00:11,447 --> 00:00:14,667\nエル・プサイ・コングルゥ\n"
     )
     manifest = s.manifest(1)
     assert manifest.state is ManifestState.READY
@@ -138,10 +138,10 @@ def test_a_pause_on_a_recording_that_cannot_pause_changes_nothing(scripted):
     s.until_end()
 
     assert s.srt(1) == (
-        "1\n00:00:00,859 --> 00:00:03,509\n今日は晴れだ。\n\n"
-        "2\n00:00:03,859 --> 00:00:06,009\nポーズしたはずなのに。\n\n"
-        "3\n00:00:06,359 --> 00:00:08,509\nまだ録画している。\n\n"
-        "4\n00:00:08,859 --> 00:00:10,672\n再開もできない。\n"
+        "1\n00:00:00,459 --> 00:00:03,109\n今日は晴れだ。\n\n"
+        "2\n00:00:03,459 --> 00:00:05,609\nポーズしたはずなのに。\n\n"
+        "3\n00:00:05,959 --> 00:00:08,109\nまだ録画している。\n\n"
+        "4\n00:00:08,459 --> 00:00:10,672\n再開もできない。\n"
     )
     assert s.manifest(1).counts == Counts(received=4, accepted=4)
     assert s.game_files() == names(1)
@@ -161,10 +161,10 @@ def test_a_pause_made_in_obs_drops_its_lines_and_shifts_the_rest(scripted):
     s.until_end()
 
     assert s.srt(1) == (
-        "1\n00:00:00,861 --> 00:00:02,511\n始めよう。\n\n"
-        "2\n00:00:02,861 --> 00:00:04,507\n準備はいい?\n\n"
-        "3\n00:00:04,857 --> 00:00:06,507\nもう一度。\n\n"
-        "4\n00:00:06,857 --> 00:00:07,670\n終わりだ。\n"
+        "1\n00:00:00,461 --> 00:00:02,111\n始めよう。\n\n"
+        "2\n00:00:02,461 --> 00:00:04,107\n準備はいい?\n\n"
+        "3\n00:00:04,457 --> 00:00:06,107\nもう一度。\n\n"
+        "4\n00:00:06,457 --> 00:00:07,670\n終わりだ。\n"
     )
     manifest = s.manifest(1)
     assert manifest.counts == Counts(received=5, accepted=4, paused=1)
@@ -185,10 +185,10 @@ def test_a_pause_missed_while_disconnected_degrades_the_clock(scripted):
     s.until_end()
 
     assert s.srt(1) == (
-        "1\n00:00:00,850 --> 00:00:02,000\n一行目。\n\n"
-        "2\n00:00:02,350 --> 00:00:04,500\n二行目。\n\n"
-        "3\n00:00:04,850 --> 00:00:05,502\n再開後の行。\n\n"
-        "4\n00:00:05,852 --> 00:00:06,352\n最後の行。\n"
+        "1\n00:00:00,450 --> 00:00:01,600\n一行目。\n\n"
+        "2\n00:00:01,950 --> 00:00:04,100\n二行目。\n\n"
+        "3\n00:00:04,450 --> 00:00:05,102\n再開後の行。\n\n"
+        "4\n00:00:05,452 --> 00:00:06,218\n最後の行。\n"
     )
     manifest = s.manifest(1)
     assert manifest.flags == (Flag.CLOCK_DEGRADED,)
@@ -211,11 +211,11 @@ def test_a_reconnect_mid_session_keeps_the_event_clock(scripted):
     s.until_end()
 
     assert s.srt(1) == (
-        "1\n00:00:00,860 --> 00:00:01,510\nつながっている。\n\n"
-        "2\n00:00:01,860 --> 00:00:04,510\nまだ大丈夫。\n\n"
-        "3\n00:00:04,860 --> 00:00:08,510\n切れている間の行。\n\n"
-        "4\n00:00:08,860 --> 00:00:10,010\n戻ってきた。\n\n"
-        "5\n00:00:10,360 --> 00:00:10,860\n続けよう。\n"
+        "1\n00:00:00,460 --> 00:00:01,110\nつながっている。\n\n"
+        "2\n00:00:01,460 --> 00:00:04,110\nまだ大丈夫。\n\n"
+        "3\n00:00:04,460 --> 00:00:08,110\n切れている間の行。\n\n"
+        "4\n00:00:08,460 --> 00:00:09,610\n戻ってきた。\n\n"
+        "5\n00:00:09,960 --> 00:00:10,671\n続けよう。\n"
     )
     manifest = s.manifest(1)
     assert manifest.flags == ()
@@ -236,9 +236,9 @@ def test_a_split_ends_the_subtitle_at_the_first_file(scripted):
     s.until_end()
 
     assert s.srt(1) == (
-        "1\n00:00:00,963 --> 00:00:02,613\n分割の前。\n\n"
-        "2\n00:00:02,963 --> 00:00:05,613\nまだ一つ目のファイル。\n\n"
-        "3\n00:00:05,963 --> 00:00:09,288\n分割はまだ届いていない。\n"
+        "1\n00:00:00,563 --> 00:00:02,213\n分割の前。\n\n"
+        "2\n00:00:02,563 --> 00:00:05,213\nまだ一つ目のファイル。\n\n"
+        "3\n00:00:05,563 --> 00:00:09,288\n分割はまだ届いていない。\n"
     )
     manifest = s.manifest(1)
     assert manifest.flags == (Flag.SPLIT_UNSUPPORTED,)
@@ -260,9 +260,9 @@ def test_a_refused_split_leaves_the_session_whole(scripted):
     s.until_end()
 
     assert s.srt(1) == (
-        "1\n00:00:00,965 --> 00:00:02,615\n分割しない。\n\n"
-        "2\n00:00:02,965 --> 00:00:05,615\nファイルは一つ。\n\n"
-        "3\n00:00:05,965 --> 00:00:09,675\n最後まで。\n"
+        "1\n00:00:00,565 --> 00:00:02,215\n分割しない。\n\n"
+        "2\n00:00:02,565 --> 00:00:05,215\nファイルは一つ。\n\n"
+        "3\n00:00:05,565 --> 00:00:09,675\n最後まで。\n"
     )
     assert s.manifest(1).flags == ()
     assert s.incoming_files() == []
@@ -281,9 +281,9 @@ def test_obs_exiting_ends_the_session_at_exit_started(scripted):
     s.until_end()
 
     assert s.srt(1) == (
-        "1\n00:00:00,857 --> 00:00:02,507\nOBSが閉じる前。\n\n"
-        "2\n00:00:02,857 --> 00:00:04,007\nもう少し。\n\n"
-        "3\n00:00:04,357 --> 00:00:04,857\n最後の台詞。\n"
+        "1\n00:00:00,457 --> 00:00:02,107\nOBSが閉じる前。\n\n"
+        "2\n00:00:02,457 --> 00:00:03,607\nもう少し。\n\n"
+        "3\n00:00:03,957 --> 00:00:04,687\n最後の台詞。\n"
     )
     manifest = s.manifest(1)
     assert manifest.flags == (Flag.OBS_EXITED,)
@@ -308,9 +308,9 @@ def test_obs_killed_ends_the_session_where_the_connection_dropped(scripted):
     s.settled()
 
     assert s.srt(1) == (
-        "1\n00:00:00,864 --> 00:00:02,514\nまだ生きている。\n\n"
-        "2\n00:00:02,864 --> 00:00:04,014\n録画中。\n\n"
-        "3\n00:00:04,364 --> 00:00:04,864\n突然。\n"
+        "1\n00:00:00,464 --> 00:00:02,114\nまだ生きている。\n\n"
+        "2\n00:00:02,464 --> 00:00:03,614\n録画中。\n\n"
+        "3\n00:00:03,964 --> 00:00:04,686\n突然。\n"
     )
     manifest = s.manifest(1)
     assert manifest.flags == (Flag.OBS_EXITED,)
@@ -335,12 +335,12 @@ def test_two_sessions_in_one_arm_with_the_profile_switched_between(scripted):
     s.until_end()
 
     assert s.srt(1) == (
-        "1\n00:00:00,771 --> 00:00:02,421\n一回目。\n\n2\n00:00:02,771 --> 00:00:04,664\n一回目の終わり。\n"
+        "1\n00:00:00,371 --> 00:00:02,021\n一回目。\n\n2\n00:00:02,371 --> 00:00:04,664\n一回目の終わり。\n"
     )
     assert s.srt(2) == (
-        "1\n00:00:00,818 --> 00:00:02,468\n二回目。\n\n"
-        "2\n00:00:02,818 --> 00:00:03,968\n二回目の途中。\n\n"
-        "3\n00:00:04,318 --> 00:00:04,818\n二回目の終わり。\n"
+        "1\n00:00:00,418 --> 00:00:02,068\n二回目。\n\n"
+        "2\n00:00:02,418 --> 00:00:03,568\n二回目の途中。\n\n"
+        "3\n00:00:03,918 --> 00:00:04,675\n二回目の終わり。\n"
     )
     assert [s.manifest(i).counts for i in (1, 2)] == [Counts(received=2, accepted=2), Counts(received=3, accepted=3)]
     assert s.game_files() == sorted(names(1) + names(2))
@@ -364,10 +364,10 @@ def test_auto_mode_starts_on_a_line_and_stops_once_the_window_is_gone(scripted, 
     s.until_end()  # closed: two polls without it stop the recording (StopRecord at 12.569)
 
     assert s.srt(1) == (
-        "1\n00:00:00,000 --> 00:00:01,515\nこの行で録画が始まる。\n\n"
-        "2\n00:00:01,865 --> 00:00:03,515\n窓はまだある。\n\n"
-        "3\n00:00:03,865 --> 00:00:06,515\nタイトルが変わる前。\n\n"
-        "4\n00:00:06,865 --> 00:00:12,085\nタイトルが変わっても窓は同じ。\n"
+        "1\n00:00:00,000 --> 00:00:01,115\nこの行で録画が始まる。\n\n"
+        "2\n00:00:01,465 --> 00:00:03,115\n窓はまだある。\n\n"
+        "3\n00:00:03,465 --> 00:00:06,115\nタイトルが変わる前。\n\n"
+        "4\n00:00:06,465 --> 00:00:12,085\nタイトルが変わっても窓は同じ。\n"
     )
     assert s.manifest(1).counts == Counts(received=4, accepted=4)
     assert s.state() is AppState.ARMED

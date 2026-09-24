@@ -38,7 +38,7 @@ async def test_a_split_finalises_the_first_file_and_flags_it(h: Harness):
     ]
     assert "split" in h.banners()[BannerKey.SPLIT]
     await h.stopped(ZERO + 10.0)  # its outputPath still names the first file (R2 item 10)
-    assert srt(h) == "1\n00:00:01,010 --> 00:00:04,660\nまえ\n"
+    assert srt(h) == "1\n00:00:00,610 --> 00:00:04,660\nまえ\n"
     assert Flag.SPLIT_UNSUPPORTED in load_manifest(h.finalised()[0]).flags
     assert sorted(p.name for p in h.incoming.iterdir()) == [f"{SECOND_STEM}.mkv"]
 
@@ -48,7 +48,7 @@ async def test_exit_started_ends_the_session_flagged_obs_exited(h: Harness):
     await h.started(ZERO)
     await h.line("まえ", ZERO + 1.0)
     await h.emit(ObsEventName.EXIT_STARTED, {}, ZERO + 8.0)
-    assert srt(h) == "1\n00:00:01,010 --> 00:00:07,660\nまえ\n"
+    assert srt(h) == "1\n00:00:00,610 --> 00:00:07,660\nまえ\n"
     assert Flag.OBS_EXITED in load_manifest(h.finalised()[0]).flags
     assert "OBS closed" in h.banners()[BannerKey.OBS_EXITED]
     assert h.actor.state is AppState.ARMED
@@ -85,7 +85,7 @@ async def test_obs_gone_after_a_lost_connection_ends_the_session(h: Harness):
     await h.tick(ZERO + 2.0 + 2 * session_mod.OBS_GONE_CHECK_S)
     # The stop is the reading taken when the connection dropped (2010): both lines journalled after
     # the loss lie past it, so they are skips and only the first line is a cue.
-    assert srt(h) == "1\n00:00:01,010 --> 00:00:01,660\nまえ\n"
+    assert srt(h) == "1\n00:00:00,610 --> 00:00:01,660\nまえ\n"
     manifest = load_manifest(h.finalised()[0])
     assert Flag.OBS_EXITED in manifest.flags
     assert manifest.counts.skip == 2

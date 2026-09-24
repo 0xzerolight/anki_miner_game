@@ -64,7 +64,7 @@ async def test_a_whole_session_leaves_the_pair_in_the_game_folder(h: Harness):
 
     stem = f"{TITLE} - 01"
     assert (h.game_dir() / f"{stem}.srt").read_bytes() == (
-        "1\n00:00:05,010 --> 00:00:08,660\nこんにちは\n\n2\n00:00:09,010 --> 00:00:17,760\nさようなら\n"
+        "1\n00:00:04,610 --> 00:00:08,260\nこんにちは\n\n2\n00:00:08,610 --> 00:00:17,760\nさようなら\n"
     ).encode()
     assert (h.game_dir() / f"{stem}.mkv").exists()
     assert sorted(p.name for p in h.incoming.iterdir()) == []
@@ -458,7 +458,7 @@ async def test_quitting_while_recording_stops_obs_and_finishes_the_session(h: Ha
     await h.stop()
     assert h.gateway.names().count("StopRecord") == 1
     srt = (h.game_dir() / f"{TITLE} - 01.srt").read_text(encoding="utf-8")
-    assert srt == "1\n00:00:01,010 --> 00:00:03,660\nまえ\n"  # stop: the reading when StopRecord was answered
+    assert srt == "1\n00:00:00,610 --> 00:00:03,660\nまえ\n"  # stop: the reading when StopRecord was answered
     assert list(h.incoming.iterdir()) == []
     assert h.sources[0].closed == 1
     assert (h.obs.profile, h.obs.collection) == ("Untitled", "Untitled")

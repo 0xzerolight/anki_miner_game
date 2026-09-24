@@ -108,7 +108,7 @@ async def test_row1_a_recording_that_stopped_while_disconnected_is_treated_as_st
     assert h.actor.state is AppState.ARMED
     # stop offset = the reading when the connection dropped (2010)
     assert (h.game_dir() / f"{TITLE} - 01.srt").read_text(encoding="utf-8") == (
-        "1\n00:00:01,010 --> 00:00:01,660\nまえ\n"
+        "1\n00:00:00,610 --> 00:00:01,660\nまえ\n"
     )
 
 
@@ -225,7 +225,7 @@ async def test_row4_an_app_restart_resumes_the_running_session(rig: Harness):
     await rig.line("あと", T0 + 1.0)
     await rig.stopped(T0 + 4.0)
     assert (rig.game_dir() / f"{TITLE} - 01.srt").read_text(encoding="utf-8") == (
-        "1\n00:00:05,000 --> 00:00:20,000\nまえ\n\n2\n00:01:01,000 --> 00:01:03,650\nあと\n"
+        "1\n00:00:04,600 --> 00:00:19,600\nまえ\n\n2\n00:01:00,600 --> 00:01:03,650\nあと\n"
     )
 
 
@@ -279,7 +279,7 @@ async def test_row6_orphans_are_finalised_after_reconcile(rig: Harness):
     assert list(rig.incoming.iterdir()) == []
     # no stop record: stop = the last offset + max_cue_seconds, so the cue runs to the 15 s cap
     assert (rig.game_dir() / f"{TITLE} - 01.srt").read_text(encoding="utf-8") == (
-        "1\n00:00:02,000 --> 00:00:16,650\nまえ\n"
+        "1\n00:00:01,600 --> 00:00:16,600\nまえ\n"
     )
 
 

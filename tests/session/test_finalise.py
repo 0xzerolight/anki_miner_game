@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from anki_miner_game.models.config import AppConfig, VadSettings
+from anki_miner_game.models.config import AppConfig, CueSettings, VadSettings
 from anki_miner_game.models.manifest import (
     Counts,
     FilesRecord,
@@ -68,21 +68,22 @@ RECORDS: list[JournalRecord] = [
     LineRecord(offset_ms=14_100, text="まゆしぃ", source="textractor"),
     StopRecord(offset_ms=30_000),
 ]
-LIVE_CUES = (
-    LiveCue(i=1, start_ms=5_230, end_ms=9_410, text="「こんにちは」", source="textractor"),
-    LiveCue(i=2, start_ms=9_760, end_ms=13_750, text="えっと、岡部？", source="textractor"),
-    LiveCue(i=3, start_ms=14_100, end_ms=29_100, text="まゆしぃ", source="textractor"),
+LIVE_CUES = (  # a hook session: each cue starts 400 ms before its line's offset
+    LiveCue(i=1, start_ms=4_830, end_ms=9_010, text="「こんにちは」", source="textractor"),
+    LiveCue(i=2, start_ms=9_360, end_ms=13_350, text="えっと、岡部？", source="textractor"),
+    LiveCue(i=3, start_ms=13_700, end_ms=28_700, text="まゆしぃ", source="textractor"),
 )
 SRT = (
-    "1\n00:00:05,230 --> 00:00:09,410\n「こんにちは」\n\n"
-    "2\n00:00:09,760 --> 00:00:13,750\nえっと、岡部？\n\n"
-    "3\n00:00:14,100 --> 00:00:29,100\nまゆしぃ\n"
+    "1\n00:00:04,830 --> 00:00:09,010\n「こんにちは」\n\n"
+    "2\n00:00:09,360 --> 00:00:13,350\nえっと、岡部？\n\n"
+    "3\n00:00:13,700 --> 00:00:28,700\nまゆしぃ\n"
 )
 NO_CUE_RECORDS: list[JournalRecord] = [
-    LineRecord(offset_ms=1_000, text="あ", source="agent"),
-    LineRecord(offset_ms=1_100, text="い", source="agent"),
-    StopRecord(offset_ms=1_200),
+    LineRecord(offset_ms=100, text="あ", source="agent"),
+    LineRecord(offset_ms=200, text="い", source="agent"),
+    StopRecord(offset_ms=250),
 ]
+"""Both lines skipped: the hook shift clamps both starts to 0, and the stop comes 250 ms later."""
 
 
 def _session(root: Path, records: list[JournalRecord] | None, *, taken: tuple[str, ...] = (), **changes) -> Path:
@@ -139,22 +140,28 @@ def test_the_vad_pass_is_not_queued_when_it_is_off(tmp_path):
     assert not result.queue_vad
 
 
-def test_an_ocr_session_starts_its_cues_one_second_early(tmp_path):
-    result = finalise(_session(tmp_path, RECORDS, text_mode=TextMode.OCR), CFG)
-    assert [cue.start_ms for cue in result.manifest.live_cues] == [4_230, 8_760, 13_100]
+@pytest.mark.parametrize(
+    ("text_mode", "starts"),
+    [(TextMode.HOOK, [4_830, 9_360, 13_700]), (TextMode.OCR, [4_230, 8_760, 13_100])],
+)
+def test_a_session_starts_its_cues_by_its_text_modes_shift(tmp_path, text_mode, starts):
+    # Lines at 5230, 9760 and 14100: 400 ms early for a hook session, one second early for OCR.
+    result = finalise(_session(tmp_path, RECORDS, text_mode=text_mode), CFG)
+    assert [cue.start_ms for cue in result.manifest.live_cues] == starts
 
 
 @pytest.mark.parametrize(
     ("records", "last_end_ms"),
     [
-        # stop = 5000 + 15 s cap = 20000; the last cue ends end_gap_ms before it
-        ([LineRecord(1_000, "あ", "agent"), LineRecord(5_000, "い", "agent")], 19_650),
+        # stop = 5000 + 15 s cap = 20000; the last cue (from 4600) ends end_gap_ms before it
+        ([LineRecord(1_000, "あ", "agent"), LineRecord(5_000, "い", "agent")], 19_000),
         # the pause is the last record: stop = 8000 + 15 s = 23000; the cue is capped at 15 s
-        ([LineRecord(1_000, "あ", "agent"), LineRecord(5_000, "い", "agent"), PauseRecord(8_000)], 20_000),
+        ([LineRecord(1_000, "あ", "agent"), LineRecord(5_000, "い", "agent"), PauseRecord(8_000)], 19_600),
     ],
 )
 def test_without_a_stop_record_the_stop_is_the_last_offset_plus_the_cap(tmp_path, records, last_end_ms):
-    result = finalise(_session(tmp_path, records), CFG)
+    # A 1 s end gap, longer than the 400 ms hook shift, so the stop shows before the cap does.
+    result = finalise(_session(tmp_path, records), replace(CFG, cue=CueSettings(end_gap_ms=1_000)))
     assert result.manifest.live_cues[-1].end_ms == last_end_ms
 
 
@@ -169,7 +176,7 @@ def test_a_session_with_several_stop_records_ends_at_the_first(tmp_path):
         StopRecord(20_000),
     ]
     result = finalise(_session(tmp_path, records), CFG)
-    assert result.manifest.live_cues == (LiveCue(i=1, start_ms=1_000, end_ms=4_650, text="あ", source="agent"),)
+    assert result.manifest.live_cues == (LiveCue(i=1, start_ms=600, end_ms=4_650, text="あ", source="agent"),)
     assert (result.manifest.counts.accepted, result.manifest.counts.skip) == (1, 0)
 
 

@@ -9,8 +9,10 @@ SCHEMA: Final = 1
 
 SKIP_MS: Final = 300
 MIN_CUE_MS: Final = 500
-START_SHIFT_MS: Final[Mapping[str, int]] = MappingProxyType({"hook": 0, "ocr": -1000})
-"""Keyed by ``TextMode`` value; a ``TextMode`` member works as the key."""
+START_SHIFT_MS: Final[Mapping[str, int]] = MappingProxyType({"hook": -400, "ocr": -1000})
+"""Keyed by ``TextMode`` value; a ``TextMode`` member works as the key. A hooker delivers a line after
+its voice has started (the game voices it before the first glyph is drawn, and the hooker sends it
+later still), and OCR only once the text stops changing, so each cue starts earlier than its line."""
 
 MAX_LINE_CHARS: Final = 300
 TYPEWRITER_WINDOW_S: Final = 2.0
