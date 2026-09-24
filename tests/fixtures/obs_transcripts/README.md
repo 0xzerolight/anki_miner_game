@@ -15,7 +15,8 @@ frames against T14's `FakeObs`, and T25 answers the provisioner from a fake OBS 
 recording and switch frames and events of a transcript. `app_provision.jsonl` is the app's own
 provisioning, recorded by E1 ([`docs/m0/m1-exit-linux.md`](../../../docs/m0/m1-exit-linux.md)) through
 the same proxy with the app's gateway; `tests/obs/test_provision_replay.py` replays it request by request
-against `ObsProvisioner`.
+against `ObsProvisioner`, less the scene item fit to the canvas (spec 11.3) that provisioning gained after
+the recording.
 
 ## Format
 

@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Fixed
 
+- **A game window smaller than the screen now fills the recording and card screenshots.** OBS placed it unscaled in the top-left corner with black around it; each capture input is now fitted to the canvas, aspect kept and centred.
 - **A windowed game with no window pinned is recorded on Windows, not a black screen.** Automatic capture now keeps a Display Capture of the primary monitor underneath Game Capture, which records only fullscreen games.
 - **Agent's machine translation no longer lands in the subtitle.** With Agent's default settings (Machine Translate on), its English translation frame reached the pipeline as its own line beside the hooked Japanese one; the translation frame is now dropped.
 - **The speaker-tag filter (Game profile -> Remove a leading 【name】 speaker tag) now also strips a `name: ` prefix (ASCII colon, one space) before an opening quote.** The Agent hooker's STEINS;GATE script sends dialogue as `倫太郎: 「…」` rather than LunaTranslator's `【倫太郎】「…」`; only the bracketed form was removed before, so the speaker name leaked into every cue and card. A full-width colon is left alone, so narration and labels (`注意：これは…`, `太郎はこう言った：「行くぞ」`) are unaffected.

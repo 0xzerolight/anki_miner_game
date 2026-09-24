@@ -211,6 +211,31 @@ PRIMARY_MONITOR_ITEM: Final = re.compile(r" @ 0,0(?: \(.*\))?$")
 translated "(Primary Monitor)" to the primary one (``duplicator-monitor-capture.c:740-743``); the
 primary monitor is the one at 0,0 of the virtual screen, in any language."""
 
+OBS_ALIGN_CENTER: Final = 0
+OBS_ALIGN_TOP_LEFT: Final = 5
+"""``OBS_ALIGN_LEFT | OBS_ALIGN_TOP`` (``obs-studio@ba2f32bd libobs/obs-defs.h:23-27``)."""
+
+
+def canvas_fit(width: int, height: int) -> dict[str, object]:
+    """``SetSceneItemTransform`` fields of OBS's own Fit to screen for a ``width`` x ``height`` canvas.
+
+    The item's box is the whole canvas and the source is scaled inside it, aspect kept, and centred
+    (``obs-studio@ba2f32bd frontend/widgets/OBSBasic_SceneItems.cpp:1222-1253``), so a window smaller
+    than the canvas fills the frame. Scale is left out: with bounds OBS keeps only its sign, a flip
+    (``libobs/obs-scene.c:446-486``).
+    """
+    return {
+        "positionX": 0,
+        "positionY": 0,
+        "rotation": 0,
+        "alignment": OBS_ALIGN_TOP_LEFT,
+        "boundsType": "OBS_BOUNDS_SCALE_INNER",
+        "boundsAlignment": OBS_ALIGN_CENTER,
+        "boundsWidth": width,
+        "boundsHeight": height,
+    }
+
+
 SPECIAL_AUDIO_SLOTS: Final = ("desktop1", "desktop2", "mic1", "mic2", "mic3", "mic4")
 """``GetSpecialInputs`` fields; every one present in the app's collection is muted: the microphones by
 spec 11.3, the desktop ones because the app's own inputs carry the game audio."""
@@ -412,6 +437,7 @@ class ObsProvisioner:
         log.info("OBS capture for %s: %s", profile.slug, plan.capture or "none available")
         changed |= await self._apply_inputs(plan)
         changed |= await self._use_primary_monitor(plan)
+        changed |= await self._fit_to_canvas(plan)
         changed |= await self._mute_special_inputs()
         return ProvisionResult(changed=changed, needs_restart=False)
 
@@ -627,6 +653,35 @@ class ObsProvisioner:
             "SetInputSettings", inputName=MONITOR_CAPTURE_INPUT, inputSettings={MONITOR_PROPERTY: wanted}
         )
         return True
+
+    async def _fit_to_canvas(self, plan: CollectionPlan) -> bool:
+        """Fit the scene item of every planned video input to the canvas (``canvas_fit``).
+
+        A new item sits unscaled at the top left, so a window smaller than the canvas filled only part
+        of each frame and card screenshot. The canvas is the current profile's base size, the app's
+        at arm. An item already fitted gets no request.
+        """
+        names = {spec.name for spec in plan.video}
+        if not names:
+            return False
+        video = await self._request("GetVideoSettings")
+        wanted = canvas_fit(video["baseWidth"], video["baseHeight"])
+        listing = await self._request("GetSceneItemList", sceneName=OBS_SCENE_NAME)
+        changed = False
+        for item in listing.get("sceneItems") or []:
+            if not isinstance(item, dict) or item.get("sourceName") not in names:
+                continue
+            transform = item.get("sceneItemTransform") or {}
+            if all(transform.get(key) == value for key, value in wanted.items()):
+                continue
+            await self._request(
+                "SetSceneItemTransform",
+                sceneName=OBS_SCENE_NAME,
+                sceneItemId=item["sceneItemId"],
+                sceneItemTransform=wanted,
+            )
+            changed = True
+        return changed
 
     async def _wait_released(self, name: str) -> None:
         """Wait until OBS has freed the name of the removed input ``name`` (``INPUT_RELEASE_TIMEOUT_S``).

@@ -34,7 +34,12 @@ obs-websocket 5.7.4 uses (``docs/m0/source-findings.md``; ``RequestHandler_Confi
   (``obs-studio@ba2f32bd frontend/widgets/OBSBasic.cpp:599, 830-843``); ``SetVideoSettings`` and
   that default are aligned as libobs aligns them (width to 4, height to 2).
 - A new scene collection holds one scene, ``Scene``, and no inputs or special inputs.
-- ``CreateInput`` appends the scene item on top; names are unique per collection.
+- ``CreateInput`` appends the scene item on top; names are unique per collection. A new item gets
+  libobs's transform (``obs-studio@ba2f32bd libobs/obs-scene.c:2287-2303``): top-left alignment, scale
+  1, no bounds. ``GetSceneItemList`` reports each item's ``sceneItemTransform`` (the fields
+  ``SetSceneItemTransform`` takes, ``obs-websocket@1ef34bf4 src/utils/Obs_ObjectHelper.cpp:47-89``, less
+  the source size), and ``SetSceneItemTransform`` overlays the fields it is given; a field OBS does not
+  know fails the call here, where OBS would ignore it.
 - ``RemoveInput`` takes the input out of its scenes, but OBS frees its name only once the source is
   destroyed, after the scene's next render and the UI have dropped their references
   (``obs-studio@ba2f32bd libobs/obs-source.c:754-755``, ``libobs/obs-scene.c:1015-1021``). For the next
@@ -105,10 +110,38 @@ class FakeInput:
     muted: bool = False
 
 
+NEW_ITEM_TRANSFORM: dict[str, Any] = {
+    "positionX": 0.0,
+    "positionY": 0.0,
+    "rotation": 0.0,
+    "scaleX": 1.0,
+    "scaleY": 1.0,
+    "alignment": 5,
+    "boundsType": "OBS_BOUNDS_NONE",
+    "boundsAlignment": 0,
+    "boundsWidth": 0.0,
+    "boundsHeight": 0.0,
+    "cropLeft": 0,
+    "cropRight": 0,
+    "cropTop": 0,
+    "cropBottom": 0,
+    "cropToBounds": False,
+}
+
+
+@dataclass
+class FakeItem:
+    item_id: int
+    transform: dict[str, Any] = field(default_factory=lambda: dict(NEW_ITEM_TRANSFORM))
+
+
 @dataclass
 class FakeCollection:
     scenes: dict[str, list[str]] = field(default_factory=lambda: {"Scene": []})
     """Scene name -> input names bottom to top."""
+    items: dict[tuple[str, str], FakeItem] = field(default_factory=dict)
+    """(scene name, input name) -> its scene item."""
+    item_ids: int = 0
     program_scene: str = "Scene"
     inputs: dict[str, FakeInput] = field(default_factory=dict)
     special: dict[str, str | None] = field(default_factory=dict)
@@ -208,6 +241,9 @@ class FakeObs:
 
     def scene_items(self, scene: str = "Game") -> list[str]:
         return list(self.collection.scenes[scene])
+
+    def transform(self, input_name: str, scene: str = "Game") -> dict[str, Any]:
+        return self.collection.items[(scene, input_name)].transform
 
     def add_special_input(self, slot: str, name: str, kind: str, *, muted: bool = False) -> None:
         self.collection.inputs[name] = FakeInput(kind, {}, muted)
@@ -417,7 +453,9 @@ class FakeObs:
             raise self._fail("CreateInput", INVALID_INPUT_KIND)
         collection.inputs[inputName] = FakeInput(inputKind, copy.deepcopy(inputSettings or {}))
         collection.scenes[sceneName].append(inputName)
-        return {"inputUuid": f"uuid-{inputName}", "sceneItemId": len(collection.scenes[sceneName])}
+        collection.item_ids += 1
+        collection.items[(sceneName, inputName)] = FakeItem(collection.item_ids)
+        return {"inputUuid": f"uuid-{inputName}", "sceneItemId": collection.item_ids}
 
     def _SetInputSettings(self, inputName: str, inputSettings: dict[str, Any], overlay: bool = True) -> None:
         found = self._input("SetInputSettings", inputName)
@@ -433,9 +471,44 @@ class FakeObs:
             return  # Already removed: obs_source_remove does nothing to a removed source.
         del collection.inputs[inputName]
         collection.removed[inputName] = (found, self._requests)
-        for items in collection.scenes.values():
+        for scene, items in collection.scenes.items():
             if inputName in items:
                 items.remove(inputName)
+                del collection.items[(scene, inputName)]
+
+    # Scene items ---------------------------------------------------------------------------
+
+    def _GetSceneItemList(self, sceneName: str) -> dict[str, Any]:
+        collection = self.collection
+        if sceneName not in collection.scenes:
+            raise self._fail("GetSceneItemList", RESOURCE_NOT_FOUND)
+        listed = []
+        for index, name in enumerate(collection.scenes[sceneName]):
+            item = collection.items[(sceneName, name)]
+            listed.append(
+                {
+                    "sceneItemId": item.item_id,
+                    "sceneItemIndex": index,
+                    "sourceName": name,
+                    "inputKind": collection.inputs[name].kind,
+                    "sceneItemEnabled": True,
+                    "sceneItemTransform": copy.deepcopy(item.transform),
+                }
+            )
+        return {"sceneItems": listed}
+
+    def _SetSceneItemTransform(self, sceneName: str, sceneItemId: int, sceneItemTransform: dict[str, Any]) -> None:
+        unknown = set(sceneItemTransform) - set(NEW_ITEM_TRANSFORM)
+        if unknown:
+            raise AssertionError(f"OBS ignores sceneItemTransform fields it does not know: {sorted(unknown)}")
+        found = [
+            item
+            for (scene, _), item in self.collection.items.items()
+            if scene == sceneName and item.item_id == sceneItemId
+        ]
+        if not found:
+            raise self._fail("SetSceneItemTransform", RESOURCE_NOT_FOUND)
+        found[0].transform.update(copy.deepcopy(sceneItemTransform))
 
     def _GetSpecialInputs(self) -> dict[str, Any]:
         slots = ("desktop1", "desktop2", "mic1", "mic2", "mic3", "mic4")

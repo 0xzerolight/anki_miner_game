@@ -25,7 +25,8 @@ each replayed through the gateway by ``tests/obs/test_client_transcripts.py``:
 - ``app_provision.jsonl`` arms 2 and 3: recorded before ``ensure_profile`` took over the switch to
   the app's profile (a26e411), so they no longer are the app's requests;
   ``tests/obs/test_provision_replay.py`` replays their provisioning against ``ObsProvisioner``.
-  Arm 1 is replayed request by request below.
+  Arm 1 is replayed request by request below, without the canvas fit it predates
+  (``before_the_canvas_fit``, ``tests/conftest.py``).
 """
 
 import asyncio
@@ -520,6 +521,7 @@ def first_app_run(tmp_path: Path) -> Path:
     return path
 
 
+@pytest.mark.usefixtures("before_the_canvas_fit")
 def test_the_apps_first_arm_replays_request_by_request(qtbot, tmp_path, monkeypatch):
     """Arm 1 on an OBS that has never seen the app, as E1 recorded it through the whole composition.
 

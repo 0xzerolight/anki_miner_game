@@ -23,7 +23,15 @@ from anki_miner_game.obs.provision import (
     plan_collection,
 )
 from tests.obs import fake_obs
-from tests.obs.fake_obs import LINUX_WAYLAND_KINDS, LINUX_X11_KINDS, WINDOWS_KINDS, FakeCollection, FakeObs, Sleeps
+from tests.obs.fake_obs import (
+    LINUX_WAYLAND_KINDS,
+    LINUX_X11_KINDS,
+    NEW_ITEM_TRANSFORM,
+    WINDOWS_KINDS,
+    FakeCollection,
+    FakeObs,
+    Sleeps,
+)
 
 WIN_WINDOW = "Steins#3AGate:UnityWndClass:SteinsGate.exe"
 X11_WINDOW = "0x3a00007\r\nSteins;Gate\r\nsteinsgate"
@@ -50,6 +58,18 @@ MONITORS = [
 plugins/win-capture/duplicator-monitor-capture.c:727-755, 813-816``): ``<name>: <w>x<h> @ <x>,<y>``,
 the primary monitor, always at 0,0, with a localized suffix."""
 DISPLAY_ON_PRIMARY = {"capture_cursor": False, "monitor_id": PRIMARY_MONITOR}
+
+
+def fitted(width: int, height: int) -> dict[str, Any]:
+    """OBS's Fit to screen (``obs-studio@ba2f32bd frontend/widgets/OBSBasic_SceneItems.cpp:1222-1253``):
+    the item's box is the canvas, the source scaled inside it keeping its aspect and centred."""
+    return {
+        **NEW_ITEM_TRANSFORM,
+        "boundsType": "OBS_BOUNDS_SCALE_INNER",
+        "boundsAlignment": 0,
+        "boundsWidth": width,
+        "boundsHeight": height,
+    }
 
 
 def profile(
@@ -416,6 +436,85 @@ def test_the_plan_names_the_capture_method_in_use(platform, kinds, game, capture
     assert plan_collection(game, frozenset(kinds), platform).capture == capture
 
 
+# Canvas fit ------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("platform", "kinds", "game", "video"),
+    [
+        ("win32", WINDOWS_KINDS, profile(), [MONITOR_CAPTURE_INPUT, GAME_CAPTURE_INPUT]),
+        ("win32", WINDOWS_KINDS, profile(window=WIN_WINDOW), [WINDOW_CAPTURE_INPUT, GAME_CAPTURE_INPUT]),
+        ("win32", WINDOWS_KINDS, profile(CaptureKind.WINDOW, WIN_WINDOW), [WINDOW_CAPTURE_INPUT, GAME_CAPTURE_INPUT]),
+        ("linux", LINUX_X11_KINDS, profile(window=X11_WINDOW), [XCOMPOSITE_INPUT]),
+        ("linux", LINUX_X11_KINDS, profile(), [PIPEWIRE_INPUT, XCOMPOSITE_INPUT]),
+    ],
+)
+async def test_every_video_input_is_fitted_to_the_canvas(platform, kinds, game, video):
+    """S2-3: a 1280x720 window sat unscaled at the top left of a 1920x1080 canvas."""
+    obs = FakeObs(input_kinds=kinds, window_lists={"monitor_capture": MONITORS})
+    provisioner = ObsProvisioner(obs, platform=platform, sleep=Sleeps())
+
+    await provisioner.ensure_collection(game)
+
+    assert {name: obs.transform(name) for name in video} == {name: fitted(1920, 1080) for name in video}
+    audio = [name for name in obs.scene_items() if name not in video]
+    assert audio and all(obs.transform(name) == NEW_ITEM_TRANSFORM for name in audio)
+
+
+async def test_the_fit_follows_the_canvas_size():
+    obs = FakeObs(input_kinds=WINDOWS_KINDS, base_size=(2560, 1080))
+    provisioner = ObsProvisioner(obs, platform="win32", sleep=Sleeps())
+
+    await provisioner.ensure_collection(profile(window=WIN_WINDOW))
+
+    assert obs.transform(GAME_CAPTURE_INPUT) == fitted(2560, 1080)
+
+
+async def test_items_made_before_the_fit_are_fitted_in_place():
+    """A collection provisioned by 1.0.0 keeps its inputs; only their items change."""
+    obs, provisioner = windows_obs()
+    await provisioner.ensure_collection(profile(window=WIN_WINDOW))
+    for name in (WINDOW_CAPTURE_INPUT, GAME_CAPTURE_INPUT):
+        obs.transform(name).update(NEW_ITEM_TRANSFORM)
+    obs.reset_calls()
+
+    await provisioner.ensure_collection(profile(window=WIN_WINDOW))
+
+    assert obs.mutating() == ["SetSceneItemTransform"] * 2
+    assert obs.transform(WINDOW_CAPTURE_INPUT) == obs.transform(GAME_CAPTURE_INPUT) == fitted(1920, 1080)
+
+
+async def test_an_item_moved_in_obs_is_fitted_again():
+    obs, provisioner = windows_obs()
+    await provisioner.ensure_collection(profile())
+    obs.transform(GAME_CAPTURE_INPUT).update(positionX=300.0, boundsType="OBS_BOUNDS_NONE", rotation=90.0)
+    obs.reset_calls()
+
+    await provisioner.ensure_collection(profile())
+
+    item = obs.collection.items[(OBS_SCENE_NAME, GAME_CAPTURE_INPUT)].item_id
+    assert [c for c in obs.calls if c[0] == "SetSceneItemTransform"] == [
+        (
+            "SetSceneItemTransform",
+            {
+                "sceneName": OBS_SCENE_NAME,
+                "sceneItemId": item,
+                "sceneItemTransform": {
+                    "positionX": 0,
+                    "positionY": 0,
+                    "rotation": 0,
+                    "alignment": 5,
+                    "boundsType": "OBS_BOUNDS_SCALE_INNER",
+                    "boundsAlignment": 0,
+                    "boundsWidth": 1920,
+                    "boundsHeight": 1080,
+                },
+            },
+        )
+    ]
+    assert obs.transform(GAME_CAPTURE_INPUT) == fitted(1920, 1080)
+
+
 # Audio special inputs ----------------------------------------------------------------------------
 
 
@@ -588,3 +687,4 @@ async def test_inputs_of_the_user_are_left_alone():
 
     assert "Webcam" in inputs(obs)
     assert all(c[1].get("inputName") != "Webcam" for c in obs.calls)
+    assert obs.transform("Webcam") == NEW_ITEM_TRANSFORM

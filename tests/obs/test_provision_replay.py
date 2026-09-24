@@ -32,7 +32,9 @@ answer (``CreateProfile``) has landed in the fake before the next request, as it
   and a muted special input was added to the collection: ``RemoveInput``, the wait for OBS to free
   the name, ``CreateInput``, ``GetInputMute``. Arm 3 after the special input was unmuted:
   ``SetInputMute``. These frames are replayed request by request against ``ObsProvisioner`` itself
-  (``TranscriptGateway``), and arm 1 also against ``FakeObs``.
+  (``TranscriptGateway``), and arm 1 also against ``FakeObs``. The recording predates the canvas fit
+  (spec 11.3), so the provisioner replays it without that step (``before_the_canvas_fit``,
+  ``tests/conftest.py``).
 """
 
 import asyncio
@@ -377,6 +379,7 @@ def test_the_app_transcript_holds_three_arms():
 
 
 @pytest.mark.parametrize("arm", [0, 1, 2])
+@pytest.mark.usefixtures("before_the_canvas_fit")
 @LINUX_RUN
 async def test_the_provisioner_sends_exactly_what_the_app_sent_to_a_real_obs(arm):
     gateway, _ = await provision_arm(load(APP_PROVISION), arm)
@@ -386,6 +389,7 @@ async def test_the_provisioner_sends_exactly_what_the_app_sent_to_a_real_obs(arm
     assert gateway.next_request() in {"GetVersion", "GetStreamStatus"}
 
 
+@pytest.mark.usefixtures("before_the_canvas_fit")
 @LINUX_RUN
 async def test_the_first_arm_copies_the_audio_rate_and_reactivates_the_profile():
     gateway, results = await provision_arm(load(APP_PROVISION), 0)
@@ -403,6 +407,7 @@ async def test_the_first_arm_copies_the_audio_rate_and_reactivates_the_profile()
     assert ("SetCurrentProgramScene", {"sceneName": OBS_SCENE_NAME}) in gateway.sent
 
 
+@pytest.mark.usefixtures("before_the_canvas_fit")
 @LINUX_RUN
 async def test_the_second_arm_only_removes_and_recreates_the_replaced_input():
     gateway, results = await provision_arm(load(APP_PROVISION), 1)
@@ -413,6 +418,7 @@ async def test_the_second_arm_only_removes_and_recreates_the_replaced_input():
     assert results == [ProvisionResult(changed=False, needs_restart=False), ProvisionResult(True, False)]
 
 
+@pytest.mark.usefixtures("before_the_canvas_fit")
 @LINUX_RUN
 async def test_the_third_arm_only_mutes_the_special_input():
     gateway, results = await provision_arm(load(APP_PROVISION), 2)

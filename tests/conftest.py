@@ -81,3 +81,21 @@ def _isolate_game_home(tmp_path_factory, monkeypatch):
     tmp_home.mkdir()
     monkeypatch.setenv("ANKI_MINER_GAME_HOME", str(tmp_home))
     yield tmp_home
+
+
+@pytest.fixture
+def before_the_canvas_fit(monkeypatch):
+    """Provisioning as it was when ``app_provision.jsonl`` was recorded: without the canvas fit.
+
+    ``ObsProvisioner._fit_to_canvas`` (spec 11.3, QA finding S2-3) came after the recording. It reads
+    ``GetVideoSettings`` and ``GetSceneItemList`` and sends ``SetSceneItemTransform``, which the
+    transcript does not hold, so a request-by-request replay of the recorded arms runs without it;
+    ``tests/obs/test_provision_collection.py`` ("Canvas fit") checks it against ``FakeObs``. Every other
+    request must still be the one the app sent to a real OBS.
+    """
+    from anki_miner_game.obs.provision import ObsProvisioner
+
+    async def not_recorded(self, plan):
+        return False
+
+    monkeypatch.setattr(ObsProvisioner, "_fit_to_canvas", not_recorded)
