@@ -13,6 +13,7 @@ from anki_miner_game.obs.provision import (
     DESKTOP_AUDIO_INPUT,
     GAME_CAPTURE_INPUT,
     INPUT_RELEASE_TIMEOUT_S,
+    MONITOR_CAPTURE_INPUT,
     PIPEWIRE_INPUT,
     POLL_S,
     WINDOW_CAPTURE_INPUT,
@@ -21,6 +22,7 @@ from anki_miner_game.obs.provision import (
     ObsProvisioner,
     plan_collection,
 )
+from tests.obs import fake_obs
 from tests.obs.fake_obs import LINUX_WAYLAND_KINDS, LINUX_X11_KINDS, WINDOWS_KINDS, FakeCollection, FakeObs, Sleeps
 
 WIN_WINDOW = "Steins#3AGate:UnityWndClass:SteinsGate.exe"
@@ -36,6 +38,19 @@ XCOMPOSITE_ON_WINDOW = {"capture_window": X11_WINDOW, "show_cursor": False}
 XCOMPOSITE_IDLE = {"capture_window": XCOMPOSITE_PLACEHOLDER, "show_cursor": False}
 PIPEWIRE = {"ShowCursor": False}
 
+PRIMARY_MONITOR = r"\\?\DISPLAY#GSM5B09#5&2e7f1a3&0&UID4352#{e6f07b5f-ee97-4a90-b076-33f57bf4eaa7}"
+SIDE_MONITOR = r"\\?\DISPLAY#DEL40F4#5&2e7f1a3&0&UID4353#{e6f07b5f-ee97-4a90-b076-33f57bf4eaa7}"
+MONITORS = [
+    # A new monitor_capture's monitor_id is "DUMMY": OBS lists it first, disabled, and captures nothing.
+    {"itemName": "[Select a display to capture]", "itemValue": "DUMMY", "itemEnabled": False},
+    {"itemName": "DELL U2415: 1920x1200 @ -1920,0", "itemValue": SIDE_MONITOR, "itemEnabled": True},
+    {"itemName": "LG ULTRAGEAR: 2560x1440 @ 0,0 (Primary Monitor)", "itemValue": PRIMARY_MONITOR, "itemEnabled": True},
+]
+"""``monitor_id`` items of a ``monitor_capture`` as OBS 32 builds them (``obs-studio@ba2f32bd
+plugins/win-capture/duplicator-monitor-capture.c:727-755, 813-816``): ``<name>: <w>x<h> @ <x>,<y>``,
+the primary monitor, always at 0,0, with a localized suffix."""
+DISPLAY_ON_PRIMARY = {"capture_cursor": False, "monitor_id": PRIMARY_MONITOR}
+
 
 def profile(
     kind: CaptureKind = CaptureKind.AUTO, window: str | None = None, audio: AudioMode = AudioMode.DESKTOP
@@ -49,7 +64,7 @@ def profile(
 
 
 def windows_obs(kinds: tuple[str, ...] = WINDOWS_KINDS) -> tuple[FakeObs, ObsProvisioner]:
-    obs = FakeObs(input_kinds=kinds)
+    obs = FakeObs(input_kinds=kinds, window_lists={"monitor_capture": MONITORS})
     return obs, ObsProvisioner(obs, platform="win32", sleep=Sleeps())
 
 
@@ -139,15 +154,85 @@ async def test_a_collection_switch_whose_event_never_comes_raises_after_the_swit
 # Platform rows --------------------------------------------------------------------------------
 
 
-async def test_windows_without_a_pinned_window_captures_any_fullscreen_game_with_desktop_audio():
+async def test_windows_without_a_pinned_window_captures_the_primary_monitor_under_any_fullscreen_game():
+    """S2-2: any-fullscreen game capture alone recorded a windowed game black."""
     obs, provisioner = windows_obs()
 
     await provisioner.ensure_collection(profile())
 
     assert inputs(obs) == {
+        MONITOR_CAPTURE_INPUT: ("monitor_capture", DISPLAY_ON_PRIMARY),
         GAME_CAPTURE_INPUT: ("game_capture", GAME_ANY),
         DESKTOP_AUDIO_INPUT: ("wasapi_output_capture", DESKTOP_AUDIO),
     }
+    items = obs.scene_items()
+    assert items.index(MONITOR_CAPTURE_INPUT) < items.index(GAME_CAPTURE_INPUT)
+
+
+async def test_the_display_capture_follows_the_primary_monitor_in_any_obs_language():
+    obs, provisioner = windows_obs()
+    await provisioner.ensure_collection(profile())
+    obs.window_lists["monitor_capture"] = [
+        {"itemName": "LG ULTRAGEAR: 2560x1440 @ 1920,0", "itemValue": PRIMARY_MONITOR, "itemEnabled": True},
+        {
+            "itemName": "DELL U2415: 1920x1200 @ 0,0 (プライマリモニター)",
+            "itemValue": SIDE_MONITOR,
+            "itemEnabled": True,
+        },
+    ]
+    obs.reset_calls()
+
+    await provisioner.ensure_collection(profile())
+
+    assert obs.mutating() == ["SetInputSettings"]
+    assert inputs(obs)[MONITOR_CAPTURE_INPUT][1]["monitor_id"] == SIDE_MONITOR
+
+
+async def test_a_monitor_list_without_one_at_0_0_takes_its_first_enabled_monitor():
+    obs, provisioner = windows_obs()
+    obs.window_lists["monitor_capture"] = [MONITORS[0], MONITORS[1]]
+
+    await provisioner.ensure_collection(profile())
+
+    assert inputs(obs)[MONITOR_CAPTURE_INPUT][1]["monitor_id"] == SIDE_MONITOR
+
+
+async def test_no_monitor_to_pick_leaves_the_display_capture_as_obs_made_it():
+    obs, provisioner = windows_obs()
+    obs.window_lists["monitor_capture"] = [MONITORS[0]]
+
+    await provisioner.ensure_collection(profile())
+
+    assert inputs(obs)[MONITOR_CAPTURE_INPUT] == ("monitor_capture", {"capture_cursor": False})
+
+
+async def test_a_display_capture_without_a_monitor_id_list_is_left_on_its_default_monitor(monkeypatch):
+    # OBS on the OpenGL renderer registers the older monitor_capture, whose list is "monitor" (an index).
+    monkeypatch.setitem(fake_obs.LIST_PROPERTY, "monitor_capture", "monitor")
+    obs, provisioner = windows_obs()
+
+    await provisioner.ensure_collection(profile())
+
+    assert inputs(obs)[MONITOR_CAPTURE_INPUT] == ("monitor_capture", {"capture_cursor": False})
+
+
+async def test_windows_game_kind_without_a_window_uses_any_fullscreen_game_capture_alone():
+    obs, provisioner = windows_obs()
+
+    await provisioner.ensure_collection(profile(CaptureKind.GAME))
+
+    assert inputs(obs) == {
+        GAME_CAPTURE_INPUT: ("game_capture", GAME_ANY),
+        DESKTOP_AUDIO_INPUT: ("wasapi_output_capture", DESKTOP_AUDIO),
+    }
+
+
+async def test_windows_without_monitor_capture_keeps_any_fullscreen_game_capture_alone():
+    obs, provisioner = windows_obs(tuple(k for k in WINDOWS_KINDS if k != "monitor_capture"))
+
+    await provisioner.ensure_collection(profile())
+
+    assert set(inputs(obs)) == {GAME_CAPTURE_INPUT, DESKTOP_AUDIO_INPUT}
 
 
 async def test_windows_with_a_pinned_window_adds_the_window_capture_fallback_underneath_and_app_audio():
@@ -201,6 +286,7 @@ async def test_windows_window_kind_without_a_window_falls_back_to_any_fullscreen
     await provisioner.ensure_collection(profile(CaptureKind.WINDOW))
 
     assert inputs(obs)[GAME_CAPTURE_INPUT] == ("game_capture", GAME_ANY)
+    assert inputs(obs)[MONITOR_CAPTURE_INPUT] == ("monitor_capture", DISPLAY_ON_PRIMARY)
     assert WINDOW_CAPTURE_INPUT not in inputs(obs)
 
 
@@ -238,6 +324,7 @@ async def test_windows_ignores_an_x11_window_string():
     await provisioner.ensure_collection(profile(window=X11_WINDOW, audio=AudioMode.APP))
 
     assert inputs(obs) == {
+        MONITOR_CAPTURE_INPUT: ("monitor_capture", DISPLAY_ON_PRIMARY),
         GAME_CAPTURE_INPUT: ("game_capture", GAME_ANY),
         DESKTOP_AUDIO_INPUT: ("wasapi_output_capture", DESKTOP_AUDIO),
     }
@@ -319,6 +406,7 @@ async def test_input_kinds_obs_does_not_report_are_skipped():
     [
         ("win32", WINDOWS_KINDS, profile(), "game_capture"),
         ("win32", WINDOWS_KINDS, profile(CaptureKind.WINDOW, WIN_WINDOW), "window_capture"),
+        ("win32", ("monitor_capture", "wasapi_output_capture"), profile(), "monitor_capture"),
         ("linux", LINUX_X11_KINDS, profile(window=X11_WINDOW), "xcomposite_input"),
         ("linux", LINUX_X11_KINDS, profile(), "pipewire-screen-capture-source"),
         ("linux", ("xcomposite_input",), profile(), None),
@@ -363,7 +451,7 @@ async def test_every_special_audio_input_is_muted_once():
     ],
 )
 async def test_second_run_sends_no_mutating_request(platform, kinds, game):
-    obs = FakeObs(input_kinds=kinds)
+    obs = FakeObs(input_kinds=kinds, window_lists={"monitor_capture": MONITORS})
     provisioner = ObsProvisioner(obs, platform=platform)
     await provisioner.ensure_collection(game)
     obs.reset_calls()
@@ -391,14 +479,16 @@ async def test_switching_games_changes_only_the_inputs_that_differ():
     assert inputs(obs)[GAME_CAPTURE_INPUT][1]["window"] == other
 
 
-async def test_unpinning_removes_the_fallback_and_app_audio_and_restores_desktop_audio():
+async def test_unpinning_swaps_the_window_fallback_for_the_display_one_and_app_audio_for_desktop_audio():
     obs, provisioner = windows_obs()
     await provisioner.ensure_collection(profile(window=WIN_WINDOW, audio=AudioMode.APP))
 
     await provisioner.ensure_collection(profile())
 
     assert inputs(obs)[GAME_CAPTURE_INPUT][1]["capture_mode"] == "any_fullscreen"
-    assert set(inputs(obs)) == {GAME_CAPTURE_INPUT, DESKTOP_AUDIO_INPUT}
+    assert set(inputs(obs)) == {MONITOR_CAPTURE_INPUT, GAME_CAPTURE_INPUT, DESKTOP_AUDIO_INPUT}
+    items = obs.scene_items()
+    assert items.index(MONITOR_CAPTURE_INPUT) < items.index(GAME_CAPTURE_INPUT)
 
 
 async def test_pinning_later_recreates_game_capture_so_the_fallback_stays_underneath():
@@ -410,6 +500,7 @@ async def test_pinning_later_recreates_game_capture_so_the_fallback_stays_undern
 
     items = obs.scene_items()
     assert items.index(WINDOW_CAPTURE_INPUT) < items.index(GAME_CAPTURE_INPUT)
+    assert MONITOR_CAPTURE_INPUT not in items
     assert inputs(obs)[GAME_CAPTURE_INPUT] == ("game_capture", GAME_ON_WINDOW)
     creates = [c[1]["inputName"] for c in obs.calls if c[0] == "CreateInput"]
     assert creates == [WINDOW_CAPTURE_INPUT, GAME_CAPTURE_INPUT]

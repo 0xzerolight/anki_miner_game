@@ -15,6 +15,7 @@ E1 (``docs/m0/m1-exit-linux.md``), which measured ``INPUT_RELEASE_TIMEOUT_S``'s 
 
 import asyncio
 import logging
+import re
 import sys
 import threading
 from collections.abc import Awaitable, Callable, Mapping
@@ -167,6 +168,7 @@ def _config_bool(value: str | None) -> bool:
 
 GAME_CAPTURE: Final = "game_capture"
 WINDOW_CAPTURE: Final = "window_capture"
+MONITOR_CAPTURE: Final = "monitor_capture"
 APP_AUDIO_CAPTURE: Final = "wasapi_process_output_capture"
 WINDOWS_DESKTOP_AUDIO: Final = "wasapi_output_capture"
 XCOMPOSITE: Final = "xcomposite_input"
@@ -175,6 +177,7 @@ PULSE_DESKTOP_AUDIO: Final = "pulse_output_capture"
 
 GAME_CAPTURE_INPUT: Final = "Game Capture"
 WINDOW_CAPTURE_INPUT: Final = "Window Capture"
+MONITOR_CAPTURE_INPUT: Final = "Display Capture"
 XCOMPOSITE_INPUT: Final = "Window Capture (X11)"
 PIPEWIRE_INPUT: Final = "Screen Capture (PipeWire)"
 APP_AUDIO_INPUT: Final = "Game Audio"
@@ -183,7 +186,13 @@ DESKTOP_AUDIO_INPUT: Final = "Desktop Audio Capture"
 has no special audio inputs (``obs-studio@ba2f32bd frontend/widgets/OBSBasic_SceneCollections.cpp:1033-1048``,
 ``:1163-1165``). The name differs from the special input's default ("Desktop Audio") so both can exist."""
 
-WINDOWS_INPUTS: Final = (GAME_CAPTURE_INPUT, WINDOW_CAPTURE_INPUT, APP_AUDIO_INPUT, DESKTOP_AUDIO_INPUT)
+WINDOWS_INPUTS: Final = (
+    GAME_CAPTURE_INPUT,
+    WINDOW_CAPTURE_INPUT,
+    MONITOR_CAPTURE_INPUT,
+    APP_AUDIO_INPUT,
+    DESKTOP_AUDIO_INPUT,
+)
 LINUX_INPUTS: Final = (XCOMPOSITE_INPUT, PIPEWIRE_INPUT, DESKTOP_AUDIO_INPUT)
 
 XCOMPOSITE_PLACEHOLDER: Final = "0\r\nno window pinned\r\nanki-miner-game"
@@ -191,6 +200,16 @@ XCOMPOSITE_PLACEHOLDER: Final = "0\r\nno window pinned\r\nanki-miner-game"
 aborts when the windows of an ``xcomposite_input`` with an empty ``capture_window`` are listed
 (R1 side finding 2, ``docs/m0/clock.md``). R2 created it so: OBS lists the placeholder as a disabled item 0
 and the live windows after it (``docs/m0/obs-behaviour.md`` section 1)."""
+
+MONITOR_PROPERTY: Final = "monitor_id"
+"""The monitor of a ``monitor_capture``: OBS's device id of the monitor, from the input's own list.
+A new input's is ``DUMMY``, which captures nothing until a monitor is picked
+(``obs-studio@ba2f32bd plugins/win-capture/duplicator-monitor-capture.c:40, 282-292, 379``)."""
+
+PRIMARY_MONITOR_ITEM: Final = re.compile(r" @ 0,0(?: \(.*\))?$")
+"""The primary monitor's item in that list. OBS names each item ``<name>: <w>x<h> @ <x>,<y>`` and adds a
+translated "(Primary Monitor)" to the primary one (``duplicator-monitor-capture.c:740-743``); the
+primary monitor is the one at 0,0 of the virtual screen, in any language."""
 
 SPECIAL_AUDIO_SLOTS: Final = ("desktop1", "desktop2", "mic1", "mic2", "mic3", "mic4")
 """``GetSpecialInputs`` fields; every one present in the app's collection is muted: the microphones by
@@ -259,6 +278,11 @@ def _plan_windows(profile: GameProfile, kinds: frozenset[str]) -> tuple[list[Inp
     game_kind = kind is CaptureKind.GAME and GAME_CAPTURE in kinds
     video: list[InputSpec] = []
     capture: str | None = None
+    if pinned is None and MONITOR_CAPTURE in kinds and not game_kind:
+        # With no window pinned, the fallback underneath any-fullscreen game capture, which records a
+        # windowed game black: the game shows through it. Its monitor is set once it exists.
+        video.append(InputSpec(MONITOR_CAPTURE_INPUT, MONITOR_CAPTURE, {"capture_cursor": False}))
+        capture = MONITOR_CAPTURE
     if pinned is not None and WINDOW_CAPTURE in kinds and not game_kind:
         # The capture itself for the window kind; for auto, the fallback underneath game capture
         # for games that refuse the hook.
@@ -387,6 +411,7 @@ class ObsProvisioner:
         plan = await self._plan(profile)
         log.info("OBS capture for %s: %s", profile.slug, plan.capture or "none available")
         changed |= await self._apply_inputs(plan)
+        changed |= await self._use_primary_monitor(plan)
         changed |= await self._mute_special_inputs()
         return ProvisionResult(changed=changed, needs_restart=False)
 
@@ -566,6 +591,42 @@ class ObsProvisioner:
                 await self._request("SetInputSettings", inputName=spec.name, inputSettings=settings)
                 changed = True
         return changed
+
+    async def _use_primary_monitor(self, plan: CollectionPlan) -> bool:
+        """Point the planned display capture at the primary monitor (``MONITOR_PROPERTY``).
+
+        With no item at 0,0 it takes the first monitor listed. It leaves the input as it is when OBS
+        lists no monitor, and when the input has no such list: OBS on the OpenGL renderer registers
+        an older ``monitor_capture`` that picks a monitor by index and defaults to the first one
+        (``plugins/win-capture/plugin-main.c:140-143``, ``monitor-capture.c:110``).
+        """
+        if all(spec.name != MONITOR_CAPTURE_INPUT for spec in plan.video):
+            return False
+        try:
+            data = await self._request(
+                "GetInputPropertiesListPropertyItems", inputName=MONITOR_CAPTURE_INPUT, propertyName=MONITOR_PROPERTY
+            )
+        except ObsRequestError as exc:
+            if exc.code == RESOURCE_NOT_FOUND:
+                return False
+            raise
+        monitors = [
+            (str(item.get("itemName") or ""), item["itemValue"])
+            for item in data.get("propertyItems") or []
+            if isinstance(item, dict) and item.get("itemEnabled") is True and isinstance(item.get("itemValue"), str)
+        ]
+        primary = next((value for name, value in monitors if PRIMARY_MONITOR_ITEM.search(name)), None)
+        wanted = primary or (monitors[0][1] if monitors else None)
+        if wanted is None:
+            log.warning("OBS lists no monitor for %r; its monitor is left as it is", MONITOR_CAPTURE_INPUT)
+            return False
+        found = await self._input_settings(MONITOR_CAPTURE_INPUT)
+        if found is not None and found[1].get(MONITOR_PROPERTY) == wanted:
+            return False
+        await self._request(
+            "SetInputSettings", inputName=MONITOR_CAPTURE_INPUT, inputSettings={MONITOR_PROPERTY: wanted}
+        )
+        return True
 
     async def _wait_released(self, name: str) -> None:
         """Wait until OBS has freed the name of the removed input ``name`` (``INPUT_RELEASE_TIMEOUT_S``).

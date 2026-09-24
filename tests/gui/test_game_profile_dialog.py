@@ -332,6 +332,13 @@ def test_the_capture_method_says_when_obs_does_not_answer(io_loop, qtbot) -> Non
     assert "OBS did not answer" in dialog.capture_method_label.text()
 
 
+def test_a_windows_obs_without_game_capture_names_its_display_capture(io_loop, qtbot) -> None:
+    obs = ListingObs(input_kinds=("monitor_capture", "wasapi_output_capture"))
+    dialog = Rig(io_loop, qtbot, platform="win32", obs=obs).open(replace(FULL_HOOK, capture=CaptureSettings()))
+
+    assert dialog.capture_method_label.text() == "Capture method in use: Display Capture"
+
+
 def test_capture_choices_follow_the_platform_and_keep_a_stored_kind(rig: Rig, win_rig: Rig) -> None:
     linux = rig.open(replace(FULL_HOOK, capture=CaptureSettings(kind=CaptureKind.GAME)))
     windows = win_rig.open(FULL_OCR_WINDOWS)

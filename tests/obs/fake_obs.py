@@ -83,6 +83,7 @@ LIST_PROPERTY = {
     "window_capture": "window",
     "wasapi_process_output_capture": "window",
     "xcomposite_input": "capture_window",
+    "monitor_capture": "monitor_id",
 }
 
 WINDOWS_KINDS = (
@@ -139,7 +140,7 @@ class FakeObs:
     ) -> None:
         self.input_kinds = list(input_kinds)
         self.window_lists = dict(window_lists or {})
-        """Input kind -> ``propertyItems`` of its window list."""
+        """Input kind -> ``propertyItems`` of its list property (``LIST_PROPERTY``: windows, or monitors)."""
         self.create_profile_delay = create_profile_delay
         self.events_after_answer = events_after_answer
         self.lost_events = frozenset(lost_events)

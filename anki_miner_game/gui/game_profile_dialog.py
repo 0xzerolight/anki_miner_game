@@ -309,6 +309,7 @@ NO_WINDOWS: Final = (
 CAPTURE_METHOD_NAMES: Final = {
     "game_capture": "Game Capture",
     "window_capture": "Window Capture",
+    "monitor_capture": "Display Capture",
     "xcomposite_input": "Window Capture (X11)",
     "pipewire-screen-capture-source": "Screen Capture (PipeWire)",
 }
