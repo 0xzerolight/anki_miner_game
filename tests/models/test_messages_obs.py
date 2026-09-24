@@ -92,11 +92,12 @@ def test_line_accepted_defaults_to_a_new_line():
     assert UserCommand(kind=CommandKind.START).line is None
 
 
-def test_required_requests_are_the_32_of_spec_3_3():
-    assert len(REQUIRED_REQUESTS) == 32
-    assert len(set(REQUIRED_REQUESTS)) == 32
+def test_required_requests_are_the_34_of_spec_3_3():
+    assert len(REQUIRED_REQUESTS) == 34
+    assert len(set(REQUIRED_REQUESTS)) == 34
     assert REQUIRED_REQUESTS[0] == "GetVersion"
-    assert REQUIRED_REQUESTS[-1] == "GetOutputSettings"
+    assert REQUIRED_REQUESTS[-1] == "SetSceneItemTransform"
+    assert "GetSceneItemList" in REQUIRED_REQUESTS
 
 
 def test_missing_requests_keeps_the_required_order():

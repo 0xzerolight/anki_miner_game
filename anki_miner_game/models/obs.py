@@ -38,6 +38,8 @@ REQUIRED_REQUESTS: Final[tuple[str, ...]] = (
     "GetInputMute",
     "RemoveInput",
     "GetOutputSettings",
+    "GetSceneItemList",
+    "SetSceneItemTransform",
 )
 """Every request the app sends (spec 3.3); ``GetVersion.availableRequests`` must contain them all."""
 
