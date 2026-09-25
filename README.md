@@ -92,7 +92,7 @@ Problems show as banners in the main window.
 | Issue | Solution |
 |-------|----------|
 | Where are the logs? | `~/.anki_miner_game/anki_miner_game.log` (`%USERPROFILE%\.anki_miner_game\` on Windows). |
-| Disk space | About 2.78 GB per hour at OBS's default encoder settings. **Arm** warns below 5 GB free. |
+| Disk space | About 0.3 GB per hour at 1080p30 for a visual novel; more for games with more motion. **Arm** warns below 5 GB free. |
 
 ## Contributing
 

@@ -22,7 +22,7 @@ def test_plain_punctuation() -> None:
 @pytest.mark.parametrize(
     "needle",
     [
-        "2.78 GB",  # R1 disk rate
+        "0.3 GB per hour",  # disk rate on the app's profile (Windows H5 run)
         "0.0.0.0",  # owocr's bind address (spec 14)
         "Google Lens",  # cloud OCR note
         "pkill",  # ending an owocr left running by a crash on Linux
