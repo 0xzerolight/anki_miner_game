@@ -614,9 +614,10 @@ class SessionActor:
             elif t >= self._next_connect:  # OBS opened after a launch without it (T12 retries only a lost link)
                 self._next_connect = t + RESTORE_RETRY_S
                 if await asyncio.to_thread(self._discovery.is_running):
-                    # its _Connected restores; a failure here (S5-2) keeps whatever banner is already
-                    # shown rather than replacing it with this quiet background attempt's own text
-                    await self._ensure_connected(banner_on_failure=False)
+                    # its _Connected restores; a failure here (S5-2) keeps an OBS banner already shown
+                    # rather than replacing it with this background attempt's own text, and shows its
+                    # own only when none is up, since it is then the one sign the restore is stuck
+                    await self._ensure_connected(banner_on_failure=BannerKey.OBS not in self._banners)
 
     # --- events out -----------------------------------------------------------------------------
 

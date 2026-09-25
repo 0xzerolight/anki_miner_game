@@ -209,6 +209,21 @@ async def test_the_idle_restore_retry_does_not_overwrite_a_more_specific_obs_ban
     assert "30 s" in h.banners()[BannerKey.OBS]  # kept, not replaced by the retry's raw ConnectionRefused
 
 
+async def test_the_idle_restore_retry_shows_its_failure_when_no_obs_banner_is_up(h: Harness):
+    """S5-2's quiet retry stays quiet only over a banner already shown: with none up (OBS started by
+    hand after a launch without it, and still refusing), its failure is the only sign the restore
+    is stuck, so it shows."""
+    save_restore(restore_path(), ObsRestore(profile="Untitled", collection="Untitled"))
+    await h.emit(ObsEventName.CONNECTION_LOST)
+    h.discovery.running = True
+    h.gateway.connect_error = ObsConnectError(
+        "cannot connect to OBS at 127.0.0.1:4455: ConnectionRefusedError: [WinError 10061] ..."
+    )
+    assert BannerKey.OBS not in h.banners()
+    await h.tick(T0 + 5.0)
+    assert "Cannot connect to OBS" in h.banners()[BannerKey.OBS]
+
+
 async def test_arm_with_the_server_off_points_at_the_wizards_fix(rig: Harness):
     """S5-3: OBS runs with its websocket server off; Arm's banner gives the wizard's own instructions
     and points at File -> Setup wizard… -> OBS -> Fix, instead of only the raw connect error."""
