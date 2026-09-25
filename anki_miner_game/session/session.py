@@ -1416,6 +1416,7 @@ class SessionActor:
         try:
             result = await self._finaliser.run(manifest_path, cfg)
         except FinaliseError as exc:
+            log.warning("could not finish the session %s: %s", manifest_path.name, exc)
             self._banner(
                 BannerKey.FINALISE,
                 BannerLevel.ERROR,

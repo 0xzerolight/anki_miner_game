@@ -3,6 +3,7 @@ normal stop (spec 6.2 ownership, 7, 8.2, 10.2, 10.3, 12 actor side; 17 rows Star
 text source connected at Start, zero cues; R2 items 9 and 11)."""
 
 import json
+import logging
 import threading
 
 from anki_miner_game.models.config import AppConfig, VadSettings
@@ -430,13 +431,18 @@ async def test_arm_and_disarm_are_refused_while_recording(h: Harness):
     assert "Stop the recording" in h.banners()[BannerKey.ARM]
 
 
-async def test_a_finalise_failure_is_a_banner_and_the_game_stays_armed(h: Harness):
+async def test_a_finalise_failure_is_a_banner_and_the_game_stays_armed(h: Harness, caplog):
+    caplog.set_level(logging.WARNING)
     await h.arm()
     await h.started(ZERO)
     h.video_path().unlink()
     await h.stopped(ZERO + 5.0)
     assert "gone" in h.banners()[BannerKey.FINALISE]
     assert h.actor.state is AppState.ARMED
+    # S3-2: a finalise failure used to reach only the banner; it now also logs (the app log is the
+    # only record once the banner is dismissed).
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("gone" in r.getMessage() for r in warnings)
 
 
 async def test_vad_is_not_queued_when_disabled(h: Harness):
