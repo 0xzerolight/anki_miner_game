@@ -44,6 +44,8 @@ WINDOW_MISSING_LINE = (
 BASE = ["-r", "screencapture", "-w", "websocket", "-wp", "5000", "-t", "False"]
 WHOLE_LINES = ["-sf", "1.0", "-sl", "False"]
 """Whole lines only: 1 s of frame stabilisation, no line recovery (S4-1)."""
+ANY_WINDOW = ["-sw", "False"]
+"""Window capture reads the game window also while another window is in front (S4-2)."""
 
 
 def _ocr(**kwargs) -> OcrSettings:
@@ -69,13 +71,35 @@ def _ocr(**kwargs) -> OcrSettings:
         pytest.param(
             "win32",
             _ocr(engine=OcrEngine.ONEOCR, window_title="Some Game", rects="0,540,1280,720"),
-            ["-l", "ja", "-e", "oneocr", "-el", "oneocr", *WHOLE_LINES, "-sa=Some Game", "-swa=0,540,1280,720"],
+            [
+                "-l",
+                "ja",
+                "-e",
+                "oneocr",
+                "-el",
+                "oneocr",
+                *WHOLE_LINES,
+                *ANY_WINDOW,
+                "-sa=Some Game",
+                "-swa=0,540,1280,720",
+            ],
             id="windows window-relative rectangles",
         ),
         pytest.param(
             "win32",
             _ocr(engine=OcrEngine.ONEOCR, window_title="-Game - Title"),
-            ["-l", "ja", "-e", "oneocr", "-el", "oneocr", *WHOLE_LINES, "-sa=-Game - Title", "-swa=window"],
+            [
+                "-l",
+                "ja",
+                "-e",
+                "oneocr",
+                "-el",
+                "oneocr",
+                *WHOLE_LINES,
+                *ANY_WINDOW,
+                "-sa=-Game - Title",
+                "-swa=window",
+            ],
             id="windows whole window; a leading dash stays a value",
         ),
         pytest.param(
@@ -108,7 +132,7 @@ def test_owocr_args_refuses_a_run_with_no_area(platform):
         pytest.param("linux", None, ["-sa="], id="linux screen picker"),
         pytest.param("linux", "Some Game", ["-sa="], id="linux screen picker whatever the title"),
         pytest.param("win32", None, ["-sa="], id="windows screen picker"),
-        pytest.param("win32", "Some Game", ["-sa=Some Game", "-swa="], id="windows window picker"),
+        pytest.param("win32", "Some Game", [*ANY_WINDOW, "-sa=Some Game", "-swa="], id="windows window picker"),
     ],
 )
 def test_picker_args_leave_the_area_empty(platform, window_title, area):

@@ -111,23 +111,31 @@ doubles lines. On a STEINS;GATE replay (QA S4-1) 47 % of lines got one clean cue
 and 94 % with these flags. The cost is about 1 s later arrival; shorter waits still split voiced
 lines at the reveal's own pauses after punctuation."""
 
+ANY_WINDOW: Final = ("-sw", "False")
+"""Window capture reads the game window also while another window is in front.
+
+owocr's default (``-sw True``, ``config.py:139``) captures only while the window is the foreground
+one (``run.py:2276-2277``), so no line was read while a browser with the text feed, or the app itself,
+was in front (QA S4-2). PrintWindow reads the window even where another one covers it."""
+
 
 def owocr_args(ocr: OcrSettings, port: int, *, platform: str, pick: bool = False) -> list[str]:
     """owocr's arguments (without the executable) for a websocket OCR run on ``port`` (spec 14).
 
-    Windows with ``ocr.window_title`` captures that window: ``-sa=<title>`` plus ``-swa=<rects>``
-    (window-relative), or ``-swa=window`` for the whole window. Otherwise ``-sa=<rects>`` are screen
-    rectangles; Linux always takes this form, since owocr has no window capture on X11 (it exits,
-    ``run.py:2017``). ``pick`` leaves the area empty, which opens owocr's own picker. The area flags
-    are joined with ``=`` so a window title starting with ``-`` stays a value. Raises ``OcrError``
-    when a run has no area to capture.
+    Windows with ``ocr.window_title`` captures that window, in front or not (``ANY_WINDOW``):
+    ``-sa=<title>`` plus ``-swa=<rects>`` (window-relative), or ``-swa=window`` for the whole window.
+    Otherwise ``-sa=<rects>`` are screen rectangles; Linux always takes this form, since owocr has no
+    window capture on X11 (it exits, ``run.py:2017``). ``pick`` leaves the area empty, which opens
+    owocr's own picker. The area flags are joined with ``=`` so a window title starting with ``-``
+    stays a value. Every run sends whole lines (``WHOLE_LINES``). Raises ``OcrError`` when a run has
+    no area to capture.
     """
     args = ["-r", "screencapture", "-w", "websocket", "-wp", str(port), "-t", "False"]
     args += ["-l", ocr.language, "-e", str(ocr.engine), "-el", str(ocr.engine), *WHOLE_LINES]
     window = ocr.window_title if platform == "win32" else None
     if window:
         area = "" if pick else (ocr.rects or "window")
-        return args + [f"-sa={window}", f"-swa={area}"]
+        return args + [*ANY_WINDOW, f"-sa={window}", f"-swa={area}"]
     if pick:
         return args + ["-sa="]
     if not ocr.rects:
