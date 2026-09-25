@@ -80,7 +80,7 @@ def make(
     *,
     platform: str = "linux",
     which: dict[str, str] | None = None,
-    registry: Callable[[str], str | None] = lambda view: None,
+    registry: Callable[[str, str, str], str | None] = lambda key, name, view: None,
     runner: FakeRunner | None = None,
     running: Sequence[str] = (),
     cfg: AppConfig | None = None,
@@ -122,6 +122,24 @@ def windows_exe(folder: Path) -> Path:
     return exe
 
 
+OBS_KEY = (discovery.REGISTRY_KEY, "")
+"""The OBS installer's key and its default value."""
+STEAM_ENTRY = (discovery.STEAM_UNINSTALL_KEY, "InstallLocation")
+"""Steam's Uninstall entry for its OBS build and the value that holds the folder."""
+
+
+class FakeRegistry:
+    """``HKLM`` string values by ``(key, value name, view)``; records every lookup."""
+
+    def __init__(self, values: dict[tuple[str, str, str], str] | None = None) -> None:
+        self.values = values or {}
+        self.looked_up: list[tuple[str, str, str]] = []
+
+    def __call__(self, key: str, name: str, view: str) -> str | None:
+        self.looked_up.append((key, name, view))
+        return self.values.get((key, name, view))
+
+
 def test_conforms_to_the_obs_discovery_protocol():
     from anki_miner_game.interfaces.obs import ObsDiscovery
 
@@ -135,41 +153,63 @@ def test_conforms_to_the_obs_discovery_protocol():
 def test_windows_finds_obs_under_program_files(tmp_path, monkeypatch):
     monkeypatch.setenv("PROGRAMFILES", str(tmp_path / "pf"))
     exe = windows_exe(tmp_path / "pf" / "obs-studio")
-    looked_up: list[str] = []
-
-    def registry(view: str) -> str | None:
-        looked_up.append(view)
-        return None
+    registry = FakeRegistry()
 
     found = make(tmp_path, platform="win32", registry=registry).find_install()
 
     assert found == ObsInstall(argv=(str(exe),), cwd=exe.parent, flatpak=False)
-    assert looked_up == []  # the registry is the fallback only
+    assert registry.looked_up == []  # the registry is the fallback only
 
 
 def test_windows_falls_back_to_the_registry_64_bit_view_first(tmp_path, monkeypatch):
     monkeypatch.setenv("PROGRAMFILES", str(tmp_path / "pf"))
     exe = windows_exe(tmp_path / "D" / "OBS")
-    looked_up: list[str] = []
-
-    def registry(view: str) -> str | None:
-        looked_up.append(view)
-        return str(tmp_path / "D" / "OBS") if view == "64" else None
+    registry = FakeRegistry({(*OBS_KEY, "64"): str(tmp_path / "D" / "OBS")})
 
     found = make(tmp_path, platform="win32", registry=registry).find_install()
 
     assert found == ObsInstall(argv=(str(exe),), cwd=exe.parent, flatpak=False)
-    assert looked_up == ["64"]
+    assert registry.looked_up == [(*OBS_KEY, "64")]
 
 
 def test_windows_reads_the_32_bit_view_when_the_64_bit_one_has_no_obs(tmp_path, monkeypatch):
     monkeypatch.delenv("PROGRAMFILES", raising=False)
     exe = windows_exe(tmp_path / "x86" / "obs-studio")
-    folders = {"64": str(tmp_path / "gone"), "32": str(tmp_path / "x86" / "obs-studio")}
+    registry = FakeRegistry(
+        {(*OBS_KEY, "64"): str(tmp_path / "gone"), (*OBS_KEY, "32"): str(tmp_path / "x86" / "obs-studio")}
+    )
 
-    found = make(tmp_path, platform="win32", registry=folders.get).find_install()
+    found = make(tmp_path, platform="win32", registry=registry).find_install()
 
     assert found is not None and found.argv == (str(exe),)
+
+
+def test_windows_finds_the_steam_build_through_its_uninstall_entry_last(tmp_path, monkeypatch):
+    """Steam's OBS writes no ``HKLM\\SOFTWARE\\OBS Studio`` at install; Steam's Uninstall entry holds its folder."""
+    monkeypatch.setenv("PROGRAMFILES", str(tmp_path / "pf"))
+    steam_obs = tmp_path / "Steam" / "steamapps" / "common" / "OBS Studio"
+    exe = windows_exe(steam_obs)
+    registry = FakeRegistry({(*STEAM_ENTRY, "64"): str(steam_obs)})
+
+    found = make(tmp_path, platform="win32", registry=registry).find_install()
+
+    assert found == ObsInstall(argv=(str(exe),), cwd=steam_obs / "bin" / "64bit", flatpak=False)
+    assert registry.looked_up == [(*OBS_KEY, "64"), (*OBS_KEY, "32"), (*STEAM_ENTRY, "64")]
+
+
+def test_windows_reads_the_steam_entry_in_the_32_bit_view_too(tmp_path, monkeypatch):
+    monkeypatch.delenv("PROGRAMFILES", raising=False)
+    steam_obs = tmp_path / "Steam" / "steamapps" / "common" / "OBS Studio"
+    exe = windows_exe(steam_obs)
+    registry = FakeRegistry({(*STEAM_ENTRY, "32"): str(steam_obs)})
+
+    found = make(tmp_path, platform="win32", registry=registry).find_install()
+
+    assert found is not None and found.argv == (str(exe),)
+
+
+def test_the_steam_entry_is_the_app_id_of_steams_obs_build():
+    assert discovery.STEAM_UNINSTALL_KEY == r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Steam App 1905180"
 
 
 def test_windows_without_obs_finds_nothing(tmp_path, monkeypatch):
@@ -691,6 +731,23 @@ def test_launch_reports_a_program_that_cannot_start(tmp_path):
 
     with pytest.raises(ObsConnectError):
         native_linux(tmp_path, runner=runner).launch()
+
+
+# --- the default registry reader ---------------------------------------------------------------
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="off Windows only")
+def test_the_default_registry_reads_nothing_off_windows():
+    assert discovery.read_registry_value(*OBS_KEY, "64") is None
+
+
+@pytest.mark.windows_only
+def test_the_default_registry_reads_a_named_value_and_misses_quietly():
+    key = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion"
+
+    assert discovery.read_registry_value(key, "ProductName", "64")
+    assert discovery.read_registry_value(key, "No Such Value", "64") is None
+    assert discovery.read_registry_value(key + r"\No Such Key", "", "32") is None
 
 
 # --- the default process runner ----------------------------------------------------------------

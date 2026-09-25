@@ -3,8 +3,9 @@
 ``LocalObsDiscovery`` implements ``interfaces.obs.ObsDiscovery`` for this machine:
 
 - ``find_install``: Windows ``%ProgramFiles%\\obs-studio\\bin\\64bit\\obs64.exe``, then the folder the
-  OBS installer records in the registry (64-bit view, then 32-bit view); Linux ``obs`` on ``PATH``,
-  then the Flatpak ``com.obsproject.Studio``. Each call looks again (the wizard's re-check).
+  OBS installer records in the registry, then the folder of Steam's OBS build from Steam's Uninstall
+  entry (each in the 64-bit view, then the 32-bit view); Linux ``obs`` on ``PATH``, then the Flatpak
+  ``com.obsproject.Studio``. Each call looks again (the wizard's re-check).
 - ``config_root``: the config root of the install the latest ``find_install`` found: Windows
   ``%APPDATA%\\obs-studio``, native Linux ``$XDG_CONFIG_HOME/obs-studio`` (``~/.config/obs-studio``
   when unset), Flatpak ``~/.var/app/com.obsproject.Studio/config/obs-studio``.
@@ -90,6 +91,15 @@ REGISTRY_KEY: Final = r"SOFTWARE\OBS Studio"
 """Under ``HKEY_LOCAL_MACHINE``; its default value is the install folder [H5]."""
 REGISTRY_VIEWS: Final = ("64", "32")
 """The installer writes the key in both views; the 64-bit one is read first [H5]."""
+STEAM_APP_ID: Final = 1905180
+"""OBS Studio on Steam."""
+STEAM_UNINSTALL_KEY: Final = rf"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Steam App {STEAM_APP_ID}"
+"""Under ``HKEY_LOCAL_MACHINE``; its ``InstallLocation`` value is the folder of Steam's OBS build. That
+build writes ``REGISTRY_KEY`` only from its Steam install script, which the install itself does not
+run: H5 found no key after a Steam install, only this entry [H5]."""
+REGISTRY_INSTALL_DIRS: Final = ((REGISTRY_KEY, ""), (STEAM_UNINSTALL_KEY, "InstallLocation"))
+"""``(key, value name)`` pairs whose value is an install folder, read in this order; ``""`` is the
+default value."""
 WINDOWS_EXE: Final = PurePath("bin", "64bit", "obs64.exe")
 """Relative to the install folder; OBS must start with its folder as the working directory [H5]."""
 WINDOWS_PROCESS: Final = "obs64.exe"
@@ -167,8 +177,9 @@ class SubprocessRunner:
         threading.Thread(target=proc.wait, name="obs-reaper", daemon=True).start()
 
 
-RegistryReader = Callable[[str], str | None]
-"""The default value of ``HKLM\\SOFTWARE\\OBS Studio`` in one registry view (``"64"`` or ``"32"``)."""
+RegistryReader = Callable[[str, str, str], str | None]
+"""A string value under ``HKEY_LOCAL_MACHINE``: key, value name (``""`` for the default value) and
+registry view (``"64"`` or ``"32"``)."""
 Probe = Callable[[ObsCredentials, float], bool]
 """One ``GetVersion`` with a timeout in seconds; ``True`` when it succeeds, ``ObsAuthError`` when OBS
 rejects the password. Runs on a worker thread."""
@@ -204,16 +215,16 @@ def get_version_succeeds(creds: ObsCredentials, timeout_s: float) -> bool:
     return True
 
 
-def read_registry_install_dir(view: str) -> str | None:
-    """``HKLM\\SOFTWARE\\OBS Studio`` (default value) in ``view``; ``None`` off Windows or when absent."""
+def read_registry_value(key: str, name: str, view: str) -> str | None:
+    """``HKLM\\<key>`` value ``name`` in ``view``; ``None`` off Windows, when absent or not a string."""
     if sys.platform != "win32":
         return None
     import winreg
 
     access = winreg.KEY_READ | (winreg.KEY_WOW64_64KEY if view == "64" else winreg.KEY_WOW64_32KEY)
     try:
-        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, REGISTRY_KEY, 0, access) as key:
-            value, kind = winreg.QueryValueEx(key, None)
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key, 0, access) as handle:
+            value, kind = winreg.QueryValueEx(handle, name)
     except OSError:
         return None
     if not isinstance(value, str) or not value:
@@ -239,7 +250,7 @@ class LocalObsDiscovery:
         *,
         platform: str = sys.platform,
         which: Callable[[str], str | None] = shutil.which,
-        registry: RegistryReader = read_registry_install_dir,
+        registry: RegistryReader = read_registry_value,
         runner: ProcessRunner | None = None,
         proc_root: Path = Path("/proc"),
         probe: Probe = get_version_succeeds,
@@ -280,10 +291,11 @@ class LocalObsDiscovery:
         program_files = os.environ.get("PROGRAMFILES")
         if program_files:
             yield Path(program_files) / "obs-studio"
-        for view in REGISTRY_VIEWS:
-            folder = self._registry(view)
-            if folder:
-                yield Path(folder)
+        for key, name in REGISTRY_INSTALL_DIRS:
+            for view in REGISTRY_VIEWS:
+                folder = self._registry(key, name, view)
+                if folder:
+                    yield Path(folder)
 
     def _find_linux(self) -> ObsInstall | None:
         obs = self._which("obs")
