@@ -87,6 +87,24 @@ def test_the_apps_dll_search_comes_back_when_the_program_cannot_start(dll_direct
     assert dll_directory == [None, WIN_BUNDLE]
 
 
+def test_an_external_program_gets_no_qt_paths_into_the_bundle(dll_directory):
+    """PyInstaller's PyQt6 hook points these at the bundle's Qt; OBS runs the same Qt 6 minor and
+    would load the bundle's plugins, holding the app's files again."""
+    environ = {
+        "QT_PLUGIN_PATH": rf"{WIN_BUNDLE}\PyQt6\Qt6\plugins",
+        "QML2_IMPORT_PATH": rf"{WIN_BUNDLE}\PyQt6\Qt6\qml",
+        "PATH": WIN_SYSTEM,
+    }
+    with external_program(environ, frozen=True, platform="win32") as env:
+        assert env == {"PATH": WIN_SYSTEM}
+
+
+def test_a_qt_path_of_the_users_own_stays(dll_directory):
+    environ = {"QT_PLUGIN_PATH": r"D:\Qt\plugins", "QML2_IMPORT_PATH": rf"D:\Qt\qml;{WIN_BUNDLE}\PyQt6\Qt6\qml"}
+    with external_program(environ, frozen=True, platform="win32") as env:
+        assert env == {"QT_PLUGIN_PATH": r"D:\Qt\plugins", "QML2_IMPORT_PATH": r"D:\Qt\qml"}
+
+
 def test_a_path_entry_beside_the_bundle_stays(dll_directory):
     beside = rf"{WIN_BUNDLE}2;C:\Users\u\AppData\Local\Programs\AnkiMinerGame"
     with external_program({"PATH": beside}, frozen=True, platform="win32") as env:

@@ -21,6 +21,8 @@ from typing import Final
 
 LIBRARY_PATH: Final = "LD_LIBRARY_PATH"
 ORIGINAL_SUFFIX: Final = "_ORIG"
+BUNDLE_SEARCH_PATHS: Final = ("PATH", "QT_PLUGIN_PATH", "QML2_IMPORT_PATH")
+"""Search paths a frozen Windows build points into the bundle: PyQt6 and PyInstaller's PyQt6 hook."""
 
 
 def child_environ(
@@ -53,11 +55,14 @@ def external_program(
 
     The PyInstaller bootloader makes the bundle folder (``sys._MEIPASS``) the DLL directory of a frozen
     Windows build (``SetDllDirectoryW``), which every program the app starts inherits, and PyQt6 puts
-    the bundle's folders first on ``PATH``. OBS started that way loaded the bundle's
-    ``VCRUNTIME140.dll`` instead of the system's, and Setup then closed OBS on every upgrade as a
-    program using the app's files. So in a frozen Windows build the block holds the system's default
-    DLL search order and the environment has no ``PATH`` entry inside the bundle; the block's end
-    gives the app its DLL directory back. ``frozen`` and ``platform`` default as in ``child_environ``.
+    the bundle's folders first on ``PATH`` and points ``QT_PLUGIN_PATH`` and ``QML2_IMPORT_PATH`` at
+    the bundle's Qt. OBS started that way loaded the bundle's ``VCRUNTIME140.dll`` instead of the
+    system's, and Setup then closed OBS on every upgrade as a program using the app's files; OBS runs
+    the same Qt 6 minor, so it could load the bundle's Qt plugins too. So in a frozen Windows build
+    the block holds the system's default DLL search order and the environment has no
+    ``BUNDLE_SEARCH_PATHS`` entry inside the bundle (a variable left empty is dropped); the block's
+    end gives the app its DLL directory back. ``frozen`` and ``platform`` default as in
+    ``child_environ``.
     """
     if frozen is None:
         frozen = bool(getattr(sys, "frozen", False))
@@ -67,9 +72,13 @@ def external_program(
         yield env
         return
     bundle = PureWindowsPath(sys._MEIPASS)  # type: ignore[attr-defined]
-    if "PATH" in env:
-        entries = env["PATH"].split(";")
-        env["PATH"] = ";".join(entry for entry in entries if not PureWindowsPath(entry).is_relative_to(bundle))
+    for name in BUNDLE_SEARCH_PATHS:
+        if name in env:
+            entries = [e for e in env[name].split(";") if not PureWindowsPath(e).is_relative_to(bundle)]
+            if entries:
+                env[name] = ";".join(entries)
+            else:
+                del env[name]
     _set_dll_directory(None)
     try:
         yield env
