@@ -21,6 +21,7 @@ from anki_miner_game.models.messages import (
 from anki_miner_game.models.obs import (
     REQUIRED_REQUESTS,
     ObsAuthError,
+    ObsConnectError,
     ObsError,
     ObsEventName,
     ObsInfo,
@@ -187,6 +188,24 @@ async def test_obs_that_never_answers_after_launch_is_a_banner(rig: Harness):
     assert "30 s" in rig.banners()[BannerKey.OBS]
     assert rig.gateway.connects == 0
     assert rig.actor.state is AppState.IDLE
+
+
+async def test_the_idle_restore_retry_does_not_overwrite_a_more_specific_obs_banner(h: Harness):
+    """S5-2: OBS dies while armed/recording (``obs_restore.json`` kept), and the next Arm's own 30 s
+    "OBS did not answer" banner must survive the idle restore retry that follows moments later, once
+    OBS is running again but still stuck behind its own crash dialog (refusing the connection)."""
+    save_restore(restore_path(), ObsRestore(profile="Untitled", collection="Untitled"))
+    await h.emit(ObsEventName.CONNECTION_LOST)  # OBS died; no session, so this alone does not arm/idle-loop
+    h.discovery.running = False
+    h.discovery.ready = False
+    await h.arm()
+    assert "30 s" in h.banners()[BannerKey.OBS]
+    assert h.discovery.running is True  # launch() ran meanwhile; OBS is up but stuck behind its dialog
+    h.gateway.connect_error = ObsConnectError(
+        "cannot connect to OBS at 127.0.0.1:4455: ConnectionRefusedError: [WinError 10061] ..."
+    )
+    await h.tick(T0 + 5.0)  # the idle restore retry's own connect attempt fails too
+    assert "30 s" in h.banners()[BannerKey.OBS]  # kept, not replaced by the retry's raw ConnectionRefused
 
 
 async def test_missing_request_names_the_request_and_the_version(rig: Harness):

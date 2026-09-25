@@ -614,7 +614,9 @@ class SessionActor:
             elif t >= self._next_connect:  # OBS opened after a launch without it (T12 retries only a lost link)
                 self._next_connect = t + RESTORE_RETRY_S
                 if await asyncio.to_thread(self._discovery.is_running):
-                    await self._ensure_connected()  # its _Connected restores
+                    # its _Connected restores; a failure here (S5-2) keeps whatever banner is already
+                    # shown rather than replacing it with this quiet background attempt's own text
+                    await self._ensure_connected(banner_on_failure=False)
 
     # --- events out -----------------------------------------------------------------------------
 
@@ -791,8 +793,12 @@ class SessionActor:
             finally:
                 self._holding_obs = False
 
-    async def _ensure_connected(self) -> bool:
-        """Connect, launching OBS first when it is not running (spec 11.1, 17); a banner on failure."""
+    async def _ensure_connected(self, *, banner_on_failure: bool = True) -> bool:
+        """Connect, launching OBS first when it is not running (spec 11.1, 17); a banner on failure.
+
+        ``banner_on_failure=False`` (the idle restore retry, S5-2): a failure keeps whatever banner
+        is already shown instead of replacing it with this attempt's own, usually less specific, text.
+        """
         if self._connected:
             return True
         self._obs_status(SourceStatus.CONNECTING)
@@ -807,17 +813,23 @@ class SessionActor:
             info = await self._gateway.connect()
         except ObsUnsupportedError as exc:
             self._obs_failed(
-                f"OBS {exc.obs_version} lacks {', '.join(exc.missing)}; update OBS to version 30.0 or newer."
+                f"OBS {exc.obs_version} lacks {', '.join(exc.missing)}; update OBS to version 30.0 or newer.",
+                banner=banner_on_failure,
             )
             return False
         except ObsAuthError:
-            self._obs_failed("OBS rejected the websocket password; enter it in the app's settings.")
+            self._obs_failed(
+                "OBS rejected the websocket password; enter it in the app's settings.", banner=banner_on_failure
+            )
             return False
         except ObsConfigError as exc:
-            self._obs_failed(f"OBS's websocket settings cannot be read ({exc}); run the setup wizard again.")
+            self._obs_failed(
+                f"OBS's websocket settings cannot be read ({exc}); run the setup wizard again.",
+                banner=banner_on_failure,
+            )
             return False
         except ObsError as exc:
-            self._obs_failed(f"Cannot connect to OBS: {exc}")
+            self._obs_failed(f"Cannot connect to OBS: {exc}", banner=banner_on_failure)
             return False
         self._obs_versions = (info.obs_version, info.websocket_version)
         self._connected = True
@@ -825,9 +837,10 @@ class SessionActor:
         self._clear(BannerKey.OBS)
         return True
 
-    def _obs_failed(self, text: str) -> None:
+    def _obs_failed(self, text: str, *, banner: bool = True) -> None:
         self._obs_status(SourceStatus.DISCONNECTED)
-        self._banner(BannerKey.OBS, BannerLevel.ERROR, text)
+        if banner:
+            self._banner(BannerKey.OBS, BannerLevel.ERROR, text)
 
     async def _active_outputs(self) -> list[str]:
         """Spec 6.2 step 1. An output OBS reports as not available (604) cannot be active (R2 item 6)."""
