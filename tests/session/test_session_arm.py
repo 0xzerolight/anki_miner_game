@@ -2,6 +2,7 @@
 output, switch timeout, output folder not writable, free space; R2 items 3-6)."""
 
 import asyncio
+import os
 from typing import Any
 
 import pytest
@@ -314,6 +315,23 @@ async def test_an_output_folder_that_cannot_be_written_refuses_arming(h: Harness
     assert h.actor.state is AppState.IDLE
     assert "cannot be written" in h.banners()[BannerKey.ARM]
     assert "GetProfileList" not in h.gateway.names()
+
+
+def test_a_folder_windows_denies_is_unwritable_at_the_first_refusal(tmp_path, monkeypatch):
+    """S5-4: ``tempfile.TemporaryFile`` retried the ``PermissionError`` of a folder whose ACL denies
+    writing 2**31 times on Windows (``os.access`` calls any folder writable), hanging the actor on Arm."""
+    calls: list[str] = []
+
+    def denied(path, *args, **kwargs):
+        calls.append(os.fspath(path))
+        if len(calls) > 3:
+            raise AssertionError("a PermissionError was retried")
+        raise PermissionError(13, "Access is denied", os.fspath(path))
+
+    monkeypatch.setattr(os, "name", "nt")  # with os.access(tmp_path, W_OK) true, as Windows says of any folder
+    monkeypatch.setattr(os, "open", denied)
+    assert session_mod._writable(tmp_path) is False
+    assert len(calls) == 1
 
 
 async def test_low_free_space_warns_and_arms_anyway(h: Harness):

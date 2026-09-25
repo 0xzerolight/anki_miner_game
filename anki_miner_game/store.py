@@ -10,8 +10,8 @@ into banners.
 
 import contextlib
 import os
+import secrets
 import sys
-import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -142,6 +142,30 @@ def save_profile(profile: GameProfile) -> Path:
     return path
 
 
+_TEMP_FLAGS: Final = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+_TEMP_NAME_TRIES: Final = 5
+
+
+def create_temp_file(folder: Path) -> tuple[int, Path]:
+    """Create a new, empty ``.<8 chars>.tmp`` file in ``folder``; its descriptor (write-only) and path.
+
+    A name that is taken is retried with another, a few times; any other ``OSError`` is raised at
+    once. ``tempfile`` is not used for this: on Windows it takes a ``PermissionError`` for a name
+    clash whenever ``os.access`` calls the folder writable, which it does for any folder (it reads
+    only the read-only attribute), so in a folder whose ACL denies writing it retried 2**31 times
+    and hung the app (S5-4).
+    """
+    tries = 0
+    while True:
+        path = folder / f".{secrets.token_hex(4)}.tmp"
+        try:
+            return os.open(path, _TEMP_FLAGS, 0o600), path
+        except FileExistsError:
+            tries += 1
+            if tries == _TEMP_NAME_TRIES:
+                raise
+
+
 def write_text_atomic(path: Path, text: str, *, mode: int = 0o666) -> None:
     """Write ``text`` as UTF-8 (no BOM) with ``\\n`` line ends, all or nothing.
 
@@ -153,10 +177,10 @@ def write_text_atomic(path: Path, text: str, *, mode: int = 0o666) -> None:
     target name pushed a still-valid final path over it (S3-2). On any failure the
     temporary file is removed and an existing ``path`` is left untouched. On
     POSIX the file gets ``mode & ~umask``, as a plain ``open`` would give it
-    (``mkstemp`` alone leaves 0600); Windows ignores ``mode``.
+    (``create_temp_file`` alone leaves 0600); Windows ignores ``mode``.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(prefix=".", suffix=".tmp", dir=path.parent)
+    fd, tmp_name = create_temp_file(path.parent)
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
             if sys.platform != "win32":

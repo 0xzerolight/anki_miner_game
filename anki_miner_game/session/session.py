@@ -39,8 +39,8 @@ import asyncio
 import contextlib
 import functools
 import logging
+import os
 import shutil
-import tempfile
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
@@ -125,7 +125,7 @@ from anki_miner_game.session.manifest import (
     write_manifest_atomic,
 )
 from anki_miner_game.session.restore import ObsRestore, delete_restore, load_restore, restore_path, save_restore
-from anki_miner_game.store import StoreError
+from anki_miner_game.store import StoreError, create_temp_file
 from anki_miner_game.text.pipeline import TextPipeline
 
 log = logging.getLogger(__name__)
@@ -329,8 +329,9 @@ def _writable(folder: Path) -> bool:
     """Create ``folder`` when missing and prove a file can be made in it (spec 17)."""
     try:
         folder.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryFile(dir=folder):
-            pass
+        fd, probe = create_temp_file(folder)
+        os.close(fd)
+        probe.unlink()
     except OSError:
         return False
     return True

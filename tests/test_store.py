@@ -203,6 +203,59 @@ def test_write_text_atomic_keeps_the_temp_name_short_regardless_of_the_target_na
     assert target.read_text(encoding="utf-8") == "content"
 
 
+def test_write_text_atomic_fails_at_the_first_refusal_in_a_folder_windows_denies(tmp_path, monkeypatch):
+    """S5-4: Windows's ``os.access`` calls any folder writable (it reads only the read-only attribute),
+    so ``tempfile`` took the ``PermissionError`` of a folder whose ACL denies writing for a name clash
+    and retried it 2**31 times: the app hung. The temp file is one exclusive create per name."""
+    calls: list[str] = []
+
+    def denied(path, *args, **kwargs):
+        calls.append(os.fspath(path))
+        if len(calls) > 3:
+            raise AssertionError("a PermissionError was retried")
+        raise PermissionError(13, "Access is denied", os.fspath(path))
+
+    monkeypatch.setattr(os, "name", "nt")  # with os.access(tmp_path, W_OK) true, as Windows says of any folder
+    monkeypatch.setattr(os, "open", denied)
+    with pytest.raises(PermissionError):
+        store.write_text_atomic(tmp_path / "x.srt", "1\n")
+    assert len(calls) == 1
+
+
+def test_write_text_atomic_takes_another_temp_name_when_one_is_taken(tmp_path, monkeypatch):
+    real_open = os.open
+    names: list[str] = []
+
+    def taken_twice(path, *args, **kwargs):
+        names.append(os.path.basename(path))
+        if len(names) <= 2:
+            raise FileExistsError(17, "File exists", os.fspath(path))
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", taken_twice)
+    target = tmp_path / "x.srt"
+    store.write_text_atomic(target, "1\n")
+    assert target.read_text(encoding="utf-8") == "1\n"
+    assert len(set(names)) == 3
+    assert all(len(name) == len(".12345678.tmp") and name.startswith(".") and name.endswith(".tmp") for name in names)
+    assert [p.name for p in tmp_path.iterdir()] == ["x.srt"]
+
+
+def test_write_text_atomic_gives_up_after_a_few_taken_temp_names(tmp_path, monkeypatch):
+    calls: list[str] = []
+
+    def always_taken(path, *args, **kwargs):
+        calls.append(os.fspath(path))
+        if len(calls) > 100:
+            raise AssertionError("no bound on the retries")
+        raise FileExistsError(17, "File exists", os.fspath(path))
+
+    monkeypatch.setattr(os, "open", always_taken)
+    with pytest.raises(FileExistsError):
+        store.write_text_atomic(tmp_path / "x.srt", "1\n")
+    assert len(calls) <= 10
+
+
 posix_non_root = pytest.mark.skipif(
     sys.platform == "win32" or os.geteuid() == 0, reason="needs POSIX permissions that bind the user"
 )
