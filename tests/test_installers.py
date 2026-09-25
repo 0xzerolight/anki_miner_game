@@ -335,6 +335,12 @@ def test_the_windows_installer_packs_the_bundle_per_user():
     assert 'Type: filesandordirs; Name: "{app}\\_internal"' in text  # no stale runtime across upgrades
 
 
+def test_the_app_setup_launches_does_not_inherit_redirectionguard():
+    """Setup's mitigation passes to the app its Finish page starts, and on to uv, whose managed-Python
+    junction it then refuses to follow: both add-on installs and every VAD pass fail."""
+    assert iss_setup()["RedirectionGuard"] == "no"
+
+
 def test_the_windows_installer_paths_resolve_from_its_folder():
     setup = iss_setup()
     for key in ("LicenseFile",):

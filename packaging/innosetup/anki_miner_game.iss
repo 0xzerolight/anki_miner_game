@@ -31,6 +31,11 @@ SetupLogging=yes
 SetupMutex=AnkiMinerGameSetup-C390E8D8-9789-4827-A794-046E5E3B4123
 ; Per-user install: no elevation prompt, and {autopf} is the user's Programs folder.
 PrivilegesRequired=lowest
+; Setup's RedirectionGuard is inherited, whatever Inno's help says: the app the Finish page starts,
+; and every program it starts, refuse to follow a junction the user made. uv reaches its managed
+; Python through one, so both add-ons fail to install and every VAD pass fails. A per-user Setup
+; writes nothing the user could not write already.
+RedirectionGuard=no
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 
