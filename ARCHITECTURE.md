@@ -137,7 +137,7 @@ Sources (`text/sources/`) deliver raw lines with their arrival time:
 - `ClipboardSource` - `QClipboard`, on the main thread.
 - `OcrSource` - owocr's websocket, with owocr run and restarted by a supervisor.
 
-`text/pipeline.py` `TextPipeline` then normalises (NFC, control and zero-width characters, whitespace, an optional leading `【…】` speaker tag) and drops empty, letterless, over-long and duplicate lines, counting each drop in the manifest. An optional typewriter merge folds a line that is typed out gradually into one. An accepted line is journalled, broadcast to the text feed and shown in the live list.
+`text/pipeline.py` `TextPipeline` then normalises (NFC, control and zero-width characters, whitespace, an optional leading speaker tag: `【…】`, or `name: ` before an opening quote) and drops empty, letterless, over-long and duplicate lines, counting each drop in the manifest. An optional typewriter merge folds a line that is typed out gradually into one. An accepted line is journalled, broadcast to the text feed and shown in the live list.
 
 ## Files and Crash Safety
 

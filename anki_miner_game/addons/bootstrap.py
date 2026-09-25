@@ -135,7 +135,7 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 def urllib_transport(url: str) -> Iterator[Reply]:
     """The real transport: stdlib ``urllib``, TLS verified by the OS, system proxies honoured.
 
-    ``truststore`` hands the certificate check to the OS. On Windows that is the chain check a
+    ``truststore`` hands the certificate check to the OS. On Windows that is the same check a
     browser uses, which fetches a trusted root the machine does not hold yet from Windows Update:
     a new PC lacks the one github.com chains to until something asks for it, and Python's own
     check only reads the store. On Linux it is OpenSSL with the system CA certificates
