@@ -39,7 +39,7 @@ EXAMPLE_REGIONS = [Region(5310, 8920), Region(9600, 11050), Region(14200, 16000)
 
 
 def test_thresholds_are_the_spec_values():
-    assert (WINDOW_LEAD_MS, WINDOW_MAX_MS, CHAIN_GAP_MS, TAIL_SKIP_MS, END_PAD_MS) == (200, 30_000, 1_500, 2_000, 150)
+    assert (WINDOW_LEAD_MS, WINDOW_MAX_MS, CHAIN_GAP_MS, TAIL_SKIP_MS, END_PAD_MS) == (200, 30_000, 2_000, 2_000, 150)
 
 
 def test_worked_example():
@@ -97,6 +97,16 @@ def test_chain_follows_regions_across_gaps_up_to_the_limit(gap_ms, end_ms):
     assert out.end_ms == end_ms
 
 
+def test_a_long_pause_inside_a_voiced_line_stays_in_its_chain():
+    # The worker's regions for 「そうか、それが運命石の扉の選択か。エル・プサイ・コングルゥ」 (QA session S8
+    # 01, cue 13): a 1.92 s pause before 「エル・プサイ」. Ending the chain there cut 3.6 s of the line.
+    regions = [Region(12850, 14000), Region(15920, 16500)]
+
+    [out] = assign([cue(1, 10000, 25000)], regions, HOOK, CFG)
+
+    assert out.end_ms == 16500 + END_PAD_MS
+
+
 def test_window_closes_after_its_maximum_and_a_cue_may_outgrow_the_live_cap():
     cues = [cue(1, 0, 15000), cue(2, 60000, 65000)]
 
@@ -123,9 +133,10 @@ def test_region_starting_at_the_next_cue_start_belongs_to_the_next_cue(regions, 
 
 
 def test_region_in_progress_at_window_start_is_skipped_when_another_begins_within_2_s():
-    # Window starts at 9800. A is still sounding there (the previous voice's tail); B begins 1.7 s in,
-    # 1.6 s after A ends, so B is not chained to A: the result tells which one the chain started from.
-    regions = [Region(9000, 9900), Region(11500, 13000)]
+    # Window starts at 9800. A is still sounding there (the previous voice's tail); B begins 1.7 s in.
+    # A chain from A would take B too (a gap under 2 s is always within CHAIN_GAP_MS), so A outlasts B
+    # here: the end tells which one the chain started from.
+    regions = [Region(9000, 13500), Region(11500, 13000)]
 
     [out] = assign([cue(1, 10000, 25000)], regions, HOOK, CFG)
 
@@ -144,11 +155,11 @@ def test_region_in_progress_at_window_start_is_kept_when_nothing_else_begins_wit
     ("other_start", "end_ms"),
     [
         (9800 + TAIL_SKIP_MS, 9800 + TAIL_SKIP_MS + 1000 + END_PAD_MS),  # within 2 s: A skipped, chain B
-        (9800 + TAIL_SKIP_MS + 1, 10000 + MIN_CUE_MS),  # not within: chain A, whose end + pad is floored
+        (9800 + TAIL_SKIP_MS + 1, 13500 + END_PAD_MS),  # not within: chain A, B, ending on A
     ],
 )
 def test_skip_rule_boundary(other_start, end_ms):
-    regions = [Region(9000, 9900), Region(other_start, other_start + 1000)]
+    regions = [Region(9000, 13500), Region(other_start, other_start + 1000)]  # A outlasts B, as above
 
     [out] = assign([cue(1, 10000, 25000)], regions, HOOK, CFG)
 
@@ -231,19 +242,21 @@ def test_ocr_slow_reader_keeps_the_voice_after_a_long_silence():
 
 def test_ocr_snap_overrides_the_skip_rule():
     # A starts inside [9.65, 10.00] and is in progress at the window's start (9.80); B begins 1.7 s
-    # into the window. Hook mode skips A for B; OCR mode snaps to A.
-    regions = [Region(9700, 9900), Region(11500, 13000)]
+    # into the window. Hook mode skips A for B; OCR mode snaps to A and chains B. A outlasts B, so the
+    # end tells which one the chain started from.
+    regions = [Region(9700, 13500), Region(11500, 13000)]
 
     hook = assign(SNAP_CUES, regions, HOOK, CFG)
     ocr = assign(SNAP_CUES, regions, OCR, CFG)
 
     assert (hook[1].start_ms, hook[1].end_ms) == (10000, 13000 + END_PAD_MS)
-    assert (ocr[1].start_ms, ocr[1].end_ms) == (9700, 9700 + MIN_CUE_MS)
+    assert (ocr[1].start_ms, ocr[1].end_ms) == (9700, 13500 + END_PAD_MS)
 
 
 def test_ocr_without_a_snap_region_keeps_the_skip_rule():
-    # A began before cue 1's live end, so it cannot be snapped; B begins after cue 2's start.
-    regions = [Region(9000, 9900), Region(11500, 13000)]
+    # A began before cue 1's live end, so it cannot be snapped; B begins after cue 2's start. A outlasts
+    # B, so the end tells which one the chain started from.
+    regions = [Region(9000, 13500), Region(11500, 13000)]
 
     out = assign(SNAP_CUES, regions, OCR, CFG)
 

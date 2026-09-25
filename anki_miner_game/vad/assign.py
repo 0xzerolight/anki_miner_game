@@ -19,7 +19,7 @@ WINDOW_LEAD_MS: Final = 200
 """A cue's window opens this long before its live start."""
 WINDOW_MAX_MS: Final = 30_000
 """A cue's window closes at the next cue's live start, or this long after its own start if sooner."""
-CHAIN_GAP_MS: Final = 1_500
+CHAIN_GAP_MS: Final = 2_000
 """Longest silence between two regions of one chain; keeps a dramatic pause inside one voiced line."""
 TAIL_SKIP_MS: Final = 2_000
 """A region still sounding at the window's start is skipped when another begins within this long."""
