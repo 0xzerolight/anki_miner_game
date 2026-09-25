@@ -4,6 +4,7 @@ text source connected at Start, zero cues; R2 items 9 and 11)."""
 
 import json
 import logging
+import os
 import threading
 
 from anki_miner_game.models.config import AppConfig, VadSettings
@@ -443,6 +444,25 @@ async def test_a_finalise_failure_is_a_banner_and_the_game_stays_armed(h: Harnes
     # only record once the banner is dismissed).
     warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
     assert any("gone" in r.getMessage() for r in warnings)
+
+
+async def test_a_video_still_locked_after_the_retries_is_logged(h: Harness, monkeypatch, caplog):
+    """S5-6: a session left ``finalise_pending`` by a locked video reached only the banner."""
+    caplog.set_level(logging.WARNING)
+    await h.arm()
+    video = await h.started(ZERO)
+    real_replace = os.replace
+
+    def locked_replace(src, dst, *args, **kwargs):
+        if os.fspath(src) == os.fspath(video):
+            raise PermissionError(13, "The process cannot access the file", os.fspath(src))
+        return real_replace(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(os, "replace", locked_replace)
+    await h.stopped(ZERO + 5.0)
+    assert "still in use" in h.banners()[BannerKey.FINALISE]
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any(OBS_STEM in m and "still in use" in m for m in warnings), warnings
 
 
 async def test_vad_is_not_queued_when_disabled(h: Harness):

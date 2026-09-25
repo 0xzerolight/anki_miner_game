@@ -1427,6 +1427,7 @@ class SessionActor:
         self._publish(SessionFinalised(result.manifest_path))
         manifest = result.manifest
         if manifest.state is ManifestState.FINALISE_PENDING:
+            log.warning("could not move the session %s: the video is still in use", result.manifest_path.name)
             self._banner(
                 BannerKey.FINALISE,
                 BannerLevel.WARNING,
