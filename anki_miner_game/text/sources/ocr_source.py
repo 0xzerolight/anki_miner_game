@@ -17,7 +17,7 @@ which gets the area back. An owocr started while the game window is minimised ha
 (``LogKind.MINIMISED_AT_START``): it is replaced by one on the whole window (``-swa=window``, which
 starts while minimised), whose frames are dropped the same way, and once that one sends text it is
 restarted with the area. Neither restart is an exit: it waits for no backoff, spends none of the
-three attempts and shows no banner.
+three attempts and shows no banner. A whole-window owocr that hangs as well counts as an exit.
 """
 
 import asyncio
@@ -141,11 +141,14 @@ class OcrSource:
             if watch:
                 proc.area_lost = True
             code = await self._run(proc, port, sink)
-            watch = False
-            if code is None:
+            watched, watch = watch, False
+            # A whole-window owocr never checks rectangles, so one that hangs anyway is an exit.
+            if code is None and not (watched and proc.minimised_at_start):
                 if proc.minimised_at_start:
                     logger.info("owocr cannot start on the minimised game window; waiting for the window")
                     watch = True
+                elif watched:
+                    logger.info("the minimised game window is back; restarting owocr with its OCR area")
                 else:
                     logger.info("owocr lost its OCR area when the game window changed size; restarting it")
                 if self._now() - started >= STABLE_RUN_S:

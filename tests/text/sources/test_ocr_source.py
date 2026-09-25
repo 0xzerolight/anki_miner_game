@@ -8,6 +8,7 @@ The supervisor tests drive fake processes through a fake launcher, with an injec
 import asyncio
 import dataclasses
 import json
+import logging
 import os
 import sys
 import time
@@ -257,7 +258,9 @@ async def test_an_area_restart_after_a_run_that_lasted_resets_the_restart_count(
 WINDOW_SETTINGS = OcrSettings(rects="0,540,1280,720", window_title="Some Game")
 
 
-async def test_owocr_started_on_a_minimised_window_waits_on_the_whole_window_then_gets_its_area(make_source):
+async def test_owocr_started_on_a_minimised_window_waits_on_the_whole_window_then_gets_its_area(make_source, caplog):
+    caplog.set_level(logging.INFO, logger=ocr_source.__name__)
+
     def make(n: int) -> FakeProc:
         if n == 1:
             proc = FakeProc(runs=True, minimised_at_start=True)
@@ -284,8 +287,26 @@ async def test_owocr_started_on_a_minimised_window_waits_on_the_whole_window_the
     assert watcher.kills >= 1
     assert launcher.launches[2][0] == WINDOW_SETTINGS
     assert not launcher.procs[2].area_lost
+    assert [r.getMessage() for r in caplog.records] == [
+        "owocr cannot start on the minimised game window; waiting for the window",
+        "the minimised game window is back; restarting owocr with its OCR area",
+    ]
     assert sleep.delays == []
     assert banners.raised == []
+
+
+async def test_a_whole_window_owocr_that_hangs_as_well_is_an_exit_not_another_wait(make_source):
+    def make(n: int) -> FakeProc:
+        proc = FakeProc(runs=True, minimised_at_start=True)
+        proc.restart_due.set()
+        return proc
+
+    launcher, sleep, banners = FakeLauncher(make), FakeSleep(), Banners()
+    make_source(launcher, WINDOW_SETTINGS, sleep=sleep, on_banner=banners).start(Sink())
+    banner = await banners.wait_raised()
+    assert [settings.rects for settings, _ in launcher.launches] == [WINDOW_SETTINGS.rects, None] * 4
+    assert sleep.delays == [1.0, 2.0, 5.0]
+    assert "4 times" in banner.text
 
 
 async def test_whole_window_frames_after_a_lost_area_are_not_lines(make_source):

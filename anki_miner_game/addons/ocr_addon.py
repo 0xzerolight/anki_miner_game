@@ -255,8 +255,8 @@ class OwocrProcess:
     its title, ``area_lost`` whether it dropped its OCR area (``LogKind.AREA_DISCARDED``; its owner
     also sets it on an owocr it starts on the whole window only to wait for the window),
     ``minimised_at_start`` whether it started on a minimised window and hangs
-    (``LogKind.MINIMISED_AT_START``), and every ``LogEvent`` is queued for ``next_event``. Always end with ``kill_tree``, also after owocr exited
-    on its own: its children may have outlived it.
+    (``LogKind.MINIMISED_AT_START``), and every ``LogEvent`` is queued for ``next_event``. Always end
+    with ``kill_tree``, also after owocr exited on its own: its children may have outlived it.
     """
 
     def __init__(self, proc: asyncio.subprocess.Process, job: int | None) -> None:
