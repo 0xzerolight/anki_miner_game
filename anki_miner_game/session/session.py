@@ -802,8 +802,9 @@ class SessionActor:
         if self._connected:
             return True
         self._obs_status(SourceStatus.CONNECTING)
+        running = await asyncio.to_thread(self._discovery.is_running)
         try:
-            if not await asyncio.to_thread(self._discovery.is_running):
+            if not running:
                 await asyncio.to_thread(self._discovery.ensure_server_enabled)
                 await asyncio.to_thread(self._discovery.launch)
                 if not await self._discovery.wait_ready(OBS_LAUNCH_TIMEOUT_S):
@@ -829,13 +830,33 @@ class SessionActor:
             )
             return False
         except ObsError as exc:
-            self._obs_failed(f"Cannot connect to OBS: {exc}", banner=banner_on_failure)
+            text = await self._connect_failure_text(exc, was_running=running)
+            self._obs_failed(text, banner=banner_on_failure)
             return False
         self._obs_versions = (info.obs_version, info.websocket_version)
         self._connected = True
         self._obs_status(SourceStatus.CONNECTED)
         self._clear(BannerKey.OBS)
         return True
+
+    async def _connect_failure_text(self, exc: ObsError, *, was_running: bool) -> str:
+        """S5-3: OBS was already running (this attempt never had to launch it) and refused the
+        connection outright. Point at the websocket server being off, reusing the wizard's own check
+        (``ObsSetup._start_obs``) and instructions; otherwise a short Safe-Mode/dialog hint.
+        """
+        if not was_running:
+            return f"Cannot connect to OBS: {exc}"
+        try:
+            ws = await asyncio.to_thread(self._discovery.read_ws_config)
+        except ObsConfigError:
+            ws = None
+        if ws is None or not ws.server_enabled:
+            return (
+                "Cannot connect to OBS: OBS's websocket server is off. In OBS, tick Tools -> "
+                "WebSocket Server Settings -> Enable WebSocket server and press OK, then arm again. "
+                "Or close OBS and use File -> Setup wizard… -> OBS -> Fix: the app turns it on."
+            )
+        return f"Cannot connect to OBS: {exc} (OBS may be in Safe Mode, or showing a dialog in its window)"
 
     def _obs_failed(self, text: str, *, banner: bool = True) -> None:
         self._obs_status(SourceStatus.DISCONNECTED)

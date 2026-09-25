@@ -41,6 +41,7 @@ from anki_miner_game.models.obs import (
     ObsRequestError,
     OutputState,
     ProvisionResult,
+    WsConfig,
 )
 from anki_miner_game.models.profile import AudioMode, AudioSettings, FilterSettings, GameProfile
 from anki_miner_game.obs import provision
@@ -242,12 +243,17 @@ class FakeDiscovery:
         self.launches = 0
         self.enabled = 0
         self.running_checks = 0
+        self.ws_config: WsConfig | None = WsConfig(server_enabled=True, port=4455, password=None, auth_required=False)
+        """``read_ws_config``'s answer; websocket on by default, as a working OBS install has it."""
 
     def is_running(self) -> bool:
         self.running_checks += 1
         if self.answers:
             return self.answers.pop(0)
         return self.running
+
+    def read_ws_config(self) -> WsConfig | None:
+        return self.ws_config
 
     def ensure_server_enabled(self) -> bool:
         self.enabled += 1

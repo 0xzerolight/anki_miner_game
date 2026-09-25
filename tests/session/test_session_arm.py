@@ -26,6 +26,7 @@ from anki_miner_game.models.obs import (
     ObsEventName,
     ObsInfo,
     ObsUnsupportedError,
+    WsConfig,
 )
 from anki_miner_game.obs.provision import ObsProvisioner
 from anki_miner_game.session import session as session_mod
@@ -206,6 +207,37 @@ async def test_the_idle_restore_retry_does_not_overwrite_a_more_specific_obs_ban
     )
     await h.tick(T0 + 5.0)  # the idle restore retry's own connect attempt fails too
     assert "30 s" in h.banners()[BannerKey.OBS]  # kept, not replaced by the retry's raw ConnectionRefused
+
+
+async def test_arm_with_the_server_off_points_at_the_wizards_fix(rig: Harness):
+    """S5-3: OBS runs with its websocket server off; Arm's banner gives the wizard's own instructions
+    and points at File -> Setup wizard… -> OBS -> Fix, instead of only the raw connect error."""
+    rig.discovery.running = True
+    rig.discovery.ws_config = WsConfig(server_enabled=False, port=4455, password=None, auth_required=False)
+    rig.gateway.connect_error = ObsConnectError(
+        "cannot connect to OBS at 127.0.0.1:4455: ConnectionRefusedError: [WinError 10061] ..."
+    )
+    await rig.start()
+    await rig.arm()
+    text = rig.banners()[BannerKey.OBS]
+    assert "websocket server is off" in text
+    assert "Setup wizard" in text and "Fix" in text
+    assert rig.actor.state is AppState.IDLE
+
+
+async def test_arm_refused_with_the_server_on_hints_at_safe_mode(rig: Harness):
+    """S5-3 variant: the config says the server is on but the connection is still refused (OBS Safe
+    Mode, or a dialog in its window); the banner adds a short hint instead of the raw text alone."""
+    rig.discovery.running = True
+    rig.discovery.ws_config = WsConfig(server_enabled=True, port=4455, password=None, auth_required=False)
+    rig.gateway.connect_error = ObsConnectError(
+        "cannot connect to OBS at 127.0.0.1:4455: ConnectionRefusedError: [WinError 10061] ..."
+    )
+    await rig.start()
+    await rig.arm()
+    text = rig.banners()[BannerKey.OBS]
+    assert "ConnectionRefusedError" in text
+    assert "Safe Mode" in text
 
 
 async def test_missing_request_names_the_request_and_the_version(rig: Harness):
