@@ -145,14 +145,18 @@ def save_profile(profile: GameProfile) -> Path:
 def write_text_atomic(path: Path, text: str, *, mode: int = 0o666) -> None:
     """Write ``text`` as UTF-8 (no BOM) with ``\\n`` line ends, all or nothing.
 
-    The text goes to ``.<name>.*.tmp`` in the target folder (created when
-    missing), is fsynced, then ``os.replace``-d onto ``path``. On any failure the
+    The text goes to a short ``.<8 chars>.tmp`` name in the target folder (created
+    when missing), is fsynced, then ``os.replace``-d onto ``path``. The temp name is
+    independent of ``path.name``, so it never lengthens the path the way a name built
+    from it would: a deep output folder can put the final path within a few
+    characters of Windows's 260-char limit, and a temp name derived from a long
+    target name pushed a still-valid final path over it (S3-2). On any failure the
     temporary file is removed and an existing ``path`` is left untouched. On
     POSIX the file gets ``mode & ~umask``, as a plain ``open`` would give it
     (``mkstemp`` alone leaves 0600); Windows ignores ``mode``.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    fd, tmp_name = tempfile.mkstemp(prefix=".", suffix=".tmp", dir=path.parent)
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
             if sys.platform != "win32":

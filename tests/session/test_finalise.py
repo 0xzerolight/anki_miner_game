@@ -30,7 +30,8 @@ from anki_miner_game.session.journal import (
     ResumeRecord,
     StopRecord,
 )
-from anki_miner_game.session.manifest import incoming_files, load_manifest, write_manifest_atomic
+from anki_miner_game.session.manifest import game_folder, incoming_files, load_manifest, write_manifest_atomic
+from anki_miner_game.session.naming import session_stem
 
 CFG = AppConfig()
 TITLE = "Steins;Gate"
@@ -382,6 +383,30 @@ def test_a_video_that_cannot_move_for_another_reason_is_reported_at_once(tmp_pat
         finalise(path, CFG, sleep=waits.append)
     assert waits == []  # only a lock is worth waiting for
     assert load_manifest(path).state is ManifestState.FINALISE_PENDING
+
+
+def test_a_deep_output_folder_finalises_even_close_to_windows_length_limit(tmp_path, monkeypatch):
+    """S3-2: with a deep output root the final ``.srt`` can land within a few characters of Windows's
+    260-char limit while still under it. A temp name built from that long stem used to push the write
+    over a limit the final path itself stayed under. Repro: guard ``os.open`` at a limit that fits the
+    final subtitle path but not the old stem-derived temp name."""
+    title = "Deep Path Test Game XY"
+    path = _session(tmp_path, RECORDS, game=replace(RECORDED.game, title=title))
+    final_subtitle = game_folder(tmp_path / "_incoming", title) / f"{session_stem(title, RECORDED.index)}.srt"
+    limit = len(str(final_subtitle)) + 10  # room for the final path; not for a temp name derived from it
+    real_open = os.open
+
+    def guarded_open(p, *args, **kwargs):
+        if len(os.fspath(p)) > limit:
+            raise OSError(2, "No such file or directory")
+        return real_open(p, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", guarded_open)
+
+    result = finalise(path, CFG)
+
+    assert result.manifest.state is ManifestState.READY
+    assert final_subtitle.read_text(encoding="utf-8") == SRT
 
 
 def test_a_session_never_overwrites_a_file_already_in_the_game_folder(tmp_path):

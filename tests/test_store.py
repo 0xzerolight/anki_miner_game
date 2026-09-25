@@ -185,6 +185,24 @@ def test_write_text_atomic_creates_the_folder_and_keeps_lf(tmp_path):
     assert [p.name for p in target.parent.iterdir()] == ["x.srt"]
 
 
+def test_write_text_atomic_keeps_the_temp_name_short_regardless_of_the_target_name(tmp_path, monkeypatch):
+    """S3-2: a deep output folder can put the final path within a few characters of Windows's 260-char
+    limit; a temp name built from the target's own (long) name pushed a still-valid final path over
+    that limit. The temp name must stay short no matter how long the target name is."""
+    target = tmp_path / ("Deep Path Test Game XY - 01" * 3 + ".srt")  # a long stem, short suffix
+    limit = len(str(target)) + 10  # room for the final path; not for a temp name derived from it
+    real_open = os.open
+
+    def guarded_open(path, *args, **kwargs):
+        if len(os.fspath(path)) > limit:
+            raise OSError(2, "No such file or directory")
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", guarded_open)
+    store.write_text_atomic(target, "content")
+    assert target.read_text(encoding="utf-8") == "content"
+
+
 posix_non_root = pytest.mark.skipif(
     sys.platform == "win32" or os.geteuid() == 0, reason="needs POSIX permissions that bind the user"
 )
