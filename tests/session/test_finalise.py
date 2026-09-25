@@ -143,10 +143,10 @@ def test_the_vad_pass_is_not_queued_when_it_is_off(tmp_path):
 
 @pytest.mark.parametrize(
     ("text_mode", "starts"),
-    [(TextMode.HOOK, [4_830, 9_360, 13_700]), (TextMode.OCR, [4_230, 8_760, 13_100])],
+    [(TextMode.HOOK, [4_830, 9_360, 13_700]), (TextMode.OCR, [3_980, 8_510, 12_850])],
 )
 def test_a_session_starts_its_cues_by_its_text_modes_shift(tmp_path, text_mode, starts):
-    # Lines at 5230, 9760 and 14100: 400 ms early for a hook session, one second early for OCR.
+    # Lines at 5230, 9760 and 14100: 400 ms early for a hook session, 1.25 s early for OCR.
     result = finalise(_session(tmp_path, RECORDS, text_mode=text_mode), CFG)
     assert [cue.start_ms for cue in result.manifest.live_cues] == starts
 

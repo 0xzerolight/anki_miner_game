@@ -263,8 +263,8 @@ def test_cli_app_mode_passes_and_fails_on_a_synthetic_recording(tmp_path):
 
 @needs_ffmpeg
 def test_cli_app_mode_takes_the_shift_from_the_manifest_named(tmp_path):
-    # An OCR session's cues start one second before their lines arrived.
-    video = make_flash_video(tmp_path / "rec.mkv", [1.1, 3.1], duration_s=5)
+    # An OCR session's cues start 1.25 s before their lines arrived.
+    video = make_flash_video(tmp_path / "rec.mkv", [1.4, 3.4], duration_s=5)
     srt = tmp_path / "s.srt"
     srt.write_text(
         "1\n00:00:00,100 --> 00:00:02,000\nsync probe flash 000\n\n"

@@ -155,7 +155,7 @@ While recording, everything lives in `<output root>/_incoming/`, OBS's record fo
 
 `session/naming.py` sanitises the title so Anki Miner reads every stem as exactly episode NN with no season: it simulates the token deletion Anki Miner's episode extractor does and puts a `~` wherever a ` - ` or an `S1E2`-like pattern would otherwise be read. `tests/contract/` runs Anki Miner's own matcher, vendored, against it.
 
-`session/cues.py` `build_cues()` starts each cue a fixed shift before its line arrived (`START_SHIFT_MS`: 0.4 s in hook mode, 1 s in OCR mode) and ends it shortly before the next kept line (`end_gap_ms`), capped at `max_cue_seconds`; lines shown for under 300 ms (skip mode) are dropped. `session/srt_writer.py` writes UTF-8 without BOM, via a temporary file and `os.replace`.
+`session/cues.py` `build_cues()` starts each cue a fixed shift before its line arrived (`START_SHIFT_MS`: 0.4 s in hook mode, 1.25 s in OCR mode) and ends it shortly before the next kept line (`end_gap_ms`), capped at `max_cue_seconds`; lines shown for under 300 ms (skip mode) are dropped. `session/srt_writer.py` writes UTF-8 without BOM, via a temporary file and `os.replace`.
 
 ## OBS
 

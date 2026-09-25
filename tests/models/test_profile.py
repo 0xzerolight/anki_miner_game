@@ -60,7 +60,7 @@ def test_platform_defaults(monkeypatch, platform, audio, engine):
 def test_start_shift_has_one_entry_per_text_mode():
     assert set(START_SHIFT_MS) == {mode.value for mode in TextMode}
     assert START_SHIFT_MS[TextMode.HOOK] == -400
-    assert START_SHIFT_MS[TextMode.OCR] == -1000
+    assert START_SHIFT_MS[TextMode.OCR] == -1250
 
 
 def test_frozen_and_replace():

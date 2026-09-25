@@ -17,7 +17,7 @@ def test_spec_values():
 
 
 def test_start_shift_values():
-    assert dict(constants.START_SHIFT_MS) == {"hook": -400, "ocr": -1000}
+    assert dict(constants.START_SHIFT_MS) == {"hook": -400, "ocr": -1250}
 
 
 def test_start_shift_is_read_only():

@@ -155,18 +155,18 @@ def test_hook_shift_clamps_at_previous_start_and_the_earlier_line_is_dropped():
 
 def test_ocr_shift_moves_starts_earlier():
     cues = build_cues(lines_at(5_000, 9_000), stop_ms=30_000, shift_ms=OCR, cfg=DEFAULTS)
-    assert spans(cues) == [("line 0", 4_000, 7_650), ("line 1", 8_000, 23_000)]
+    assert spans(cues) == [("line 0", 3_750, 7_400), ("line 1", 7_750, 22_750)]
 
 
 def test_ocr_shift_clamps_at_zero():
     cues = build_cues(lines_at(400, 5_000), stop_ms=30_000, shift_ms=OCR, cfg=DEFAULTS)
-    assert spans(cues) == [("line 0", 0, 3_650), ("line 1", 4_000, 19_000)]
+    assert spans(cues) == [("line 0", 0, 3_400), ("line 1", 3_750, 18_750)]
 
 
 def test_ocr_shift_clamps_at_previous_start_and_the_earlier_line_is_dropped():
     # Both starts clamp to 0; the earlier of two lines sharing a start has D = 0 and is dropped.
     cues = build_cues(lines_at(200, 700, 5_000), stop_ms=30_000, shift_ms=OCR, cfg=DEFAULTS)
-    assert spans(cues) == [("line 1", 0, 3_650), ("line 2", 4_000, 19_000)]
+    assert spans(cues) == [("line 1", 0, 3_400), ("line 2", 3_750, 18_750)]
 
 
 @pytest.mark.parametrize(
