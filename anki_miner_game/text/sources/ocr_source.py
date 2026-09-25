@@ -9,6 +9,12 @@ area, no engine; ``LogKind.CONFIG_ERROR``) gets the banner at once, as do an add
 installed, a Wayland session and a profile with no OCR area. A game window that is not open
 (``LogKind.WINDOW_MISSING``) is restarted like any other exit, and the banner then names it. A run
 that lasted ``STABLE_RUN_S`` counts as healthy, so only exits in a row add up.
+
+An owocr that dropped its OCR area because the game window changed size, as at a minimise
+(``LogKind.AREA_DISCARDED``), reads the whole window from then on: its frames are dropped, and once
+it sends text again, so the window is back on screen, it is restarted with the same arguments,
+which gets the area back. That restart is not an exit: it waits for no backoff, spends none of the
+three attempts and shows no banner.
 """
 
 import asyncio
@@ -127,6 +133,11 @@ class OcrSource:
                 self._give_up(f"OCR could not start: {exc}")
                 return
             code = await self._run(proc, port, sink)
+            if code is None:
+                logger.info("owocr lost its OCR area when the game window changed size; restarting it")
+                if self._now() - started >= STABLE_RUN_S:
+                    exits = 0
+                continue
             if proc.fatal is not None:
                 self._give_up(f'OCR stopped: owocr reported "{proc.fatal}"')
                 return
@@ -141,15 +152,27 @@ class OcrSource:
                 return
             await self._sleep(BACKOFF_S[exits - 1])
 
-    async def _run(self, proc: OwocrProcess, port: int, sink: LineSink) -> int:
-        """Listen to one owocr until it exits; its tree is dead when this returns or raises."""
+    async def _run(self, proc: OwocrProcess, port: int, sink: LineSink) -> int | None:
+        """Listen to one owocr until it exits, and return its exit code; or, once it has lost its OCR
+        area and the window is back on screen (``OwocrProcess.wait_area_recoverable``), until it is
+        killed for a restart: ``None``. Its tree is dead when this returns or raises."""
+
+        def lines_only(raw: str, t_mono: float, source_id: str) -> None:
+            if not proc.area_lost:  # whole-window text: scene text and name plates, not a line
+                sink(raw, t_mono, source_id)
+
         ws = WebsocketSource(self._id, f"127.0.0.1:{port}", now=self._now)
         ws.set_status_listener(self._forward_status)
         self._ws = ws
+        exited = asyncio.ensure_future(proc.wait())
+        recoverable = asyncio.ensure_future(proc.wait_area_recoverable())
         try:
-            ws.start(sink)
-            return await proc.wait()
+            ws.start(lines_only)
+            await asyncio.wait({exited, recoverable}, return_when=asyncio.FIRST_COMPLETED)
+            return exited.result() if exited.done() else None
         finally:
+            exited.cancel()
+            recoverable.cancel()
             ws.stop()
             self._ws = None
             await proc.kill_tree()

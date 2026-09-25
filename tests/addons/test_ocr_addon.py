@@ -161,6 +161,10 @@ FIXTURE_EVENTS: dict[str, list[LogEvent]] = {
     "synthetic-screen-picker.log": [LogEvent(SCREEN, "412,610,1508,1002")],
     "synthetic-window-picker.log": [LogEvent(WINDOW, "0,540,1280,720")],
     "synthetic-window-picker-multi-rect.log": [LogEvent(WINDOW, "10,500,640,700_640,500,1270,700")],
+    "windows-window-minimised.log": [
+        LogEvent(WINDOW, "150,537,1135,694"),
+        LogEvent(LogKind.AREA_DISCARDED, "Window size changed, discarding area selection"),
+    ],
 }
 
 
@@ -224,6 +228,11 @@ def test_parse_log_line_against_the_r3_fixtures(name):
                 LogKind.WINDOW_MISSING, '"screen_capture_area" must be empty, "screen_N" where N is a screen number'
             ),
             id="window title not found is worth a restart",
+        ),
+        pytest.param(
+            "10:00:00 | Window size changed, discarding area selection",
+            LogEvent(LogKind.AREA_DISCARDED, "Window size changed, discarding area selection"),
+            id="area discarded at a window size change",
         ),
         pytest.param(
             "10:00:00 | Couldn't start websocket server. Make sure port 5000 is not already in use",

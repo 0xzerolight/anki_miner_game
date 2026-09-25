@@ -157,6 +157,10 @@ class LogKind(StrEnum):
     """The picker window was closed (``run.py:2448,2502``); fatal for the screen picker."""
     CONFIG_ERROR = "config_error"
     """A fatal error that the same command line would hit again, so a restart cannot help."""
+    AREA_DISCARDED = "area_discarded"
+    """The captured window changed size, so owocr dropped the OCR area for good and reads the whole
+    window from then on (``run.py:2364-2369``). A minimise does it: a capture before owocr notices
+    the window is minimised gets its much smaller size. Worth a restart, which reads ``-swa`` again."""
     WINDOW_MISSING = "window_missing"
     """No window has the title owocr was given (``run.py:1991,2005``). Worth a restart: the game may
     not be open yet, or is being restarted (owocr first exits with "The window was closed",
@@ -185,6 +189,10 @@ CONFIG_ERRORS: Final = (
 Anything else it exits on, such as a websocket port taken meanwhile, is worth a restart."""
 WINDOW_MISSING_ERROR: Final = '"screen_capture_area" must be empty'
 """How owocr's message starts when no window has the title (``LogKind.WINDOW_MISSING``)."""
+AREA_DISCARDED_WARNING: Final = "Window size changed, discarding area selection"
+"""owocr's whole message when it drops the OCR area (``LogKind.AREA_DISCARDED``, ``run.py:2369``)."""
+TEXT_RECOGNISED: Final = "Text recognized in "
+"""How owocr's message starts when it sends text, logged just before the frame (``run.py:2860-2873``)."""
 
 _ANSI: Final = re.compile(r"\x1b\[[0-9;]*m")
 _LOG_LINE: Final = re.compile(r"^\d{2}:\d{2}:\d{2} \| (.*)$")
@@ -214,6 +222,8 @@ def parse_log_line(line: str) -> LogEvent | None:
         return LogEvent(LogKind.CONFIG_ERROR, message)
     if message.startswith(WINDOW_MISSING_ERROR):
         return LogEvent(LogKind.WINDOW_MISSING, message)
+    if message == AREA_DISCARDED_WARNING:
+        return LogEvent(LogKind.AREA_DISCARDED, message)
     return None
 
 
@@ -232,8 +242,9 @@ class OwocrProcess:
     from owocr's stderr for as long as it runs: every line is logged at debug level, the last
     timestamped message is kept in ``last_message``, the first fatal one (``LogKind.CONFIG_ERROR``
     or ``PICKER_CLOSED``) in ``fatal``, ``window_missing`` says whether owocr found no window with
-    its title, and every ``LogEvent`` is queued for ``next_event``. Always end with ``kill_tree``,
-    also after owocr exited on its own: its children may have outlived it.
+    its title, ``area_lost`` whether it dropped its OCR area (``LogKind.AREA_DISCARDED``), and every
+    ``LogEvent`` is queued for ``next_event``. Always end with ``kill_tree``, also after owocr exited
+    on its own: its children may have outlived it.
     """
 
     def __init__(self, proc: asyncio.subprocess.Process, job: int | None) -> None:
@@ -245,6 +256,8 @@ class OwocrProcess:
         self._log_ended = False
         self.fatal: str | None = None
         self.window_missing = False
+        self.area_lost = False
+        self._area_recoverable = asyncio.Event()
         self.last_message: str | None = None
         loop = asyncio.get_running_loop()
         self._reader = loop.create_task(self._read(), name=f"owocr-log-{proc.pid}")
@@ -280,6 +293,21 @@ class OwocrProcess:
         if event is None:
             self._log_ended = True
         return event
+
+    async def wait_area_recoverable(self) -> None:
+        """Return once a restart would get the OCR area back: owocr has lost it (``area_lost``) and
+        has since sent text again, so the window is on screen. owocr captures nothing from a
+        minimised window (``run.py:2278-2279``), and with ``WHOLE_LINES`` text is sent only after 1 s
+        of unchanged captures, longer than owocr takes to notice a minimise (0.5 s,
+        ``run.py:2146-2157``).
+
+        A restart while the window is still minimised would not get the area back: the new owocr's
+        first capture is ``None`` (``run.py:2008,2278-2279``), its check of the ``-swa`` rectangles
+        raises ``AttributeError`` on it (``run.py:2048,2072``) on the main thread, and it hangs
+        without capturing until the window closes, because its window-tracking thread is not a
+        daemon and nothing stops it (``run.py:2013-2014,2146-2157``).
+        """
+        await self._area_recoverable.wait()
 
     async def kill_tree(self, grace_s: float = KILL_GRACE_S) -> None:
         """Kill owocr and everything it started, then wait for owocr and the end of its log.
@@ -333,6 +361,8 @@ class OwocrProcess:
         message = log_message(line)
         if message is not None:
             self.last_message = message
+            if self.area_lost and message.startswith(TEXT_RECOGNISED):
+                self._area_recoverable.set()
         event = parse_log_line(line)
         if event is None:
             return
@@ -340,6 +370,8 @@ class OwocrProcess:
             self.fatal = event.text
         if event.kind is LogKind.WINDOW_MISSING:
             self.window_missing = True
+        if event.kind is LogKind.AREA_DISCARDED:
+            self.area_lost = True
         self._events.put_nowait(event)
 
     async def _end_log_after_exit(self) -> None:

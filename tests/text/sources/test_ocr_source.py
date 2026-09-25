@@ -22,6 +22,7 @@ from anki_miner_game.text.sources.ocr_source import OcrSource
 from tests.test_contracts import _assert_conforms
 
 FAKES = Path(__file__).parent.parent.parent / "fakes"
+FIXTURES = Path(__file__).parent.parent.parent / "fixtures" / "owocr"
 SETTINGS = OcrSettings(rects="100,100,900,260")
 
 
@@ -32,14 +33,26 @@ def test_conforms_to_the_text_source_protocol():
 
 
 class FakeProc:
-    """An owocr run: exits at once with ``code`` unless ``runs``; ``kill_tree`` ends it."""
+    """An owocr run: exits at once with ``code`` unless ``runs``; ``kill_tree`` ends it.
+
+    ``area_lost``: owocr has dropped its OCR area; setting ``area_back`` says the window is on
+    screen again (``OwocrProcess.wait_area_recoverable``).
+    """
 
     def __init__(
-        self, code: int = 1, *, fatal: str | None = None, window_missing: bool = False, runs: bool = False
+        self,
+        code: int = 1,
+        *,
+        fatal: str | None = None,
+        window_missing: bool = False,
+        runs: bool = False,
+        area_lost: bool = False,
     ) -> None:
         self.code = code
         self.fatal = fatal
         self.window_missing = window_missing
+        self.area_lost = area_lost
+        self.area_back = asyncio.Event()
         self.last_message = "Something went wrong"
         self.kills = 0
         self._exited = asyncio.Event()
@@ -49,6 +62,9 @@ class FakeProc:
     async def wait(self) -> int:
         await self._exited.wait()
         return self.code
+
+    async def wait_area_recoverable(self) -> None:
+        await self.area_back.wait()
 
     async def kill_tree(self) -> None:
         self.kills += 1
@@ -181,6 +197,78 @@ async def test_a_run_that_lasted_resets_the_restart_count(make_source):
             await asyncio.sleep(0.005)
     assert banners.raised == []
     assert set(sleep.delays) == {1.0}
+
+
+def _area_lost_and_back() -> FakeProc:
+    proc = FakeProc(runs=True, area_lost=True)
+    proc.area_back.set()
+    return proc
+
+
+async def test_a_lost_area_is_restarted_once_the_window_is_back(make_source):
+    launcher = FakeLauncher(lambda n: FakeProc(runs=True, area_lost=n == 1))
+    sleep, banners = FakeSleep(), Banners()
+    make_source(launcher, sleep=sleep, on_banner=banners).start(Sink())
+    async with asyncio.timeout(5):
+        while not launcher.procs:
+            await asyncio.sleep(0.005)
+    for _ in range(20):
+        await asyncio.sleep(0)
+    assert len(launcher.launches) == 1, "no restart while the window may still be minimised"
+    launcher.procs[0].area_back.set()
+    async with asyncio.timeout(5):
+        while len(launcher.launches) < 2:
+            await asyncio.sleep(0.005)
+    assert launcher.procs[0].kills >= 1
+    assert [settings for settings, _ in launcher.launches] == [SETTINGS, SETTINGS]
+    assert sleep.delays == []
+    assert banners.raised == []
+
+
+async def test_an_area_restart_spends_none_of_the_restarts(make_source):
+    launcher = FakeLauncher(lambda n: _area_lost_and_back() if n == 1 else FakeProc())
+    sleep, banners = FakeSleep(), Banners()
+    make_source(launcher, sleep=sleep, on_banner=banners).start(Sink())
+    banner = await banners.wait_raised()
+    assert len(launcher.launches) == 5
+    assert sleep.delays == [1.0, 2.0, 5.0]
+    assert "4 times" in banner.text
+
+
+async def test_an_area_restart_after_a_run_that_lasted_resets_the_restart_count(make_source):
+    clock = [0.0]
+
+    def make(n: int) -> FakeProc:
+        if n == 4:
+            clock[0] += ocr_source.STABLE_RUN_S
+            return _area_lost_and_back()
+        return FakeProc()
+
+    launcher, sleep, banners = FakeLauncher(make), FakeSleep(), Banners()
+    make_source(launcher, sleep=sleep, on_banner=banners, now=lambda: clock[0]).start(Sink())
+    await banners.wait_raised()
+    assert len(launcher.launches) == 8
+    assert sleep.delays == [1.0, 2.0, 5.0, 1.0, 2.0, 5.0]
+
+
+async def test_whole_window_frames_after_a_lost_area_are_not_lines(make_source):
+    from websockets.asyncio.server import ServerConnection, serve
+
+    async def handler(ws: ServerConnection) -> None:
+        await ws.send("記者会見場 「そろそろ帰ろうか」 太郎")
+        await ws.wait_closed()
+
+    async with serve(handler, "127.0.0.1", 0) as server:
+        port = server.sockets[0].getsockname()[1]
+        launcher = FakeLauncher(lambda n: FakeProc(runs=True, area_lost=True))
+        source, sink = make_source(launcher, port_finder=lambda: port), Sink()
+        source.start(sink)
+        async with asyncio.timeout(10):
+            while source.status is not SourceStatus.RECEIVING:
+                await asyncio.sleep(0.005)
+        assert sink.lines.empty()
+        source.stop()
+        await source.wait_closed()
 
 
 @pytest.mark.parametrize("reason", ["The OCR add-on is not installed.", "OCR on Linux needs an X11 session"])
@@ -330,3 +418,29 @@ async def test_owocr_that_cannot_find_the_game_window_is_restarted_then_named(ma
     banner = await banners.wait_raised()
     assert sleep.delays == [1.0, 2.0, 5.0], "three restarts before the banner"
     assert 'the window "Some Game" is not open' in banner.text
+
+
+class CountingLauncher:
+    def __init__(self, addon: OcrAddon) -> None:
+        self.addon = addon
+        self.launches = 0
+
+    def unavailable_reason(self) -> str | None:
+        return self.addon.unavailable_reason()
+
+    async def launch(self, ocr: OcrSettings, port: int):
+        self.launches += 1
+        return await self.addon.launch(ocr, port)
+
+
+async def test_owocr_that_lost_its_area_is_restarted_from_its_log(make_source, tmp_path):
+    launcher = CountingLauncher(
+        _installed_addon(tmp_path, {"log_file": str(FIXTURES / "windows-window-minimised.log")})
+    )
+    sleep, banners = FakeSleep(), Banners()
+    make_source(launcher, sleep=sleep, on_banner=banners).start(Sink())
+    async with asyncio.timeout(10):
+        while launcher.launches < 3:
+            await asyncio.sleep(0.01)
+    assert sleep.delays == []
+    assert banners.raised == []

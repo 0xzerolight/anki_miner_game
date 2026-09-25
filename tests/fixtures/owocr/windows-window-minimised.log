@@ -1,0 +1,21 @@
+16:02:11 | Starting owocr version 1.26.8
+16:02:11 | Latest available version: N/A
+16:02:11 | Parsed config file
+16:02:11 | Starting websocket server on port 50505
+16:02:11 | Selected window: Steins;Gate
+16:02:12 | Selected window coordinates: 150,537,1135,694
+16:02:12 | Loading dependencies for OneOCR
+16:02:12 | OneOCR ready
+16:02:12 | Reading from screen capture, writing to websocket using OneOCR
+16:02:13 | Text recognized in 0.031s using OneOCR: 今日はいい天気ですね。
+16:02:21 | Text recognized in 0.062s using OneOCR: 明日も学校に行きます。
+16:02:25 | Text recognized in 0.063s using OneOCR: 駅まで歩いて十分です。
+16:02:30 | Text recognized in 0.078s using OneOCR: 「そろそろ帰ろうか」
+16:02:33 | Text recognized in 0.031s using OneOCR: 雨が降りそうだ。
+16:02:37 | Text recognized in 0.063s using OneOCR: 「傘を持ってきた？」
+16:02:39 | Window size changed, discarding area selection
+16:02:59 | Text recognized in 0.078s using OneOCR: 記者会見場 「そろそろ帰ろうか」 太郎
+16:03:10 | Text recognized in 0.078s using OneOCR: 記者会見場 「傘を持ってきた？」 花子
+16:03:13 | Text recognized in 0.079s using OneOCR: 記者会見場 雨が降りそうだ。
+16:03:19 | The window was closed or an error occurred
+16:03:19 | Terminated!

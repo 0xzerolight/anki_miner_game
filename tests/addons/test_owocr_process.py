@@ -100,6 +100,7 @@ async def test_events_come_from_the_log_and_end_after_exit(spawned):
     assert await proc.wait() == 0
     assert proc.fatal is None
     assert proc.last_message == "Selected window coordinates: 0,540,1280,720"
+    assert not proc.area_lost
 
 
 async def test_a_config_error_is_kept_as_fatal(spawned):
@@ -119,6 +120,32 @@ async def test_a_missing_window_is_flagged_but_not_fatal(spawned):
     assert await proc.wait() == 1
     assert proc.window_missing
     assert proc.fatal is None
+
+
+MINIMISED = FIXTURES / "windows-window-minimised.log"
+
+
+async def test_a_discarded_area_is_lost_and_recoverable_once_owocr_reads_text_again(spawned):
+    proc = await _spawn(log_file=str(MINIMISED), exit=0)
+    spawned.append(proc)
+    await _events(proc)
+    assert proc.area_lost
+    async with asyncio.timeout(1):
+        await proc.wait_area_recoverable()
+    assert proc.fatal is None
+
+
+async def test_a_discarded_area_is_not_recoverable_before_owocr_reads_text_again(spawned):
+    lines = MINIMISED.read_text(encoding="utf-8").splitlines()
+    discard = next(i for i, line in enumerate(lines) if line.endswith("discarding area selection"))
+    proc = await _spawn(log=lines[: discard + 1], exit=0)
+    spawned.append(proc)
+    await _events(proc)
+    assert proc.area_lost
+    waiting = asyncio.ensure_future(proc.wait_area_recoverable())
+    await asyncio.sleep(0)
+    assert not waiting.done(), "text read before the discard says nothing about the window now"
+    waiting.cancel()
 
 
 async def test_an_overlong_line_is_skipped_not_fatal(spawned, monkeypatch):

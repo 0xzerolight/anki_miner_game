@@ -27,6 +27,10 @@ EXPECTED: dict[str, tuple[str, str] | None] = {
     "synthetic-screen-picker.log": ("screen", "412,610,1508,1002"),
     "synthetic-window-picker.log": ("window", "0,540,1280,720"),
     "synthetic-window-picker-multi-rect.log": ("window", "10,500,640,700_640,500,1270,700"),
+    # QA S4-flags, Windows 11: the app's owocr (-sf 1.0 -sl False, -sw default) on a stand-in
+    # "Steins;Gate" window, minimised at 16:02:39 and restored at 16:02:54 (log clock). CRLF made LF;
+    # the recognised game text is replaced, with whole-window text after the discard line.
+    "windows-window-minimised.log": ("window", "150,537,1135,694"),
 }
 
 
