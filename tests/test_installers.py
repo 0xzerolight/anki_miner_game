@@ -338,7 +338,9 @@ def test_the_windows_installer_packs_the_bundle_per_user():
 def test_the_app_setup_launches_does_not_inherit_redirectionguard():
     """Setup's mitigation passes to the app its Finish page starts, and on to uv, whose managed-Python
     junction it then refuses to follow: both add-on installs and every VAD pass fail."""
-    assert iss_setup()["RedirectionGuard"] == "no"
+    setup = iss_setup()
+    assert setup["RedirectionGuard"] == "no"
+    assert "PrivilegesRequiredOverridesAllowed" not in setup  # no admin install mode: see the .iss
 
 
 def test_the_windows_installer_paths_resolve_from_its_folder():

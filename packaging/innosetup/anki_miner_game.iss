@@ -31,10 +31,13 @@ SetupLogging=yes
 SetupMutex=AnkiMinerGameSetup-C390E8D8-9789-4827-A794-046E5E3B4123
 ; Per-user install: no elevation prompt, and {autopf} is the user's Programs folder.
 PrivilegesRequired=lowest
-; Setup's RedirectionGuard is inherited, whatever Inno's help says: the app the Finish page starts,
-; and every program it starts, refuse to follow a junction the user made. uv reaches its managed
-; Python through one, so both add-ons fail to install and every VAD pass fails. A per-user Setup
-; writes nothing the user could not write already.
+; Setup's RedirectionGuard is inherited by the app the Finish page starts and by every program the
+; app starts: Windows applies it to the process token (WiX issue 9334), whatever Inno's help says.
+; They then refuse to follow a junction the user made, and uv reaches its managed Python through
+; one, so both add-ons fail to install and every VAD pass fails. Setup is per-user with no admin
+; install mode (PrivilegesRequiredOverridesAllowed unset), so even run as administrator it writes
+; only into the elevating account's own profile; the one same-user attacker, malware already at
+; medium integrity, could as well swap the AnkiMinerGame.exe that [Run] starts.
 RedirectionGuard=no
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
