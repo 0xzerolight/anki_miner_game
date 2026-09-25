@@ -1,0 +1,19 @@
+# SYNTHETIC (S4F-3): hand-written from owocr 1.26.8 source (3b9706b1), not captured. Windows, -sa=<title> -swa=<rects> started while that window is minimised: the rectangle check gets no screenshot (run.py:2008,2024,2048,2278-2279) and fails at run.py:2072 on the main thread; owocr then hangs, since its window tracker thread (run.py:2013-2014) is not a daemon
+16:10:02 | Starting owocr version 1.26.8
+16:10:02 | Latest available version: N/A
+16:10:02 | Parsed config file
+16:10:02 | Starting websocket server on port 50505
+16:10:02 | Selected window: Some Game
+Traceback (most recent call last):
+  File "<tool-env>\Lib\site-packages\owocr\__main__.py", line 24, in main
+    run()
+  File "<tool-env>\Lib\site-packages\owocr\run.py", line 3184, in run
+    screenshot_thread = ScreenshotThread()
+                        ^^^^^^^^^^^^^^^^^^
+  File "<tool-env>\Lib\site-packages\owocr\run.py", line 2024, in __init__
+    saved_rectangles = self.parse_saved_coordinates(screen_capture_window_area, True)
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<tool-env>\Lib\site-packages\owocr\run.py", line 2072, in parse_saved_coordinates
+    x2_window = 0 + img.width
+                    ^^^^^^^^^
+AttributeError: 'NoneType' object has no attribute 'width'

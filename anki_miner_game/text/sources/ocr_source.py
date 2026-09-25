@@ -13,11 +13,15 @@ that lasted ``STABLE_RUN_S`` counts as healthy, so only exits in a row add up.
 An owocr that dropped its OCR area because the game window changed size, as at a minimise
 (``LogKind.AREA_DISCARDED``), reads the whole window from then on: its frames are dropped, and once
 it sends text again, so the window is back on screen, it is restarted with the same arguments,
-which gets the area back. That restart is not an exit: it waits for no backoff, spends none of the
+which gets the area back. An owocr started while the game window is minimised hangs
+(``LogKind.MINIMISED_AT_START``): it is replaced by one on the whole window (``-swa=window``, which
+starts while minimised), whose frames are dropped the same way, and once that one sends text it is
+restarted with the area. Neither restart is an exit: it waits for no backoff, spends none of the
 three attempts and shows no banner.
 """
 
 import asyncio
+import dataclasses
 import logging
 import time
 from collections.abc import Awaitable, Callable
@@ -124,17 +128,26 @@ class OcrSource:
             self._give_up(reason)
             return
         exits = 0
+        watch = False  # the next owocr runs on the whole window only to wait for the window
         while True:
             port = self._port_finder()
             started = self._now()
+            settings = dataclasses.replace(self._settings, rects=None) if watch else self._settings
             try:
-                proc = await self._launcher.launch(self._settings, port)
+                proc = await self._launcher.launch(settings, port)
             except (OcrError, OSError) as exc:
                 self._give_up(f"OCR could not start: {exc}")
                 return
+            if watch:
+                proc.area_lost = True
             code = await self._run(proc, port, sink)
+            watch = False
             if code is None:
-                logger.info("owocr lost its OCR area when the game window changed size; restarting it")
+                if proc.minimised_at_start:
+                    logger.info("owocr cannot start on the minimised game window; waiting for the window")
+                    watch = True
+                else:
+                    logger.info("owocr lost its OCR area when the game window changed size; restarting it")
                 if self._now() - started >= STABLE_RUN_S:
                     exits = 0
                 continue
@@ -153,9 +166,9 @@ class OcrSource:
             await self._sleep(BACKOFF_S[exits - 1])
 
     async def _run(self, proc: OwocrProcess, port: int, sink: LineSink) -> int | None:
-        """Listen to one owocr until it exits, and return its exit code; or, once it has lost its OCR
-        area and the window is back on screen (``OwocrProcess.wait_area_recoverable``), until it is
-        killed for a restart: ``None``. Its tree is dead when this returns or raises."""
+        """Listen to one owocr until it exits, and return its exit code; or, once it is due a restart
+        (``OwocrProcess.wait_restart_due``), until it is killed for one: ``None``. Its tree is dead
+        when this returns or raises."""
 
         def lines_only(raw: str, t_mono: float, source_id: str) -> None:
             if not proc.area_lost:  # whole-window text: scene text and name plates, not a line
@@ -165,14 +178,14 @@ class OcrSource:
         ws.set_status_listener(self._forward_status)
         self._ws = ws
         exited = asyncio.ensure_future(proc.wait())
-        recoverable = asyncio.ensure_future(proc.wait_area_recoverable())
+        restart = asyncio.ensure_future(proc.wait_restart_due())
         try:
             ws.start(lines_only)
-            await asyncio.wait({exited, recoverable}, return_when=asyncio.FIRST_COMPLETED)
+            await asyncio.wait({exited, restart}, return_when=asyncio.FIRST_COMPLETED)
             return exited.result() if exited.done() else None
         finally:
             exited.cancel()
-            recoverable.cancel()
+            restart.cancel()
             ws.stop()
             self._ws = None
             await proc.kill_tree()

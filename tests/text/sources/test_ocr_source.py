@@ -6,6 +6,7 @@ The supervisor tests drive fake processes through a fake launcher, with an injec
 """
 
 import asyncio
+import dataclasses
 import json
 import os
 import sys
@@ -35,8 +36,8 @@ def test_conforms_to_the_text_source_protocol():
 class FakeProc:
     """An owocr run: exits at once with ``code`` unless ``runs``; ``kill_tree`` ends it.
 
-    ``area_lost``: owocr has dropped its OCR area; setting ``area_back`` says the window is on
-    screen again (``OwocrProcess.wait_area_recoverable``).
+    ``area_lost``: owocr has dropped its OCR area; ``minimised_at_start``: it started on a minimised
+    window and hangs. Setting ``restart_due`` ends the run for a restart (``OwocrProcess.wait_restart_due``).
     """
 
     def __init__(
@@ -47,12 +48,14 @@ class FakeProc:
         window_missing: bool = False,
         runs: bool = False,
         area_lost: bool = False,
+        minimised_at_start: bool = False,
     ) -> None:
         self.code = code
         self.fatal = fatal
         self.window_missing = window_missing
         self.area_lost = area_lost
-        self.area_back = asyncio.Event()
+        self.minimised_at_start = minimised_at_start
+        self.restart_due = asyncio.Event()
         self.last_message = "Something went wrong"
         self.kills = 0
         self._exited = asyncio.Event()
@@ -63,8 +66,8 @@ class FakeProc:
         await self._exited.wait()
         return self.code
 
-    async def wait_area_recoverable(self) -> None:
-        await self.area_back.wait()
+    async def wait_restart_due(self) -> None:
+        await self.restart_due.wait()
 
     async def kill_tree(self) -> None:
         self.kills += 1
@@ -201,7 +204,7 @@ async def test_a_run_that_lasted_resets_the_restart_count(make_source):
 
 def _area_lost_and_back() -> FakeProc:
     proc = FakeProc(runs=True, area_lost=True)
-    proc.area_back.set()
+    proc.restart_due.set()
     return proc
 
 
@@ -215,7 +218,7 @@ async def test_a_lost_area_is_restarted_once_the_window_is_back(make_source):
     for _ in range(20):
         await asyncio.sleep(0)
     assert len(launcher.launches) == 1, "no restart while the window may still be minimised"
-    launcher.procs[0].area_back.set()
+    launcher.procs[0].restart_due.set()
     async with asyncio.timeout(5):
         while len(launcher.launches) < 2:
             await asyncio.sleep(0.005)
@@ -249,6 +252,40 @@ async def test_an_area_restart_after_a_run_that_lasted_resets_the_restart_count(
     await banners.wait_raised()
     assert len(launcher.launches) == 8
     assert sleep.delays == [1.0, 2.0, 5.0, 1.0, 2.0, 5.0]
+
+
+WINDOW_SETTINGS = OcrSettings(rects="0,540,1280,720", window_title="Some Game")
+
+
+async def test_owocr_started_on_a_minimised_window_waits_on_the_whole_window_then_gets_its_area(make_source):
+    def make(n: int) -> FakeProc:
+        if n == 1:
+            proc = FakeProc(runs=True, minimised_at_start=True)
+            proc.restart_due.set()
+            return proc
+        return FakeProc(runs=True)
+
+    launcher, sleep, banners = FakeLauncher(make), FakeSleep(), Banners()
+    make_source(launcher, WINDOW_SETTINGS, sleep=sleep, on_banner=banners).start(Sink())
+    async with asyncio.timeout(5):
+        while len(launcher.launches) < 2:
+            await asyncio.sleep(0.005)
+    hung, watcher = launcher.procs
+    assert hung.kills >= 1
+    assert launcher.launches[1][0] == dataclasses.replace(WINDOW_SETTINGS, rects=None), "-swa=window starts"
+    assert watcher.area_lost, "its whole-window frames are dropped"
+    for _ in range(20):
+        await asyncio.sleep(0)
+    assert len(launcher.launches) == 2, "no restart with the area while the window may still be minimised"
+    watcher.restart_due.set()
+    async with asyncio.timeout(5):
+        while len(launcher.launches) < 3:
+            await asyncio.sleep(0.005)
+    assert watcher.kills >= 1
+    assert launcher.launches[2][0] == WINDOW_SETTINGS
+    assert not launcher.procs[2].area_lost
+    assert sleep.delays == []
+    assert banners.raised == []
 
 
 async def test_whole_window_frames_after_a_lost_area_are_not_lines(make_source):
@@ -338,10 +375,10 @@ def test_the_source_id_is_ocr():
 # --- against the fake owocr ------------------------------------------------------------------------------
 
 
-def _installed_addon(tmp_path: Path, plan: dict) -> OcrAddon:
+def _installed_addon(tmp_path: Path, plan: dict, platform: str | None = None) -> OcrAddon:
     home = tmp_path / "home"
     root = home / "addons" / "ocr"
-    platform = "win32" if sys.platform == "win32" else "linux"
+    platform = platform or ("win32" if sys.platform == "win32" else "linux")
     exe = root / "bin" / ("owocr.exe" if platform == "win32" else "owocr")
     exe.parent.mkdir(parents=True)
     exe.write_text("", encoding="utf-8")
@@ -424,12 +461,14 @@ class CountingLauncher:
     def __init__(self, addon: OcrAddon) -> None:
         self.addon = addon
         self.launches = 0
+        self.settings: list[OcrSettings] = []
 
     def unavailable_reason(self) -> str | None:
         return self.addon.unavailable_reason()
 
     async def launch(self, ocr: OcrSettings, port: int):
         self.launches += 1
+        self.settings.append(ocr)
         return await self.addon.launch(ocr, port)
 
 
@@ -442,5 +481,18 @@ async def test_owocr_that_lost_its_area_is_restarted_from_its_log(make_source, t
     async with asyncio.timeout(10):
         while launcher.launches < 3:
             await asyncio.sleep(0.01)
+    assert sleep.delays == []
+    assert banners.raised == []
+
+
+async def test_owocr_that_hangs_on_a_minimised_window_is_replaced_from_its_log(make_source, tmp_path):
+    log = FIXTURES / "synthetic-window-minimised-at-start.log"
+    launcher = CountingLauncher(_installed_addon(tmp_path, {"log_file": str(log)}, platform="win32"))
+    sleep, banners = FakeSleep(), Banners()
+    make_source(launcher, WINDOW_SETTINGS, sleep=sleep, on_banner=banners).start(Sink())
+    async with asyncio.timeout(10):
+        while launcher.launches < 2:
+            await asyncio.sleep(0.01)
+    assert launcher.settings[:2] == [WINDOW_SETTINGS, dataclasses.replace(WINDOW_SETTINGS, rects=None)]
     assert sleep.delays == []
     assert banners.raised == []

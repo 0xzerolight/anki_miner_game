@@ -161,6 +161,12 @@ class LogKind(StrEnum):
     """The captured window changed size, so owocr dropped the OCR area for good and reads the whole
     window from then on (``run.py:2364-2369``). A minimise does it: a capture before owocr notices
     the window is minimised gets its much smaller size. Worth a restart, which reads ``-swa`` again."""
+    MINIMISED_AT_START = "minimised_at_start"
+    """owocr was started on a minimised window with ``-swa`` rectangles: their check gets no
+    screenshot (``run.py:2008,2048,2278-2279``) and raises ``AttributeError`` on the main thread
+    (``run.py:2072``), and owocr then hangs without capturing until the window closes, because its
+    window tracker thread is not a daemon (``run.py:2013-2014,2146-2157``). Not a logger line: the
+    last line of the traceback. ``-swa=window`` skips that check and starts."""
     WINDOW_MISSING = "window_missing"
     """No window has the title owocr was given (``run.py:1991,2005``). Worth a restart: the game may
     not be open yet, or is being restarted (owocr first exits with "The window was closed",
@@ -191,6 +197,8 @@ WINDOW_MISSING_ERROR: Final = '"screen_capture_area" must be empty'
 """How owocr's message starts when no window has the title (``LogKind.WINDOW_MISSING``)."""
 AREA_DISCARDED_WARNING: Final = "Window size changed, discarding area selection"
 """owocr's whole message when it drops the OCR area (``LogKind.AREA_DISCARDED``, ``run.py:2369``)."""
+MINIMISED_AT_START_ERROR: Final = "AttributeError: 'NoneType' object has no attribute 'width'"
+"""The last traceback line of an owocr started on a minimised window (``LogKind.MINIMISED_AT_START``)."""
 TEXT_RECOGNISED: Final = "Text recognized in "
 """How owocr's message starts when it sends text, logged just before the frame (``run.py:2860-2873``)."""
 
@@ -211,6 +219,8 @@ def parse_log_line(line: str) -> LogEvent | None:
     """The event one owocr log line reports, or ``None`` when it reports none of ``LogKind``."""
     message = log_message(line)
     if message is None:
+        if _ANSI.sub("", line).rstrip("\r\n").startswith(MINIMISED_AT_START_ERROR):
+            return LogEvent(LogKind.MINIMISED_AT_START, MINIMISED_AT_START_ERROR)
         return None
     if match := _COORDINATES.match(message):
         return LogEvent(LogKind.WINDOW_COORDINATES if match.group(1) else LogKind.COORDINATES, match.group(2))
@@ -242,8 +252,10 @@ class OwocrProcess:
     from owocr's stderr for as long as it runs: every line is logged at debug level, the last
     timestamped message is kept in ``last_message``, the first fatal one (``LogKind.CONFIG_ERROR``
     or ``PICKER_CLOSED``) in ``fatal``, ``window_missing`` says whether owocr found no window with
-    its title, ``area_lost`` whether it dropped its OCR area (``LogKind.AREA_DISCARDED``), and every
-    ``LogEvent`` is queued for ``next_event``. Always end with ``kill_tree``, also after owocr exited
+    its title, ``area_lost`` whether it dropped its OCR area (``LogKind.AREA_DISCARDED``; its owner
+    also sets it on an owocr it starts on the whole window only to wait for the window),
+    ``minimised_at_start`` whether it started on a minimised window and hangs
+    (``LogKind.MINIMISED_AT_START``), and every ``LogEvent`` is queued for ``next_event``. Always end with ``kill_tree``, also after owocr exited
     on its own: its children may have outlived it.
     """
 
@@ -257,7 +269,8 @@ class OwocrProcess:
         self.fatal: str | None = None
         self.window_missing = False
         self.area_lost = False
-        self._area_recoverable = asyncio.Event()
+        self.minimised_at_start = False
+        self._restart_due = asyncio.Event()
         self.last_message: str | None = None
         loop = asyncio.get_running_loop()
         self._reader = loop.create_task(self._read(), name=f"owocr-log-{proc.pid}")
@@ -294,20 +307,17 @@ class OwocrProcess:
             self._log_ended = True
         return event
 
-    async def wait_area_recoverable(self) -> None:
-        """Return once a restart would get the OCR area back: owocr has lost it (``area_lost``) and
-        has since sent text again, so the window is on screen. owocr captures nothing from a
-        minimised window (``run.py:2278-2279``), and with ``WHOLE_LINES`` text is sent only after 1 s
-        of unchanged captures, longer than owocr takes to notice a minimise (0.5 s,
-        ``run.py:2146-2157``).
+    async def wait_restart_due(self) -> None:
+        """Return once this owocr is to be replaced rather than waited for. Either:
 
-        A restart while the window is still minimised would not get the area back: the new owocr's
-        first capture is ``None`` (``run.py:2008,2278-2279``), its check of the ``-swa`` rectangles
-        raises ``AttributeError`` on it (``run.py:2048,2072``) on the main thread, and it hangs
-        without capturing until the window closes, because its window-tracking thread is not a
-        daemon and nothing stops it (``run.py:2013-2014,2146-2157``).
+        - it has lost its OCR area (``area_lost``) and has since sent text again, so the window is
+          on screen and a restart gets the area back. owocr captures nothing from a minimised window
+          (``run.py:2278-2279``), and with ``WHOLE_LINES`` text is sent only after 1 s of unchanged
+          captures, longer than owocr takes to notice a minimise (0.5 s, ``run.py:2146-2157``). A
+          restart while the window is still minimised would hang (``LogKind.MINIMISED_AT_START``);
+        - or it started on a minimised window and hangs (``minimised_at_start``).
         """
-        await self._area_recoverable.wait()
+        await self._restart_due.wait()
 
     async def kill_tree(self, grace_s: float = KILL_GRACE_S) -> None:
         """Kill owocr and everything it started, then wait for owocr and the end of its log.
@@ -362,7 +372,7 @@ class OwocrProcess:
         if message is not None:
             self.last_message = message
             if self.area_lost and message.startswith(TEXT_RECOGNISED):
-                self._area_recoverable.set()
+                self._restart_due.set()
         event = parse_log_line(line)
         if event is None:
             return
@@ -372,6 +382,9 @@ class OwocrProcess:
             self.window_missing = True
         if event.kind is LogKind.AREA_DISCARDED:
             self.area_lost = True
+        if event.kind is LogKind.MINIMISED_AT_START:
+            self.minimised_at_start = True
+            self._restart_due.set()
         self._events.put_nowait(event)
 
     async def _end_log_after_exit(self) -> None:

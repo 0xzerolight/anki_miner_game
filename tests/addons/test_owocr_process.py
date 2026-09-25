@@ -101,6 +101,7 @@ async def test_events_come_from_the_log_and_end_after_exit(spawned):
     assert proc.fatal is None
     assert proc.last_message == "Selected window coordinates: 0,540,1280,720"
     assert not proc.area_lost
+    assert not proc.minimised_at_start
 
 
 async def test_a_config_error_is_kept_as_fatal(spawned):
@@ -131,7 +132,7 @@ async def test_a_discarded_area_is_lost_and_recoverable_once_owocr_reads_text_ag
     await _events(proc)
     assert proc.area_lost
     async with asyncio.timeout(1):
-        await proc.wait_area_recoverable()
+        await proc.wait_restart_due()
     assert proc.fatal is None
 
 
@@ -142,10 +143,20 @@ async def test_a_discarded_area_is_not_recoverable_before_owocr_reads_text_again
     spawned.append(proc)
     await _events(proc)
     assert proc.area_lost
-    waiting = asyncio.ensure_future(proc.wait_area_recoverable())
+    waiting = asyncio.ensure_future(proc.wait_restart_due())
     await asyncio.sleep(0)
     assert not waiting.done(), "text read before the discard says nothing about the window now"
     waiting.cancel()
+
+
+async def test_owocr_started_on_a_minimised_window_is_due_a_restart_while_it_hangs(spawned):
+    proc = await _spawn(log_file=str(FIXTURES / "synthetic-window-minimised-at-start.log"))
+    spawned.append(proc)
+    async with asyncio.timeout(10):
+        await proc.wait_restart_due()
+    assert proc.minimised_at_start
+    assert proc.returncode is None, "like owocr, the fake hangs instead of exiting"
+    assert proc.fatal is None
 
 
 async def test_an_overlong_line_is_skipped_not_fatal(spawned, monkeypatch):

@@ -161,6 +161,9 @@ FIXTURE_EVENTS: dict[str, list[LogEvent]] = {
     "synthetic-screen-picker.log": [LogEvent(SCREEN, "412,610,1508,1002")],
     "synthetic-window-picker.log": [LogEvent(WINDOW, "0,540,1280,720")],
     "synthetic-window-picker-multi-rect.log": [LogEvent(WINDOW, "10,500,640,700_640,500,1270,700")],
+    "synthetic-window-minimised-at-start.log": [
+        LogEvent(LogKind.MINIMISED_AT_START, "AttributeError: 'NoneType' object has no attribute 'width'")
+    ],
     "windows-window-minimised.log": [
         LogEvent(WINDOW, "150,537,1135,694"),
         LogEvent(LogKind.AREA_DISCARDED, "Window size changed, discarding area selection"),
@@ -243,6 +246,11 @@ def test_parse_log_line_against_the_r3_fixtures(name):
             "10:00:00 | Text recognized in 0.05s using meikiocr: Selected coordinates: 1,2,3,4",
             None,
             id="recognised game text never counts",
+        ),
+        pytest.param(
+            "AttributeError: 'NoneType' object has no attribute 'width'\r\n",
+            LogEvent(LogKind.MINIMISED_AT_START, "AttributeError: 'NoneType' object has no attribute 'width'"),
+            id="started on a minimised window: the traceback's last line",
         ),
         pytest.param("Selected coordinates: 1,2,3,4", None, id="no timestamp, not owocr's logger"),
         pytest.param("10:00:00 | Selected coordinates: 1,2,3", None, id="not a rectangle"),
