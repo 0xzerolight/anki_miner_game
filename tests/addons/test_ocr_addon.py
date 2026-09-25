@@ -42,6 +42,8 @@ WINDOW_MISSING_LINE = (
 # --- command line ----------------------------------------------------------------------------------
 
 BASE = ["-r", "screencapture", "-w", "websocket", "-wp", "5000", "-t", "False"]
+WHOLE_LINES = ["-sf", "1.0", "-sl", "False"]
+"""Whole lines only: 1 s of frame stabilisation, no line recovery (S4-1)."""
 
 
 def _ocr(**kwargs) -> OcrSettings:
@@ -55,37 +57,37 @@ def _ocr(**kwargs) -> OcrSettings:
         pytest.param(
             "linux",
             _ocr(rects="100,100,900,260"),
-            ["-l", "ja", "-e", "meikiocr", "-el", "meikiocr", "-sa=100,100,900,260"],
+            ["-l", "ja", "-e", "meikiocr", "-el", "meikiocr", *WHOLE_LINES, "-sa=100,100,900,260"],
             id="linux screen rectangles",
         ),
         pytest.param(
             "linux",
             _ocr(rects="100,100,500,260_500,100,900,260", window_title="Some Game"),
-            ["-l", "ja", "-e", "meikiocr", "-el", "meikiocr", "-sa=100,100,500,260_500,100,900,260"],
+            ["-l", "ja", "-e", "meikiocr", "-el", "meikiocr", *WHOLE_LINES, "-sa=100,100,500,260_500,100,900,260"],
             id="linux ignores the window title: X11 has no window capture",
         ),
         pytest.param(
             "win32",
             _ocr(engine=OcrEngine.ONEOCR, window_title="Some Game", rects="0,540,1280,720"),
-            ["-l", "ja", "-e", "oneocr", "-el", "oneocr", "-sa=Some Game", "-swa=0,540,1280,720"],
+            ["-l", "ja", "-e", "oneocr", "-el", "oneocr", *WHOLE_LINES, "-sa=Some Game", "-swa=0,540,1280,720"],
             id="windows window-relative rectangles",
         ),
         pytest.param(
             "win32",
             _ocr(engine=OcrEngine.ONEOCR, window_title="-Game - Title"),
-            ["-l", "ja", "-e", "oneocr", "-el", "oneocr", "-sa=-Game - Title", "-swa=window"],
+            ["-l", "ja", "-e", "oneocr", "-el", "oneocr", *WHOLE_LINES, "-sa=-Game - Title", "-swa=window"],
             id="windows whole window; a leading dash stays a value",
         ),
         pytest.param(
             "win32",
             _ocr(engine=OcrEngine.ONEOCR, rects="-1920,0,-100,200"),
-            ["-l", "ja", "-e", "oneocr", "-el", "oneocr", "-sa=-1920,0,-100,200"],
+            ["-l", "ja", "-e", "oneocr", "-el", "oneocr", *WHOLE_LINES, "-sa=-1920,0,-100,200"],
             id="windows screen rectangles, negative on a left monitor",
         ),
         pytest.param(
             "linux",
             _ocr(engine=OcrEngine.GLENS, language="zh", rects="1,2,3,4"),
-            ["-l", "zh", "-e", "glens", "-el", "glens", "-sa=1,2,3,4"],
+            ["-l", "zh", "-e", "glens", "-el", "glens", *WHOLE_LINES, "-sa=1,2,3,4"],
             id="cloud engine and language",
         ),
     ],
@@ -112,7 +114,7 @@ def test_owocr_args_refuses_a_run_with_no_area(platform):
 def test_picker_args_leave_the_area_empty(platform, window_title, area):
     settings = _ocr(window_title=window_title, rects="1,2,3,4")
     args = owocr_args(settings, 5000, platform=platform, pick=True)
-    assert args == BASE + ["-l", "ja", "-e", "meikiocr", "-el", "meikiocr", *area]
+    assert args == BASE + ["-l", "ja", "-e", "meikiocr", "-el", "meikiocr", *WHOLE_LINES, *area]
 
 
 # --- log ---------------------------------------------------------------------------------------------

@@ -101,6 +101,17 @@ def uv_install_args(platform: str, overrides: Path | None) -> list[str]:
     return args + [owocr_requirement(platform)]
 
 
+WHOLE_LINES: Final = ("-sf", "1.0", "-sl", "False")
+"""Send a line once it has stayed unchanged for 1 s, and never re-add a line from an earlier capture.
+
+owocr's defaults (``-sf -1``, ``-sl True``, ``config.py:140-141``) send whatever changed as soon as two
+captures match (``run.py:676-740``), so a line revealed character by character arrives in pieces at
+every pause of the reveal, and line recovery adds the previous capture's half-read line back, which
+doubles lines. On a STEINS;GATE replay (QA S4-1) 47 % of lines got one clean cue with the defaults
+and 94 % with these flags. The cost is about 1 s later arrival; shorter waits still split voiced
+lines at the reveal's own pauses after punctuation."""
+
+
 def owocr_args(ocr: OcrSettings, port: int, *, platform: str, pick: bool = False) -> list[str]:
     """owocr's arguments (without the executable) for a websocket OCR run on ``port`` (spec 14).
 
@@ -112,7 +123,7 @@ def owocr_args(ocr: OcrSettings, port: int, *, platform: str, pick: bool = False
     when a run has no area to capture.
     """
     args = ["-r", "screencapture", "-w", "websocket", "-wp", str(port), "-t", "False"]
-    args += ["-l", ocr.language, "-e", str(ocr.engine), "-el", str(ocr.engine)]
+    args += ["-l", ocr.language, "-e", str(ocr.engine), "-el", str(ocr.engine), *WHOLE_LINES]
     window = ocr.window_title if platform == "win32" else None
     if window:
         area = "" if pick else (ocr.rects or "window")
