@@ -1,11 +1,15 @@
 """The environment of the programs the app starts: a frozen Linux build gives them back the
 ``LD_LIBRARY_PATH`` the PyInstaller bootloader replaced (PyInstaller "LD_LIBRARY_PATH / LIBPATH
-considerations"), and never changes the app's own."""
+considerations"), and never changes the app's own. A frozen Windows build starts OBS with the
+system's DLL search order and without the bundle on ``PATH`` (PyInstaller "Launching External
+Programs from the Frozen Application")."""
 
 import asyncio
 import os
 import subprocess
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -14,8 +18,10 @@ import pytest
 from anki_miner_game.addons.ocr_addon import OcrAddon
 from anki_miner_game.addons.vad_addon import VadAddon
 from anki_miner_game.models.config import AppConfig
+from anki_miner_game.obs import discovery
 from anki_miner_game.obs.discovery import SubprocessRunner
-from anki_miner_game.runtime.child_env import child_environ
+from anki_miner_game.runtime import child_env
+from anki_miner_game.runtime.child_env import child_environ, external_program
 from anki_miner_game.vad.trimmer import VadTrimmer
 
 BUNDLE = "/opt/app/_internal"
@@ -48,6 +54,51 @@ def test_an_unfrozen_run_passes_the_environment_on_unchanged():
 def test_windows_and_macos_are_left_alone(platform):
     given = {"LD_LIBRARY_PATH": BUNDLE}
     assert child_environ(given, frozen=True, platform=platform) == given
+
+
+WIN_BUNDLE = r"C:\Users\u\AppData\Local\Programs\AnkiMinerGame\_internal"
+WIN_SYSTEM = r"C:\WINDOWS\system32;C:\WINDOWS;C:\Tools\uv"
+
+
+@pytest.fixture
+def dll_directory(monkeypatch) -> list[str | None]:
+    """A frozen Windows build's bundle folder; records every ``SetDllDirectoryW`` argument."""
+    monkeypatch.setattr(sys, "_MEIPASS", WIN_BUNDLE, raising=False)
+    calls: list[str | None] = []
+    monkeypatch.setattr(child_env, "_set_dll_directory", calls.append)
+    return calls
+
+
+def test_an_external_program_starts_with_the_system_dll_search_and_no_bundle_on_path(dll_directory):
+    environ = {
+        "PATH": rf"{WIN_BUNDLE}\PyQt6\Qt6\bin;{WIN_BUNDLE.lower()};{WIN_SYSTEM}",
+        "A": "1",
+    }
+    with external_program(environ, frozen=True, platform="win32") as env:
+        assert dll_directory == [None]  # the default search order while the program starts
+        assert env == {"PATH": WIN_SYSTEM, "A": "1"}
+    assert dll_directory == [None, WIN_BUNDLE]  # the app's own is back
+    assert environ["PATH"].startswith(WIN_BUNDLE)  # the app keeps its own PATH
+
+
+def test_the_apps_dll_search_comes_back_when_the_program_cannot_start(dll_directory):
+    with pytest.raises(OSError), external_program({"PATH": WIN_SYSTEM}, frozen=True, platform="win32"):
+        raise OSError("cannot start")
+    assert dll_directory == [None, WIN_BUNDLE]
+
+
+def test_a_path_entry_beside_the_bundle_stays(dll_directory):
+    beside = rf"{WIN_BUNDLE}2;C:\Users\u\AppData\Local\Programs\AnkiMinerGame"
+    with external_program({"PATH": beside}, frozen=True, platform="win32") as env:
+        assert env["PATH"] == beside
+
+
+@pytest.mark.parametrize(("frozen_build", "platform"), [(False, "win32"), (True, "linux")])
+def test_only_a_frozen_windows_build_changes_the_dll_search(dll_directory, frozen_build, platform):
+    environ = {"PATH": rf"{WIN_BUNDLE};{WIN_SYSTEM}"}
+    with external_program(environ, frozen=frozen_build, platform=platform) as env:
+        assert env == child_environ(environ, frozen=frozen_build, platform=platform)
+    assert dll_directory == []
 
 
 def test_the_default_is_a_copy_of_the_apps_environment(monkeypatch):
@@ -94,6 +145,28 @@ def test_obs_and_discoverys_helpers_start_with_the_original_path(frozen, popen_e
     with pytest.raises(_RefusedError):
         runner.spawn(["obs", "--minimize-to-tray"], None)
     assert [env and env.get("LD_LIBRARY_PATH") for env in popen_envs] == [ORIGINAL, ORIGINAL]
+
+
+def test_obs_starts_inside_the_external_program_block(monkeypatch):
+    events: list[object] = []
+
+    @contextmanager
+    def recording_block() -> Iterator[dict[str, str]]:
+        events.append("enter")
+        yield {"PATH": WIN_SYSTEM}
+        events.append("exit")
+
+    class Started:
+        def __init__(self, *_args: Any, **kwargs: Any) -> None:
+            events.append(kwargs["env"])
+
+        def wait(self) -> int:
+            return 0
+
+    monkeypatch.setattr(discovery, "external_program", recording_block)
+    monkeypatch.setattr(subprocess, "Popen", Started)
+    SubprocessRunner().spawn(["obs64.exe", "--minimize-to-tray"], None)
+    assert events == ["enter", {"PATH": WIN_SYSTEM}, "exit"]
 
 
 @posix_only

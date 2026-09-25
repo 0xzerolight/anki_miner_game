@@ -69,7 +69,7 @@ from anki_miner_game.models.obs import (
     ObsInstall,
     WsConfig,
 )
-from anki_miner_game.runtime.child_env import child_environ
+from anki_miner_game.runtime.child_env import child_environ, external_program
 from anki_miner_game.store import write_text_atomic
 
 log = logging.getLogger(__name__)
@@ -143,7 +143,8 @@ class ProcessRunner(Protocol):
 
 class SubprocessRunner:
     """The real ``ProcessRunner``: no console window on Windows, OBS in its own session on POSIX, and
-    the environment of ``runtime.child_env`` (a frozen build's library path is not the child's)."""
+    the environment of ``runtime.child_env`` (a frozen build's library path is not the child's); OBS
+    starts as an ``external_program``, without a frozen Windows build's DLL search."""
 
     def run(self, argv: Sequence[str]) -> tuple[int, str]:
         try:
@@ -163,16 +164,17 @@ class SubprocessRunner:
         return done.returncode, done.stdout
 
     def spawn(self, argv: Sequence[str], cwd: Path | None) -> None:
-        proc = subprocess.Popen(
-            list(argv),
-            cwd=cwd,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            creationflags=_DETACHED,
-            env=child_environ(),
-            start_new_session=True,  # POSIX: a signal to this app's process group never reaches OBS
-        )
+        with external_program() as env:
+            proc = subprocess.Popen(
+                list(argv),
+                cwd=cwd,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=_DETACHED,
+                env=env,
+                start_new_session=True,  # POSIX: a signal to this app's process group never reaches OBS
+            )
         # Reap OBS when it exits before this app does, so it leaves no zombie behind.
         threading.Thread(target=proc.wait, name="obs-reaper", daemon=True).start()
 
