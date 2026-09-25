@@ -80,6 +80,8 @@ For full development setup, see [CONTRIBUTING.md](CONTRIBUTING.md).
 <summary><strong>OCR add-on notes</strong></summary>
 
 - On Linux OCR needs an X11 session.
+- In a voiced game, set the game's text speed to instant. A line that types out slowly reaches the app only once it is fully shown, often after its voice has ended, so the card's audio starts late.
+- Start the game before **Arm**. On Windows owocr reads the first window whose title contains the profile's **Game window title**, so with the game closed it could read another window, such as a browser tab about the game.
 - owocr's websocket server listens on `0.0.0.0`, so other machines on your network can read the OCR text while it runs. You can refuse the Windows firewall prompt.
 - If the app crashes during OCR on Linux, owocr keeps running. End it with `pkill -KILL -f '.anki_miner_game/addons/ocr/'`.
 
