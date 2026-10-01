@@ -5,11 +5,13 @@ import ast
 import asyncio
 import os
 import re
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from anki_miner_game.gui.banner_keys import ARM_FAILED_KEYS
 from anki_miner_game.models.constants import OBS_COLLECTION_NAME, OBS_PROFILE_NAME
 from anki_miner_game.models.messages import (
     OBS_SOURCE_ID,
@@ -19,6 +21,7 @@ from anki_miner_game.models.messages import (
     ObsEvent,
     SourceStatus,
     SourceStatusChanged,
+    StateChanged,
     UserCommand,
 )
 from anki_miner_game.models.obs import (
@@ -583,3 +586,66 @@ def test_no_actor_text_says_arm_cue_websocket_or_a_menu_path():
         if _ARM.search(text) or "websocket" in text or "Setup wizard" in text or "File ->" in text
     ]
     assert wrong == []
+
+
+def raised_since(h: Harness, mark: int) -> set[str]:
+    return {e.banner.key for e in h.events[mark:] if isinstance(e, BannerRaised)}
+
+
+async def _unknown_game(h: Harness) -> str:
+    return "no-such-game"
+
+
+async def _invalid_game(h: Harness) -> str:
+    h.profiles["bad"] = profile(slug="bad", title=" ")
+    return "bad"
+
+
+async def _unwritable_folder(h: Harness) -> str:
+    h.output_root.parent.mkdir(parents=True, exist_ok=True)
+    h.output_root.write_text("a file where the folder should be", encoding="utf-8")
+    return SLUG
+
+
+async def _obs_unreachable(h: Harness) -> str:
+    h.gateway.connected = False
+    await h.emit(ObsEventName.CONNECTION_LOST)
+    h.gateway.connect_error = ObsConnectError("cannot connect to OBS at 127.0.0.1:4455")
+    return SLUG
+
+
+async def _output_active(h: Harness) -> str:
+    h.obs.stream_active = True
+    return SLUG
+
+
+async def _provisioning_fails(h: Harness) -> str:
+    h.provisioner.error = ObsError("CreateInput failed")
+    return SLUG
+
+
+async def _a_bug(h: Harness) -> str:
+    h.provisioner.error = RuntimeError("a bug")
+    return SLUG
+
+
+@pytest.mark.parametrize(
+    "prepare",
+    [_unknown_game, _invalid_game, _unwritable_folder, _obs_unreachable, _output_active, _provisioning_fails, _a_bug],
+)
+async def test_a_get_ready_that_fails_raises_a_key_the_window_waits_for(
+    h: Harness, prepare: Callable[[Harness], Awaitable[str]]
+):
+    """Master 4.6: the window's pending Get ready / Start recording ends on one of ``ARM_FAILED_KEYS``."""
+    slug = await prepare(h)
+    mark = len(h.events)
+    await h.arm(slug)
+    assert h.actor.state is AppState.IDLE
+    assert not [e for e in h.events[mark:] if isinstance(e, StateChanged)]
+    assert raised_since(h, mark) & ARM_FAILED_KEYS
+
+
+async def test_a_get_ready_that_works_ends_in_ready_for_that_game(h: Harness):
+    mark = len(h.events)
+    await h.arm()
+    assert StateChanged(AppState.ARMED, SLUG) in h.events[mark:]

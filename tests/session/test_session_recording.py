@@ -7,14 +7,19 @@ import json
 import logging
 import os
 import threading
+from collections.abc import Awaitable, Callable
 from dataclasses import replace
 
+import pytest
+
+from anki_miner_game.gui.banner_keys import DONE_FAILED_KEYS, START_FAILED_KEYS, STOP_FAILED_KEYS
 from anki_miner_game.lifecycle.auto import AutoMode
 from anki_miner_game.models.config import AppConfig, VadSettings
 from anki_miner_game.models.manifest import ClockKind, ClockRecord, Counts, DriftSample, Flag, ManifestState
 from anki_miner_game.models.messages import (
     START_FAILED_BANNER_KEY,
     AppState,
+    BannerRaised,
     CommandKind,
     LineAccepted,
     LineReceived,
@@ -664,3 +669,111 @@ async def test_a_quit_whose_start_never_reports_quits_after_the_wait(h: Harness)
     await h.actor.shutdown()  # QUIT_START_WAIT_S is 0.05 s here
     assert "StopRecord" not in h.gateway.names()
     assert not restore_path().exists()  # OBS said inactive: the quit restored it
+
+
+def raised_since(h: Harness, mark: int) -> set[str]:
+    return {e.banner.key for e in h.events[mark:] if isinstance(e, BannerRaised)}
+
+
+Step = Callable[[Harness, pytest.MonkeyPatch], Awaitable[None]]
+
+
+async def _nothing(h: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
+    pass
+
+
+async def _start_record_refused(h: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
+    h.gateway.fail("StartRecord", ObsRequestError("StartRecord", 500, "Output already running"))
+
+
+async def _obs_gone_and_cannot_be_started(h: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
+    await lose_obs_while_ready(h)
+    h.discovery.ready = False
+
+
+async def _no_started_in_time(h: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
+    await h.tick(h.clock.t + session_mod.START_TIMEOUT_S)
+
+
+async def _stopped_as_it_started(h: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
+    await h.stopped(T0 + 0.5)
+
+
+async def _recording_outside_the_folder(h: Harness, monkeypatch: pytest.MonkeyPatch | None = None) -> None:
+    elsewhere = h.output_root.parent / "Videos"
+    elsewhere.mkdir(exist_ok=True)
+    (elsewhere / "mine.mkv").write_bytes(b"")
+    await h.emit("RecordStateChanged", {"outputState": OutputState.STARTED, "outputPath": str(elsewhere / "mine.mkv")})
+
+
+async def _session_files_unwritable(h: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
+    def refuse(*_args: object) -> None:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(session_mod, "write_manifest_atomic", refuse)
+    await h.started(ZERO)
+
+
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [
+        (_start_record_refused, _nothing),
+        (_obs_gone_and_cannot_be_started, _nothing),
+        (_nothing, _no_started_in_time),
+        (_nothing, _stopped_as_it_started),
+        (_nothing, _recording_outside_the_folder),
+        (_nothing, _session_files_unwritable),
+    ],
+    ids=["refused", "obs-gone", "no-started", "stopped", "outside-folder", "session-files"],
+)
+async def test_a_start_that_fails_raises_a_key_the_window_waits_for(
+    h: Harness, monkeypatch: pytest.MonkeyPatch, before: Step, after: Step
+):
+    """Master 4.6: the window's pending Start recording ends on one of ``START_FAILED_KEYS``."""
+    await h.arm()
+    await before(h, monkeypatch)
+    mark = len(h.events)
+    await h.send(CommandKind.START)
+    await after(h, monkeypatch)
+    assert h.actor.state is AppState.ARMED
+    assert not [e for e in h.events[mark:] if isinstance(e, StateChanged) and e.state is AppState.RECORDING]
+    assert raised_since(h, mark) & START_FAILED_KEYS
+
+
+async def test_a_recording_the_user_starts_outside_the_folder_keeps_the_foreign_recording_key(h: Harness):
+    await h.arm()
+    await _recording_outside_the_folder(h)  # no START from the app
+    assert BannerKey.FOREIGN_RECORDING in h.banners()
+    assert START_FAILED_BANNER_KEY not in h.banners()
+
+
+async def test_a_stop_ends_in_finalising_or_a_stop_failed_key(h: Harness):
+    await h.arm()
+    await h.started(ZERO)
+    h.gateway.fail("StopRecord", ObsRequestError("StopRecord", 501, "Output not running"))
+    mark = len(h.events)
+    await h.send(CommandKind.STOP)
+    assert raised_since(h, mark) & STOP_FAILED_KEYS
+    h.obs.stops_on_request = True
+    mark = len(h.events)
+    await h.send(CommandKind.STOP)
+    assert StateChanged(AppState.FINALISING, SLUG) in h.events[mark:]
+
+
+@pytest.mark.parametrize("in_flight", [False, True], ids=["recording", "start-in-flight"])
+async def test_a_refused_done_playing_raises_a_key_the_window_waits_for(h: Harness, in_flight: bool):
+    await h.arm()
+    await h.send(CommandKind.START)
+    if not in_flight:
+        await h.started(ZERO)
+    mark = len(h.events)
+    await h.send(CommandKind.DISARM)
+    assert raised_since(h, mark) & DONE_FAILED_KEYS
+    assert h.actor.state is not AppState.IDLE
+
+
+async def test_done_playing_while_ready_ends_in_idle(h: Harness):
+    await h.arm()
+    mark = len(h.events)
+    await h.send(CommandKind.DISARM)
+    assert StateChanged(AppState.IDLE, None) in h.events[mark:]
