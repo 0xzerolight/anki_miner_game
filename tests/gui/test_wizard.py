@@ -547,28 +547,41 @@ def test_the_page_is_called_game_text(qtbot, io_loop):
 # The add-ons step ----------------------------------------------------------------------------------
 
 
-def test_each_addon_shows_its_size_note_and_status(qtbot, io_loop):
-    h = Harness(qtbot, io_loop, start=WizardStep.ADDONS)
-    vad, ocr = h.wizard.addons_page.rows
-    assert "about 190 MB" in vad.size.text()
-    assert "about 210 MB" in ocr.size.text()
+def test_each_addon_has_a_plain_title_a_description_and_one_install_button(qtbot, io_loop):
+    h = Harness(qtbot, io_loop, start=WizardStep.ADDONS, single_step=True)
+    page = h.wizard.addons_page
+    vad, ocr = page.rows
+    assert page.title() == "Optional extras"
+    assert page.subTitle() == (
+        "Each downloads only if you install it. Voice trimming can be installed later in Settings, screen "
+        "reading in a game's profile."
+    )
+    assert vad.title.text() == "Voice trimming (recommended)"
+    assert ocr.title.text() == "Screen reading (OCR)"
+    assert (
+        vad.description.text()
+        == "After each session, ends every subtitle where the voice stops, so cards carry less music."
+    )
+    assert ocr.description.text() == "Reads the game's text from the screen, for games no text hooker can read."
+    assert vad.button.text() == "Install (190 MB)"
+    assert ocr.button.text() == "Install (210 MB)"
     assert vad.note.isHidden()
     assert not ocr.note.isHidden() and "X11" in ocr.note.text()
-    assert vad.status.text() == "Not installed"
-    assert vad.button.isEnabled() and vad.button.text() == "Install"
+    assert vad.status.isHidden()
+    assert vad.column.itemAt(vad.column.indexOf(vad.button)).alignment() == Qt.AlignmentFlag.AlignLeft
     assert h.wizard.button(QWizard.WizardButton.FinishButton).isEnabled()
 
 
-def test_install_runs_on_the_io_loop_shows_progress_and_ends_installed(qtbot, io_loop):
+def test_the_button_becomes_the_progress_bar_and_then_installed(qtbot, io_loop):
     h = Harness(qtbot, io_loop, start=WizardStep.ADDONS)
     row = h.wizard.addons_page.rows[0]
     row.button.click()
     qtbot.waitUntil(lambda: row.progress.value() == 500)
     assert not row.progress.isHidden()
-    assert not row.button.isEnabled()
-    assert row.status.text() == "Installing…"
+    assert row.button.isHidden()
     h.vad.proceed.set()
     qtbot.waitUntil(lambda: row.status.text() == "Installed")
+    assert not row.status.isHidden()
     assert h.vad.thread is not None and h.vad.thread.name == "io-loop"
     assert row.progress.isHidden()
     assert row.button.isHidden()
@@ -583,29 +596,32 @@ def test_an_install_failure_is_shown_in_its_row(qtbot, io_loop):
     row.button.click()
     qtbot.waitUntil(lambda: "no network" in row.error.text())
     assert not row.error.isHidden()
-    assert row.status.text() == "Not installed"
-    assert row.button.isEnabled()
+    assert row.status.isHidden()
+    assert not row.button.isHidden() and row.button.isEnabled()
 
 
-def test_an_install_already_running_elsewhere_disables_the_button(qtbot, io_loop):
+def test_an_install_already_running_elsewhere_shows_installing(qtbot, io_loop):
     h = Harness(qtbot, io_loop, start=WizardStep.ADDONS, vad=FakeAddon(1, status=AddonStatus.INSTALLING))
     row = h.wizard.addons_page.rows[0]
     assert row.status.text() == "Installing…"
-    assert not row.button.isEnabled()
+    assert row.button.isHidden()
 
 
 @pytest.mark.parametrize(
     ("status", "text", "button"),
-    [(AddonStatus.READY, "Installed", None), (AddonStatus.BROKEN, "Damaged; install it again to repair it", "Repair")],
+    [(AddonStatus.READY, "Installed", None), (AddonStatus.BROKEN, None, "Repair (96 MB)")],
 )
 def test_ready_and_broken_addons(qtbot, io_loop, status, text, button):
-    h = Harness(qtbot, io_loop, start=WizardStep.ADDONS, vad=FakeAddon(1, status=status))
+    h = Harness(qtbot, io_loop, start=WizardStep.ADDONS, vad=FakeAddon(96_000_000, status=status))
     row = h.wizard.addons_page.rows[0]
-    assert row.status.text() == text
+    if text is None:
+        assert row.status.isHidden()
+    else:
+        assert row.status.text() == text and not row.status.isHidden()
     if button is None:
         assert row.button.isHidden()
     else:
-        assert row.button.text() == button and row.button.isEnabled()
+        assert row.button.text() == button and row.button.isEnabled() and not row.button.isHidden()
 
 
 # The wizard as a whole ------------------------------------------------------------------------------

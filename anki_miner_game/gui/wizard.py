@@ -46,7 +46,14 @@ from PyQt6.QtWidgets import (
     QWizardPage,
 )
 
-from anki_miner_game.gui.strings import COPIED_TEXT, WAYLAND_CLIPBOARD_TEXT
+from anki_miner_game.gui.strings import (
+    ADDON_STATUS_TEXT,
+    COPIED_TEXT,
+    SCREEN_READING,
+    VOICE_TRIMMING,
+    WAYLAND_CLIPBOARD_TEXT,
+    install_now_text,
+)
 from anki_miner_game.gui.widgets.layout import error_label, show_message
 from anki_miner_game.interfaces.addons import AddonService
 from anki_miner_game.interfaces.obs import ObsDiscovery, ObsGateway, ObsStarter, Provisioner
@@ -497,12 +504,15 @@ def _port(uri: str) -> int | None:
         return None
 
 
-ADDON_STATUS_TEXT: Final = {
-    AddonStatus.MISSING: "Not installed",
-    AddonStatus.INSTALLING: "Installing…",
-    AddonStatus.READY: "Installed",
-    AddonStatus.BROKEN: "Damaged; install it again to repair it",
-}
+ADDONS_SUBTITLE: Final = (
+    "Each downloads only if you install it. Voice trimming can be installed later in Settings, screen "
+    "reading in a game's profile."
+)
+VAD_TITLE: Final = f"{VOICE_TRIMMING} (recommended)"
+"""The default config trims once the add-on is installed (``VadSettings.enabled``)."""
+VAD_DESCRIPTION: Final = "After each session, ends every subtitle where the voice stops, so cards carry less music."
+OCR_DESCRIPTION: Final = "Reads the game's text from the screen, for games no text hooker can read."
+ADDON_GAP_PX: Final = 12
 PROGRESS_STEPS: Final = 1000
 
 
@@ -905,43 +915,49 @@ def saved_in_text(cfg: AppConfig) -> str:
 
 
 class _AddonRow:
-    """One add-on on step 4: size, platform note, status, Install, progress, and why an install failed."""
+    """One add-on on the last page (UJ-18): title, description, its note, then one button that becomes the
+    progress bar while installing and then the status."""
 
     def __init__(self, wizard: SetupWizard, service: AddonService, title: str, description: str) -> None:
         self._wizard = wizard
         self._service = service
         self._installing = False
-        self.title = QLabel(f"<b>{title}</b>")
+        self.title = _plain_label(title)
+        font = self.title.font()
+        font.setBold(True)
+        self.title.setFont(font)
         self.description = _plain_label(description)
-        self.size = _plain_label(f"Download: about {round(service.size_bytes / 1_000_000)} MB")
         self.note = _plain_label(service.note or "")
         self.note.setVisible(bool(service.note))
-        self.status = _plain_label()
-        self.button = QPushButton("Install")
+        self.button = QPushButton()
         self.button.clicked.connect(self.install)
         self.progress = QProgressBar()
         self.progress.hide()
-        self.error = _plain_label()
-        self.error.hide()
-
-    def widgets(self) -> list[QWidget]:
-        return [self.title, self.description, self.size, self.note, self.status, self.button, self.progress, self.error]
+        self.status = _plain_label()
+        self.status.hide()
+        self.error = error_label()
+        self.column = QVBoxLayout()
+        for label in (self.title, self.description, self.note):
+            self.column.addWidget(label)
+        self.column.addWidget(self.button, 0, Qt.AlignmentFlag.AlignLeft)
+        for widget in (self.progress, self.status, self.error):
+            self.column.addWidget(widget)
 
     def refresh(self) -> None:
         status = AddonStatus.INSTALLING if self._installing else self._service.status()
-        self.status.setText(ADDON_STATUS_TEXT[status])
-        self.button.setText("Repair" if status is AddonStatus.BROKEN else "Install")
-        self.button.setVisible(status is not AddonStatus.READY)
-        self.button.setEnabled(status in (AddonStatus.MISSING, AddonStatus.BROKEN))
+        self.button.setText(install_now_text(status, self._service.size_bytes))
+        self.button.setVisible(status in (AddonStatus.MISSING, AddonStatus.BROKEN))
+        self.progress.setVisible(self._installing)
+        shown = status in (AddonStatus.READY, AddonStatus.INSTALLING) and not self._installing
+        show_message(self.status, ADDON_STATUS_TEXT[status] if shown else "")
 
     def install(self) -> None:
         if self._installing:
             return
         self._installing = True
-        self.error.hide()
+        self.error.clear()
         self.progress.setRange(0, PROGRESS_STEPS)
         self.progress.setValue(0)
-        self.progress.show()
         self.refresh()
         post = self._wizard.main_thread.post
 
@@ -959,49 +975,40 @@ class _AddonRow:
 
     def _finished(self, future: concurrent.futures.Future[Any]) -> None:
         self._installing = False
-        self.progress.hide()
         exc = future.exception() if not future.cancelled() else None
         if isinstance(exc, RuntimeError):
-            self.error.setText(str(exc))
-            self.error.show()
+            self.error.set_error(str(exc))
         elif exc is not None:
             log.error("an add-on install failed", exc_info=exc)
-            self.error.setText("The install failed; see the log.")
-            self.error.show()
+            self.error.set_error("The install failed; see the log.")
         self.refresh()
 
 
 class AddonsPage(QWizardPage):
-    """Step 4: the optional add-ons with their sizes, installed through ``AddonService`` (spec 13.1, 14)."""
+    """Step 3: the optional add-ons, installed through ``AddonService`` (spec 13.1, 14), and where sessions go."""
 
     def __init__(self, wizard: SetupWizard, vad: AddonService, ocr: AddonService) -> None:
         super().__init__()
         self._wizard = wizard
-        self.setTitle("Optional add-ons")
-        self.setSubTitle("Each one downloads only when you install it. You can also install them later from Settings.")
+        self.setTitle("Optional extras")
+        self.setSubTitle(ADDONS_SUBTITLE)
         self.rows = [
-            _AddonRow(
-                wizard,
-                vad,
-                "Voice detection (VAD)",
-                "After a session, ends each subtitle where the voice ends, so cards carry less music.",
-            ),
-            _AddonRow(
-                wizard,
-                ocr,
-                "OCR (owocr)",
-                "Reads a game's text from the screen, for games no text hooker can read.",
-            ),
+            _AddonRow(wizard, vad, VAD_TITLE, VAD_DESCRIPTION),
+            _AddonRow(wizard, ocr, SCREEN_READING, OCR_DESCRIPTION),
         ]
-        layout = QVBoxLayout(self)
-        for row in self.rows:
-            for widget in row.widgets():
-                layout.addWidget(widget)
         self.saved_in = _plain_label(saved_in_text(wizard.config))
         self.saved_in.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.saved_in.setVisible(not wizard.single_step)
-        layout.addWidget(self.saved_in)
-        layout.addStretch(1)
+        self.body = QWidget()
+        column = QVBoxLayout(self.body)
+        for index, row in enumerate(self.rows):
+            if index:
+                column.addSpacing(ADDON_GAP_PX)
+            column.addLayout(row.column)
+        column.addSpacing(ADDON_GAP_PX)
+        column.addWidget(self.saved_in)
+        column.addStretch(1)
+        self.scroll_area = _scrolled(self, self.body)  # not "scroll": QWidget.scroll() is a method
 
     def initializePage(self) -> None:
         self.saved_in.setText(saved_in_text(self._wizard.config))
