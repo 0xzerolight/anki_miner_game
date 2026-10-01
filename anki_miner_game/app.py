@@ -553,12 +553,18 @@ class App(QObject):
         profile = None if slug is None else self._profiles.get(slug)
         if running is None or (slug is not None and profile is None):
             return
+
+        def install_addons() -> None:
+            """Opens over the dialog built below; called only once it exists (UJ-22b)."""
+            self._open_wizard(WizardStep.ADDONS, parent=dialog, on_finished=dialog.refresh_addons)
+
         services = ProfileDialogServices(
             run=self._io.submit,
             capture=running.picker,
             ocr_picker=self._ocr_addon,
             ocr_addon=self._ocr_addon,
             slugify=slugify,
+            install_addons=install_addons,
         )
         dialog = GameProfileDialog(
             services, self._config.text_sources, profile, taken_slugs=tuple(self._profiles), parent=self.window
