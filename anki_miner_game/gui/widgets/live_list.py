@@ -1,4 +1,4 @@
-"""The live list (spec 16 item 4) and the cue count shown beside Start/Stop (item 3).
+"""The live list (spec 16 item 4) and the line count shown in the status text (item 3).
 
 Both read the session actor's ``LineAccepted`` events (``Presenter.line_accepted``). A line with an
 offset is one the actor journalled at that offset; one without was shown only (no recording, paused,
@@ -11,20 +11,26 @@ the actor's journal rules (``session.session`` docstring):
 
 A merge keeps its base line's ``t_mono`` and ``source_id`` (``TextPipeline``), which is how both find
 the line a merge replaces.
+
+While empty the list shows a hint in the palette's placeholder colour (``set_placeholder``, UJ-06);
+its lines are 1.3x the UI font (UJ-14).
 """
 
 from collections.abc import Callable
 from typing import Final
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QBrush, QPalette
-from PyQt6.QtWidgets import QAbstractItemView, QListWidget, QListWidgetItem, QWidget
+from PyQt6.QtGui import QBrush, QPainter, QPaintEvent, QPalette
+from PyQt6.QtWidgets import QAbstractItemView, QApplication, QListWidget, QListWidgetItem, QWidget
 
 from anki_miner_game.gui.widgets import clock_text
 from anki_miner_game.models.lines import GameLine
 
 LIVE_LINES: Final = 200
 """Spec 16: the last 200 accepted lines."""
+LINES_FONT_SCALE: Final = 1.3
+"""UJ-14: game text is what the user reads while playing."""
+_HINT_MARGIN_PX: Final = 24
 
 _LINE_ROLE: Final = Qt.ItemDataRole.UserRole
 _OFFSET_ROLE: Final = Qt.ItemDataRole.UserRole + 1
@@ -63,6 +69,13 @@ class LiveList(QListWidget):
         self.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.setWordWrap(True)
         self.setUniformItemSizes(False)
+        self._placeholder = ""
+        font = self.font()
+        if font.pointSizeF() > 0:
+            font.setPointSizeF(font.pointSizeF() * LINES_FONT_SCALE)
+        else:
+            font.setPixelSize(round(font.pixelSize() * LINES_FONT_SCALE))
+        self.setFont(font)
 
     def add(self, line: GameLine, offset_ms: int | None, replaces_previous: bool) -> None:
         bar = self.verticalScrollBar()
@@ -92,6 +105,30 @@ class LiveList(QListWidget):
             if item is not None:
                 rows.append((item.text(), item.data(_OFFSET_ROLE)))
         return rows
+
+    def placeholder(self) -> str:
+        return self._placeholder
+
+    def set_placeholder(self, text: str) -> None:
+        """The hint shown while the list is empty; ``""`` shows none."""
+        if text == self._placeholder:
+            return
+        self._placeholder = text
+        viewport = self.viewport()
+        if viewport is not None:
+            viewport.update()
+
+    def paintEvent(self, event: QPaintEvent | None) -> None:  # noqa: N802 - Qt override
+        super().paintEvent(event)
+        viewport = self.viewport()
+        if self.count() or not self._placeholder or viewport is None:
+            return
+        painter = QPainter(viewport)
+        painter.setFont(QApplication.font(self))
+        painter.setPen(self.palette().color(QPalette.ColorRole.PlaceholderText))
+        area = viewport.rect().adjusted(_HINT_MARGIN_PX, _HINT_MARGIN_PX // 2, -_HINT_MARGIN_PX, -_HINT_MARGIN_PX // 2)
+        painter.drawText(area, Qt.AlignmentFlag.AlignCenter.value | Qt.TextFlag.TextWordWrap.value, self._placeholder)
+        painter.end()
 
     def _last(self, matches: Callable[[GameLine, int | None], bool]) -> QListWidgetItem | None:
         """The newest listed item whose ``(line, offset_ms)`` matches."""

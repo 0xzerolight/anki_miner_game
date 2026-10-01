@@ -314,6 +314,7 @@ class App(QObject):
             output_root=lambda: paths.output_root(self._config),
             vad_jobs=self._vad_jobs,  # the recent sessions hand interrupted passes on before the actor runs
             open_url=open_url,
+            auto_start_game=self._auto_start_game,
         )
         window.new_game_requested.connect(lambda: self._open_profile_dialog(None))
         window.edit_game_requested.connect(self._open_profile_dialog)
@@ -321,10 +322,11 @@ class App(QObject):
         window.setup_requested.connect(lambda: self._open_wizard(WizardStep.OBS))
         self.presenter.signals.state_changed.connect(self._remember_game)
         tray = self._tray = Tray(
-            actor, self.presenter.signals, game=self._selected_game, feed_url=self._feed_url, open_url=open_url
+            window.controls, game_title=window.selected_title, feed_url=self._feed_url, open_url=open_url
         )
         tray.show_requested.connect(self._show_window)
         tray.quit_requested.connect(self.request_quit)
+        window.hidden_to_tray.connect(tray.tell_still_running)
         window.minimise_to_tray = tray.show()
         self._hotkey = self._hotkey_factory(self)
         if self._hotkey is not None:
@@ -499,13 +501,14 @@ class App(QObject):
     def _games(self) -> list[tuple[str, str]]:
         return sorted(((slug, p.title) for slug, p in self._profiles.items()), key=lambda game: game[1].casefold())
 
-    def _selected_game(self) -> str | None:
-        slug = self.window.game.currentData()
-        return slug if isinstance(slug, str) else None
-
     def _feed_url(self) -> str | None:
         feed = self._feed
         return None if feed is None else feed.page_url
+
+    def _auto_start_game(self, slug: str) -> bool:
+        """Main thread: ``slug``'s profile has auto mode with start at the first line (D-01's Get ready)."""
+        profile = self._profiles.get(slug)
+        return profile is not None and profile.auto.enabled and profile.auto.start_on_first_line
 
     def _show_window(self) -> None:
         window = self.window

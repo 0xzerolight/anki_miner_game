@@ -23,12 +23,12 @@ from anki_miner_game.models.config import AppConfig, TextSourceConfig
 from anki_miner_game.models.manifest import ManifestState, VadState
 from anki_miner_game.models.messages import AppState, CommandKind, SourceStatus, UserCommand
 from anki_miner_game.models.obs import OutputState
-from anki_miner_game.models.profile import GameProfile, OcrSettings, TextMode
+from anki_miner_game.models.profile import AutoSettings, GameProfile, OcrSettings, TextMode
 from anki_miner_game.session.manifest import load_manifest
 from anki_miner_game.text.sources.clipboard_source import CLIPBOARD_SOURCE_ID, ClipboardSource
 from anki_miner_game.text.sources.ocr_source import OCR_SOURCE_ID
 from anki_miner_game.text.sources.websocket_source import WebsocketSource
-from tests.app_rig import PROFILE, SLUG, TITLE, WAIT_MS, Rig
+from tests.app_rig import PROFILE, SLUG, TITLE, WAIT_MS, Rig, Source
 from tests.gui.session_fakes import manifest, place
 from tests.session.actor_harness import T0
 
@@ -109,7 +109,7 @@ def test_an_armed_game_that_takes_the_clipboard_listens_to_it(rig):
     app = rig.start()
     rig.arm()
     rig.wait(lambda: ("source_status", (CLIPBOARD_SOURCE_ID, SourceStatus.CONNECTED)) in rig.events)
-    rig.wait(lambda: "Clipboard" in app.window.status_row.names())
+    rig.wait(lambda: "Game text: Clipboard" in app.window.status_row.names())
 
 
 # VAD jobs (spec 13; VadJobs docstring) -------------------------------------------------------------
@@ -143,15 +143,17 @@ def test_a_finalised_session_is_queued_for_its_vad_pass(rig):
 # The tray (spec 16) --------------------------------------------------------------------------------
 
 
-def test_the_tray_arms_the_selected_game_opens_the_feed_shows_the_window_and_quits(rig, monkeypatch, qtbot):
+def test_the_tray_records_the_selected_game_opens_the_feed_shows_the_window_and_quits(rig, monkeypatch, qtbot):
     opened: list[QUrl] = []
     monkeypatch.setattr(app_mod, "open_url", lambda url: opened.append(url) or True)
     app = rig.start()
     tray = app.tray
     assert app.window.minimise_to_tray is QSystemTrayIcon.isSystemTrayAvailable()
     tray.menu.aboutToShow.emit()
-    tray.arm_action.trigger()
-    rig.wait(lambda: rig.state() is AppState.ARMED and last_slug(rig) == SLUG)
+    assert tray.record_action.text() == f"Start recording: {TITLE}"
+    tray.record_action.trigger()
+    rig.wait(lambda: last_slug(rig) == SLUG and "StartRecord" in rig.gateway.names())
+    record(rig)
     tray.feed_action.trigger()
     assert app.feed is not None and opened == [QUrl(app.feed.page_url)]
     app.window.hide()
@@ -159,7 +161,26 @@ def test_the_tray_arms_the_selected_game_opens_the_feed_shows_the_window_and_qui
     assert app.window.isVisible()
     with qtbot.waitSignal(app.stopped, timeout=WAIT_MS):
         tray.quit_action.trigger()
-    assert rig.obs.profile == "Untitled"  # the quit disarmed
+    assert rig.obs.profile == "Untitled"  # the quit stopped, saved and gave OBS back
+
+
+def test_closing_the_window_while_ready_says_once_that_the_app_is_still_running(rig, monkeypatch):
+    app = rig.start()
+    told: list[tuple[str, str]] = []
+    monkeypatch.setattr(app.tray, "_supports_messages", lambda: True)
+    monkeypatch.setattr(app.tray.icon, "showMessage", lambda title, text, *rest: told.append((title, text)))
+    app.window.minimise_to_tray = True
+    rig.arm()
+    rig.wait(lambda: app.window.controls.state is AppState.ARMED)
+    app.window.close()
+    app.window.show()
+    app.window.close()
+    assert told == [
+        (
+            "Anki Miner Game is still running",
+            f"{TITLE} is ready. Click this icon to open the window; right-click it to quit.",
+        )
+    ]
 
 
 # The hotkey (spec 16, Windows) ---------------------------------------------------------------------
@@ -233,16 +254,20 @@ def test_a_hotkey_another_program_holds_is_a_banner_and_new_settings_register_ag
 
 
 def test_saved_settings_reach_the_window(rig, tmp_path):
+    """A new text source names the Game text light; a new output folder lists its sessions."""
     place(tmp_path / "elsewhere", manifest(7))
+    rig.sources = [Source("mine")]
     app = rig.start()
     app.window.settings_requested.emit()
     dialog = shown(app, SettingsDialog)
     assert dialog is not None
-    added = TextSourceConfig(id="mine", name="New source", uri="localhost:7000")
-    saved = replace(app.config, output_root=str(tmp_path / "elsewhere"), text_sources=(*app.config.text_sources, added))
-    dialog.config_saved.emit(saved)
-    assert app.window.status_row.names()[-1] == "New source"
+    mine = TextSourceConfig(id="mine", name="My hooker", uri="localhost:7777")
+    dialog.config_saved.emit(
+        replace(app.config, output_root=str(tmp_path / "elsewhere"), text_sources=(*app.config.text_sources, mine))
+    )
     assert [cells[0] for cells in app.window.recent.cells()] == ["Steins;Gate - 07"]
+    rig.arm()
+    rig.wait(lambda: app.window.status_row.names() == ["OBS", "Game text: My hooker"])
 
 
 # The last armed game (AppConfig.last_game) ---------------------------------------------------------
@@ -302,3 +327,28 @@ def test_elsewhere_urls_open_through_qt(monkeypatch, frozen, platform):
 
     assert open_url(QUrl("file:///tmp"), frozen=frozen, platform=platform, spawn=spawn)
     assert opened == [QUrl("file:///tmp")]
+
+
+# One click records; Get ready for a game that starts at the first line (D-01) ---------------------
+
+
+def test_start_recording_in_idle_gets_the_game_ready_and_records_with_one_click(rig):
+    app = rig.start()
+    window = app.window
+    assert window.get_ready_button.isHidden()  # this game does not start at the first line
+    window.primary_button.click()
+    assert window.primary_button.text() == "Starting…"
+    rig.wait(lambda: "StartRecord" in rig.gateway.names())
+    record(rig)
+    rig.wait(lambda: window.primary_button.text() == "Stop recording" and window.primary_button.isEnabled())
+
+
+def test_get_ready_follows_the_games_auto_start_setting(rig):
+    app = rig.start()
+    assert app.window.get_ready_button.isHidden()
+    app._save_profile(replace(rig.profile, auto=AutoSettings(enabled=True, start_on_first_line=True)))
+    assert not app.window.get_ready_button.isHidden()
+    app.window.get_ready_button.click()
+    rig.wait(lambda: rig.state() is AppState.ARMED)
+    rig.wait(lambda: not app.window.done_button.isHidden() and app.window.done_button.isEnabled())
+    assert "StartRecord" not in rig.gateway.names()  # ready, waiting for the first line

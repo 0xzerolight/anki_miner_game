@@ -116,8 +116,10 @@ def test_the_window_shows_the_enabled_sources_and_the_sessions_in_the_output_fol
     )
     place(rig.output_root, manifest(3))
     app = rig.start()
-    assert app.window.status_row.names() == ["OBS", "Textractor"]
+    assert app.window.status_row.names() == []  # no lights while idle (UJ-04)
     assert [cells[0] for cells in app.window.recent.cells()] == [f"{SESSION_TITLE} - 03"]
+    rig.arm()
+    rig.wait(lambda: app.window.status_row.names() == ["OBS", "Game text: Textractor"])
 
 
 # Launch duties (spec 6.2, 6.3, 10.3, 17 "Unclean previous exit") ----------------------------------
@@ -204,7 +206,7 @@ def test_accepted_lines_are_broadcast_on_the_feed(rig):
         assert client.recv(timeout=5) == "こんにちは"
 
 
-def test_a_line_held_for_an_auto_start_reaches_the_feed_once_and_the_cue_count(rig):
+def test_a_line_held_for_an_auto_start_reaches_the_feed_once_and_the_line_count(rig):
     """The actor publishes held lines again with their offsets at STARTED; the feed has sent them already."""
     app = rig.start()
     assert app.feed is not None
@@ -223,7 +225,7 @@ def test_a_line_held_for_an_auto_start_reaches_the_feed_once_and_the_cue_count(r
         rig.wait(lambda: rig.state() is AppState.RECORDING)
         rig.sources[0].line("つぎ")
         assert client.recv(timeout=5) == "つぎ"
-    rig.wait(lambda: app.window.cues_label.text() == "2 cues")  # both journalled (the window's count)
+    rig.wait(lambda: app.window.status_label.text().endswith("· 2 lines"))  # both journalled (the window's count)
     assert [text for text, _offset in app.window.live_list.entries()] == ["はじまり", "つぎ"]
 
 
