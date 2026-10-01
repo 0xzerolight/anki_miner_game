@@ -22,11 +22,13 @@ queued (``widgets.recent_sessions``).
 """
 
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from enum import StrEnum
 from pathlib import Path
+from types import MappingProxyType
 from typing import Final
 
-from PyQt6.QtCore import QTimer, pyqtSignal
+from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 from PyQt6.QtGui import QAction, QCloseEvent, QDesktopServices
 from PyQt6.QtWidgets import (
     QComboBox,
@@ -38,6 +40,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from anki_miner_game.gui import banner_keys, strings
 from anki_miner_game.gui.presenters.qt_presenter import PresenterSignals
 from anki_miner_game.gui.widgets import clock_text
 from anki_miner_game.gui.widgets.banner_area import BannerArea
@@ -48,7 +51,7 @@ from anki_miner_game.gui.widgets.status_row import StatusRow
 from anki_miner_game.interfaces.addons import VadJobs
 from anki_miner_game.interfaces.session import SessionControl
 from anki_miner_game.models.lines import GameLine
-from anki_miner_game.models.messages import AppState, CommandKind, SourceStatus, UserCommand
+from anki_miner_game.models.messages import AppState, Banner, CommandKind, SourceStatus, UserCommand
 
 WINDOW_TITLE: Final = "Anki Miner Game"
 ELAPSED_REFRESH_MS: Final = 1000
@@ -58,6 +61,139 @@ _STATE_TEXT: Final = {
     AppState.RECORDING: "Recording",
     AppState.FINALISING: "Finalising",
 }
+
+
+class Pending(StrEnum):
+    """What a click asked for while the window waits for the actor (UJ-02)."""
+
+    GET_READY = "get_ready"
+    START = "start"
+    STOP = "stop"
+    DONE = "done"
+
+
+PENDING_TEXT: Final[Mapping[Pending, str]] = MappingProxyType(
+    {Pending.GET_READY: strings.GETTING_OBS_READY, Pending.START: strings.STARTING, Pending.STOP: strings.STOPPING}
+)
+"""The primary button's text while that action is pending; Done playing keeps its own text."""
+
+
+class RecordingControls(QObject):
+    """The core loop's commands (D-01) and what is pending after one (UJ-02), for the window and the tray.
+
+    ``record`` is the one primary action: in Idle it posts ``ARM(game())`` then ``START`` (the actor
+    handles one message at a time, so the start runs after the arm and is ignored when the arm
+    failed); while Ready ``START``; while recording ``STOP``. ``get_ready`` (``ARM`` only) runs in
+    Idle for a game whose profile starts at the first line (``auto_start_game``); ``done_playing``
+    (``DISARM``) while Ready. Each leaves ``pending`` set until the state that completes it
+    (``RECORDING`` for the Idle click, not the ``ARMED`` on the way), a return to ``IDLE`` (nothing
+    pending can complete from there), or a banner whose key is a failure of it
+    (``gui.banner_keys``). There is no timeout: the actor ends each of these commands in one of
+    those (P1 pins it). ``changed`` follows every command, state change and pending end.
+    """
+
+    changed = pyqtSignal()
+
+    def __init__(
+        self,
+        control: SessionControl,
+        signals: PresenterSignals,
+        *,
+        game: Callable[[], str | None],
+        auto_start_game: Callable[[str], bool] = lambda _slug: False,
+        now: Callable[[], float] = time.monotonic,
+        parent: QObject | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._control = control
+        self._game = game
+        self._auto_start_game = auto_start_game
+        self._now = now
+        self.state = AppState.IDLE
+        self.pending: Pending | None = None
+        self._target: AppState | None = None
+        self._failures: frozenset[str] = frozenset()
+        self._recording_since: float | None = None
+        signals.state_changed.connect(self._on_state)
+        signals.banner.connect(self._on_banner)
+
+    def game(self) -> str | None:
+        """The selected game's slug."""
+        return self._game()
+
+    def can_record(self) -> bool:
+        """The primary action can run: nothing pending, and Idle with a game, Ready or Recording."""
+        if self.pending is not None:
+            return False
+        if self.state is AppState.IDLE:
+            return self._game() is not None
+        return self.state in (AppState.ARMED, AppState.RECORDING)
+
+    def offers_get_ready(self) -> bool:
+        slug = self._game()
+        return self.state is AppState.IDLE and self.pending is None and slug is not None and self._auto_start_game(slug)
+
+    def elapsed(self) -> float:
+        """Seconds since the running recording started; 0 outside one."""
+        since = self._recording_since
+        return 0.0 if since is None else self._now() - since
+
+    def record(self) -> None:
+        if not self.can_record():
+            return
+        if self.state is AppState.IDLE:
+            slug = self._game()
+            assert slug is not None  # can_record
+            self._post(UserCommand(CommandKind.ARM, slug=slug), UserCommand(CommandKind.START))
+            self._wait(Pending.START, AppState.RECORDING, banner_keys.ARM_FAILED_KEYS | banner_keys.START_FAILED_KEYS)
+        elif self.state is AppState.ARMED:
+            self._post(UserCommand(CommandKind.START))
+            self._wait(Pending.START, AppState.RECORDING, banner_keys.START_FAILED_KEYS)
+        else:
+            self._post(UserCommand(CommandKind.STOP))
+            self._wait(Pending.STOP, AppState.FINALISING, banner_keys.STOP_FAILED_KEYS)
+
+    def get_ready(self) -> None:
+        slug = self._game()
+        if slug is None or not self.offers_get_ready():
+            return
+        self._post(UserCommand(CommandKind.ARM, slug=slug))
+        self._wait(Pending.GET_READY, AppState.ARMED, banner_keys.ARM_FAILED_KEYS)
+
+    def done_playing(self) -> None:
+        if self.state is not AppState.ARMED or self.pending is not None:
+            return
+        self._post(UserCommand(CommandKind.DISARM))
+        self._wait(Pending.DONE, AppState.IDLE, banner_keys.DONE_FAILED_KEYS)
+
+    def _post(self, *commands: UserCommand) -> None:
+        for command in commands:
+            self._control.post(command)
+
+    def _wait(self, pending: Pending, target: AppState, failures: frozenset[str]) -> None:
+        self.pending, self._target, self._failures = pending, target, failures
+        self.changed.emit()
+
+    def _end(self) -> None:
+        self.pending, self._target, self._failures = None, None, frozenset()
+
+    def _on_state(self, state: AppState, _slug: str | None) -> None:
+        if state is AppState.RECORDING and self.state is not AppState.RECORDING:
+            self._recording_since = self._now()
+        elif state is not AppState.RECORDING:
+            self._recording_since = None
+        self.state = state
+        if self.pending is not None:
+            if state is self._target or state is AppState.IDLE:
+                self._end()
+            elif self.pending is Pending.START and state is AppState.ARMED:
+                self._failures = banner_keys.START_FAILED_KEYS  # the Idle click's arm is done; its start is not
+        self.changed.emit()
+
+    def _on_banner(self, banner: Banner) -> None:
+        if self.pending is not None and banner.key in self._failures:
+            self._end()
+            self.changed.emit()
 
 
 class MainWindow(QMainWindow):

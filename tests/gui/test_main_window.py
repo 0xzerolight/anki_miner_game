@@ -6,7 +6,7 @@ from collections.abc import Callable
 
 import pytest
 
-from anki_miner_game.gui.main_window import MainWindow
+from anki_miner_game.gui.main_window import MainWindow, Pending, RecordingControls
 from anki_miner_game.gui.presenters.qt_presenter import QtPresenter
 from anki_miner_game.models.lines import GameLine
 from anki_miner_game.models.messages import (
@@ -263,3 +263,150 @@ def test_closing_while_idle_quits_even_with_a_tray(rig):
     window.show()
     window.close()
     assert quits == [1]
+
+
+# The core loop's commands and the pending state (D-01, UJ-01, UJ-02, B4-05) ----------------------
+
+
+class Loop:
+    """``RecordingControls`` over a recording ``Control`` and a presenter; ``slug`` is the selected game."""
+
+    def __init__(self, slug: str | None = "steins-gate") -> None:
+        self.control, self.presenter, self.clock = Control(), QtPresenter(), Clock()
+        self.slug = slug
+        self.changes = 0
+        self.controls = RecordingControls(
+            self.control,
+            self.presenter.signals,
+            game=lambda: self.slug,
+            auto_start_game=lambda slug: slug == "zero-escape",
+            now=self.clock,
+        )
+        self.controls.changed.connect(self._changed)
+
+    def _changed(self) -> None:
+        self.changes += 1
+
+    def state(self, state: AppState) -> None:
+        self.presenter.state_changed(state, None if state is AppState.IDLE else self.slug)
+
+
+ARM = UserCommand(CommandKind.ARM, slug="steins-gate")
+START = UserCommand(CommandKind.START)
+
+
+def test_one_click_in_idle_posts_arm_then_start_and_waits_for_the_recording():
+    loop = Loop()
+    loop.controls.record()
+    assert loop.control.posted == [ARM, START]
+    assert loop.controls.pending is Pending.START
+    loop.state(AppState.ARMED)
+    assert loop.controls.pending is Pending.START  # the arm on the way is not the end
+    loop.state(AppState.RECORDING)
+    assert loop.controls.pending is None
+
+
+def test_nothing_runs_twice_while_pending():
+    loop = Loop()
+    loop.controls.record()
+    loop.controls.record()
+    loop.controls.get_ready()
+    loop.controls.done_playing()
+    assert loop.control.posted == [ARM, START]
+    assert not loop.controls.can_record()
+
+
+def test_nothing_to_record_without_a_game():
+    loop = Loop(slug=None)
+    assert not loop.controls.can_record()
+    loop.controls.record()
+    assert loop.control.posted == []
+
+
+def test_get_ready_is_offered_only_in_idle_for_a_game_that_starts_at_the_first_line():
+    loop = Loop(slug="zero-escape")
+    assert loop.controls.offers_get_ready()
+    loop.controls.get_ready()
+    assert loop.control.posted == [UserCommand(CommandKind.ARM, slug="zero-escape")]
+    assert loop.controls.pending is Pending.GET_READY and not loop.controls.offers_get_ready()
+    loop.state(AppState.ARMED)
+    assert loop.controls.pending is None and not loop.controls.offers_get_ready()
+    loop.slug = "steins-gate"
+    loop.state(AppState.IDLE)
+    assert not loop.controls.offers_get_ready()
+    loop.controls.get_ready()
+    assert loop.control.posted == [UserCommand(CommandKind.ARM, slug="zero-escape")]
+
+
+PATHS = [
+    # (slug, state before, action, posted, how it ends)
+    ("steins-gate", AppState.IDLE, "record", [ARM, START], ("state", AppState.RECORDING)),
+    ("steins-gate", AppState.IDLE, "record", [ARM, START], ("banner", "arm")),
+    ("steins-gate", AppState.IDLE, "record", [ARM, START], ("banner", "obs")),
+    ("steins-gate", AppState.IDLE, "record", [ARM, START], ("banner", "start_failed")),
+    ("steins-gate", AppState.IDLE, "record", [ARM, START], ("banner", "internal_error")),
+    (
+        "zero-escape",
+        AppState.IDLE,
+        "get_ready",
+        [UserCommand(CommandKind.ARM, slug="zero-escape")],
+        ("state", AppState.ARMED),
+    ),
+    ("zero-escape", AppState.IDLE, "get_ready", [UserCommand(CommandKind.ARM, slug="zero-escape")], ("banner", "arm")),
+    ("zero-escape", AppState.IDLE, "get_ready", [UserCommand(CommandKind.ARM, slug="zero-escape")], ("banner", "obs")),
+    ("steins-gate", AppState.ARMED, "record", [START], ("state", AppState.RECORDING)),
+    ("steins-gate", AppState.ARMED, "record", [START], ("banner", "start_failed")),
+    ("steins-gate", AppState.ARMED, "record", [START], ("banner", "internal_error")),
+    ("steins-gate", AppState.ARMED, "record", [START], ("state", AppState.IDLE)),
+    ("steins-gate", AppState.RECORDING, "record", [UserCommand(CommandKind.STOP)], ("state", AppState.FINALISING)),
+    ("steins-gate", AppState.RECORDING, "record", [UserCommand(CommandKind.STOP)], ("banner", "stop_failed")),
+    ("steins-gate", AppState.ARMED, "done_playing", [UserCommand(CommandKind.DISARM)], ("state", AppState.IDLE)),
+    ("steins-gate", AppState.ARMED, "done_playing", [UserCommand(CommandKind.DISARM)], ("banner", "arm")),
+]
+
+
+@pytest.mark.parametrize(("slug", "before", "action", "posted", "end"), PATHS)
+def test_every_pending_action_ends_at_its_state_or_a_failure_banner(slug, before, action, posted, end):
+    loop = Loop(slug)
+    if before is not AppState.IDLE:
+        loop.state(before)
+    getattr(loop.controls, action)()
+    assert loop.control.posted == posted
+    assert loop.controls.pending is not None
+    kind, value = end
+    if kind == "state":
+        loop.state(value)
+    else:
+        loop.presenter.banner(Banner(value, BannerLevel.ERROR, "it failed"))
+    assert loop.controls.pending is None
+
+
+def test_other_banners_leave_the_action_pending():
+    loop = Loop()
+    loop.controls.record()
+    loop.presenter.banner(Banner("low_disk", BannerLevel.WARNING, "Only 1.8 GB free"))
+    assert loop.controls.pending is Pending.START
+    loop.state(AppState.ARMED)
+    loop.presenter.banner(Banner("obs", BannerLevel.ERROR, "OBS went away"))  # the arm is done: not its failure
+    assert loop.controls.pending is Pending.START
+    loop.presenter.banner(Banner("start_failed", BannerLevel.ERROR, "OBS did not start recording"))
+    assert loop.controls.pending is None
+
+
+def test_each_change_is_announced():
+    loop = Loop()
+    loop.controls.record()
+    loop.state(AppState.ARMED)
+    loop.state(AppState.RECORDING)
+    assert loop.changes == 3
+
+
+def test_elapsed_counts_from_the_recording_start():
+    loop = Loop()
+    loop.state(AppState.ARMED)
+    assert loop.controls.elapsed() == 0.0
+    loop.state(AppState.RECORDING)
+    loop.clock.t += 3725
+    assert loop.controls.elapsed() == 3725
+    loop.state(AppState.FINALISING)
+    assert loop.controls.elapsed() == 0.0
