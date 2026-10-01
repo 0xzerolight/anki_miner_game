@@ -15,6 +15,7 @@ from websockets.exceptions import InvalidStatus
 from websockets.typing import Origin
 
 from anki_miner_game.feed import FEED_HOST, FeedPortInUseError, FeedServer, http_server
+from anki_miner_game.gui.colours import GREY
 
 PAGE = Path(__file__).resolve().parents[2] / "anki_miner_game" / "feed" / "page.html"
 
@@ -203,3 +204,9 @@ async def test_the_apps_page_local_pages_and_texthooker_ui_receive_lines(feed: F
         await _wait_for_clients(feed, 1)
         feed.broadcast("こんにちは")
         assert await asyncio.wait_for(client.recv(), timeout=5) == "こんにちは"
+
+
+def test_the_disconnected_dot_is_the_apps_grey() -> None:
+    """UJ-04: the page's off light matches the window's (``gui/colours.py``), not an error red."""
+    html = PAGE.read_text(encoding="utf-8")
+    assert f"--off: {GREY};" in html
