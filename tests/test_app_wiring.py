@@ -23,7 +23,7 @@ from anki_miner_game.models.config import AppConfig, TextSourceConfig
 from anki_miner_game.models.manifest import ManifestState, VadState
 from anki_miner_game.models.messages import AppState, CommandKind, SourceStatus, UserCommand
 from anki_miner_game.models.obs import OutputState
-from anki_miner_game.models.profile import GameProfile, OcrSettings, TextMode
+from anki_miner_game.models.profile import AutoSettings, GameProfile, OcrSettings, TextMode
 from anki_miner_game.session.manifest import load_manifest
 from anki_miner_game.text.sources.clipboard_source import CLIPBOARD_SOURCE_ID, ClipboardSource
 from anki_miner_game.text.sources.ocr_source import OCR_SOURCE_ID
@@ -327,3 +327,28 @@ def test_elsewhere_urls_open_through_qt(monkeypatch, frozen, platform):
 
     assert open_url(QUrl("file:///tmp"), frozen=frozen, platform=platform, spawn=spawn)
     assert opened == [QUrl("file:///tmp")]
+
+
+# One click records; Get ready for a game that starts at the first line (D-01) ---------------------
+
+
+def test_start_recording_in_idle_gets_the_game_ready_and_records_with_one_click(rig):
+    app = rig.start()
+    window = app.window
+    assert window.get_ready_button.isHidden()  # this game does not start at the first line
+    window.primary_button.click()
+    assert window.primary_button.text() == "Starting…"
+    rig.wait(lambda: "StartRecord" in rig.gateway.names())
+    record(rig)
+    rig.wait(lambda: window.primary_button.text() == "Stop recording" and window.primary_button.isEnabled())
+
+
+def test_get_ready_follows_the_games_auto_start_setting(rig):
+    app = rig.start()
+    assert app.window.get_ready_button.isHidden()
+    app._save_profile(replace(rig.profile, auto=AutoSettings(enabled=True, start_on_first_line=True)))
+    assert not app.window.get_ready_button.isHidden()
+    app.window.get_ready_button.click()
+    rig.wait(lambda: rig.state() is AppState.ARMED)
+    rig.wait(lambda: not app.window.done_button.isHidden() and app.window.done_button.isEnabled())
+    assert "StartRecord" not in rig.gateway.names()  # ready, waiting for the first line

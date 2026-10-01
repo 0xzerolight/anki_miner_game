@@ -314,6 +314,7 @@ class App(QObject):
             output_root=lambda: paths.output_root(self._config),
             vad_jobs=self._vad_jobs,  # the recent sessions hand interrupted passes on before the actor runs
             open_url=open_url,
+            auto_start_game=self._auto_start_game,
         )
         window.new_game_requested.connect(lambda: self._open_profile_dialog(None))
         window.edit_game_requested.connect(self._open_profile_dialog)
@@ -503,6 +504,11 @@ class App(QObject):
     def _feed_url(self) -> str | None:
         feed = self._feed
         return None if feed is None else feed.page_url
+
+    def _auto_start_game(self, slug: str) -> bool:
+        """Main thread: ``slug``'s profile has auto mode with start at the first line (D-01's Get ready)."""
+        profile = self._profiles.get(slug)
+        return profile is not None and profile.auto.enabled and profile.auto.start_on_first_line
 
     def _show_window(self) -> None:
         window = self.window
