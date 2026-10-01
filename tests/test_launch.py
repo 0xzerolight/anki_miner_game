@@ -117,6 +117,7 @@ SMOKE = textwrap.dedent("""
         for widget in QApplication.topLevelWidgets():
             if widget.isVisible() and widget.windowTitle() == "Anki Miner Game":
                 print("SHOWN", shown, flush=True)
+                print("ICON", not QApplication.windowIcon().isNull(), QApplication.desktopFileName(), flush=True)
                 widget.close()
                 return
         QTimer.singleShot(50, close_the_window)
@@ -131,6 +132,7 @@ def test_an_offscreen_launch_writes_the_settings_and_the_log_and_quits_when_clos
     done = run_python("-c", SMOKE)
     assert done.returncode == 0, done.stderr
     assert "SHOWN ['Anki Miner Game', 'Anki Miner Game setup']" in done.stdout
+    assert "ICON True anki-miner-game" in done.stdout  # UJ-12: title bar, taskbar and tray base
     assert store.load_config() == AppConfig()
     log = (paths.home() / launch.LOG_NAME).read_text(encoding="utf-8")
     assert "starting" in log and "stopped" in log

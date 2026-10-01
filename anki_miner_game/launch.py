@@ -33,6 +33,7 @@ from PyQt6.QtWidgets import QApplication
 from anki_miner_game import __version__, paths
 from anki_miner_game.app import SHUTDOWN_TIMEOUT_S, App
 from anki_miner_game.gui import cli_verbs
+from anki_miner_game.gui.icon import DESKTOP_FILE_NAME, app_icon
 from anki_miner_game.models.messages import UserCommand
 from anki_miner_game.runtime import bundle_smoke, ca_bundle
 
@@ -143,6 +144,8 @@ def _run_instance(qapp: QCoreApplication, home: Path, name: str, command: UserCo
     try:
         log.info("Anki Miner Game %s starting (home %s)", __version__, home)
         ca_bundle.use_distro_ca_bundle()  # before any HTTPS request; a no-op unless frozen on Linux
+        QApplication.setWindowIcon(app_icon())  # every window, the taskbar button, the tray's base (UJ-12)
+        QApplication.setDesktopFileName(DESKTOP_FILE_NAME)  # matches the packaged .desktop file on Linux
         app = App(server_name=name)
         app.stopped.connect(qapp.quit)
         if isinstance(qapp, QApplication):
