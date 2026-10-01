@@ -26,6 +26,7 @@ from anki_miner_game.models.manifest import ManifestState, VadState
 from anki_miner_game.models.messages import AppState, CommandKind, SourceStatus, UserCommand
 from anki_miner_game.models.obs import OutputState
 from anki_miner_game.models.profile import AutoSettings, GameProfile, OcrSettings, TextMode
+from anki_miner_game.session import session as session_mod
 from anki_miner_game.session.manifest import load_manifest
 from anki_miner_game.text.sources.clipboard_source import CLIPBOARD_SOURCE_ID, ClipboardSource
 from anki_miner_game.text.sources.ocr_source import OCR_SOURCE_ID
@@ -218,7 +219,8 @@ def registered(text: str) -> tuple[int, int]:
     return hotkey.modifiers | MOD_NOREPEAT, hotkey.vk
 
 
-def test_the_hotkey_is_registered_and_toggles_start_and_stop(rig):
+def test_the_hotkey_is_registered_and_toggles_start_and_stop(rig, monkeypatch):
+    monkeypatch.setattr(session_mod, "QUIT_START_WAIT_S", 0.05)  # B1-03: the test ends with a start in flight
     api = HotkeyApi()
     made = with_hotkey(rig, api)
     rig.start()

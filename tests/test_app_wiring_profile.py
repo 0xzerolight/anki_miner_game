@@ -21,6 +21,7 @@ from anki_miner_game.models.messages import AppState, CommandKind, UserCommand
 from anki_miner_game.models.obs import WindowItem
 from anki_miner_game.models.profile import AudioMode, AudioSettings, AutoSettings, GameProfile
 from anki_miner_game.obs.startup import LocalObsStarter
+from anki_miner_game.session import session as session_mod
 from anki_miner_game.session.naming import slugify
 from anki_miner_game.store import StoreWriteError
 from tests.app_rig import SLUG, Rig
@@ -60,8 +61,9 @@ def test_a_new_game_is_saved_listed_selected_and_can_be_armed(rig):
     rig.wait(lambda: rig.state() is AppState.ARMED and last_slug(rig) == slug)
 
 
-def test_an_edit_applies_to_the_next_arm_through_auto_mode(rig):
+def test_an_edit_applies_to_the_next_arm_through_auto_mode(rig, monkeypatch):
     """The profile the actor and auto mode look up is the one just saved: auto-start on the first line."""
+    monkeypatch.setattr(session_mod, "QUIT_START_WAIT_S", 0.05)  # B1-03: the test ends with a start in flight
     app = rig.start()
     app.window.edit_game_requested.emit(SLUG)
     dialog = shown(app, GameProfileDialog)
