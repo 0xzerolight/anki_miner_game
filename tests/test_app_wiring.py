@@ -143,15 +143,17 @@ def test_a_finalised_session_is_queued_for_its_vad_pass(rig):
 # The tray (spec 16) --------------------------------------------------------------------------------
 
 
-def test_the_tray_arms_the_selected_game_opens_the_feed_shows_the_window_and_quits(rig, monkeypatch, qtbot):
+def test_the_tray_records_the_selected_game_opens_the_feed_shows_the_window_and_quits(rig, monkeypatch, qtbot):
     opened: list[QUrl] = []
     monkeypatch.setattr(app_mod, "open_url", lambda url: opened.append(url) or True)
     app = rig.start()
     tray = app.tray
     assert app.window.minimise_to_tray is QSystemTrayIcon.isSystemTrayAvailable()
     tray.menu.aboutToShow.emit()
-    tray.arm_action.trigger()
-    rig.wait(lambda: rig.state() is AppState.ARMED and last_slug(rig) == SLUG)
+    assert tray.record_action.text() == f"Start recording: {TITLE}"
+    tray.record_action.trigger()
+    rig.wait(lambda: last_slug(rig) == SLUG and "StartRecord" in rig.gateway.names())
+    record(rig)
     tray.feed_action.trigger()
     assert app.feed is not None and opened == [QUrl(app.feed.page_url)]
     app.window.hide()
@@ -159,7 +161,26 @@ def test_the_tray_arms_the_selected_game_opens_the_feed_shows_the_window_and_qui
     assert app.window.isVisible()
     with qtbot.waitSignal(app.stopped, timeout=WAIT_MS):
         tray.quit_action.trigger()
-    assert rig.obs.profile == "Untitled"  # the quit disarmed
+    assert rig.obs.profile == "Untitled"  # the quit stopped, saved and gave OBS back
+
+
+def test_closing_the_window_while_ready_says_once_that_the_app_is_still_running(rig, monkeypatch):
+    app = rig.start()
+    told: list[tuple[str, str]] = []
+    monkeypatch.setattr(app.tray, "_supports_messages", lambda: True)
+    monkeypatch.setattr(app.tray.icon, "showMessage", lambda title, text, *rest: told.append((title, text)))
+    app.window.minimise_to_tray = True
+    rig.arm()
+    rig.wait(lambda: app.window.controls.state is AppState.ARMED)
+    app.window.close()
+    app.window.show()
+    app.window.close()
+    assert told == [
+        (
+            "Anki Miner Game is still running",
+            f"{TITLE} is ready. Click this icon to open the window; right-click it to quit.",
+        )
+    ]
 
 
 # The hotkey (spec 16, Windows) ---------------------------------------------------------------------
