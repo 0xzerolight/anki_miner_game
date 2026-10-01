@@ -7,9 +7,11 @@ import subprocess
 import sys
 import textwrap
 import threading
+import time
 from pathlib import Path
 
 import pytest
+from PyQt6.QtCore import QLockFile
 
 from anki_miner_game import launch, paths, store
 from anki_miner_game.gui.cli_verbs import server_name
@@ -153,6 +155,100 @@ def test_a_verb_the_running_instance_refuses_fails_the_command(qtbot, tmp_path):
         assert send_verb(qtbot, "--start") == 0  # the instance still answers
     finally:
         rig.close()
+
+
+HOLD = textwrap.dedent("""
+    import os
+    import sys
+    from pathlib import Path
+
+    from PyQt6.QtCore import QTimer
+    from PyQt6.QtWidgets import QApplication
+
+    from anki_miner_game import app as app_mod, launch
+    from anki_miner_game.feed import FeedServer
+    from tests.session.actor_harness import FakeClock, FakeDiscovery, FakeGateway, FakeObs, FakeProvisioner
+
+    app_mod.FeedServer = lambda _ws, _http: FeedServer(0, 0)  # never a default port in tests
+    real_app = launch.App
+
+    def fake_obs_app(**kwargs):
+        gateway = FakeGateway(FakeObs(), FakeClock())
+        services = app_mod.ObsServices(FakeDiscovery(), gateway, FakeProvisioner(gateway))
+        return real_app(obs=lambda _config: services, **kwargs)
+
+    launch.App = fake_obs_app
+    qapp = QApplication(sys.argv)
+
+    def say_shown():
+        if any(w.isVisible() and w.windowTitle() == "Anki Miner Game" for w in QApplication.topLevelWidgets()):
+            Path(os.environ["SHOWN_MARKER"]).touch()
+            return
+        QTimer.singleShot(50, say_shown)
+
+    QTimer.singleShot(50, say_shown)
+    sys.exit(launch.main([]))
+    """)
+"""An instance that stays up until it is killed; it touches ``$SHOWN_MARKER`` once its window shows."""
+
+
+def test_a_launch_while_another_instance_starts_waits_for_its_answer(qtbot, tmp_path):
+    """B2-01: the lock is held (an instance is starting) and nothing listens yet. The launch neither
+    becomes a second instance nor gives up: once the instance listens, it gets its answer."""
+    home = paths.home()
+    home.mkdir(parents=True, exist_ok=True)
+    held = QLockFile(str(home / launch.INSTANCE_LOCK_NAME))
+    assert held.tryLock(0)
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "anki_miner_game.launch"],
+        cwd=REPO,
+        env=child_env(),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        qtbot.wait(3000)
+        assert proc.poll() is None  # still waiting: not started, not given up
+        rig = Rig(qtbot, tmp_path)
+        rig.start(name=server_name(home))
+        try:
+            qtbot.waitUntil(lambda: proc.poll() is not None, timeout=RUN_TIMEOUT_S * 1000)
+        finally:
+            rig.close()
+        assert proc.returncode == 0
+        assert not (home / launch.LOG_NAME).exists()  # it never became an instance (an instance logs)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        held.unlock()
+
+
+def test_a_lock_left_by_a_killed_instance_does_not_stop_the_next_launch(tmp_path):
+    """Review Focus 5: after a crash or power loss the lock file is there but its holder is gone."""
+    marker = tmp_path / "shown"
+    holder = subprocess.Popen(
+        [sys.executable, "-c", HOLD],
+        cwd=REPO,
+        env={**child_env(), "SHOWN_MARKER": str(marker)},
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        deadline = time.monotonic() + RUN_TIMEOUT_S
+        while not marker.exists():
+            assert holder.poll() is None, "the first instance ended before its window showed"
+            assert time.monotonic() < deadline, "the first instance never showed its window"
+            time.sleep(0.05)
+    finally:
+        holder.kill()  # SIGKILL on POSIX, TerminateProcess on Windows: nothing is cleaned up
+        holder.wait()
+    assert (paths.home() / launch.INSTANCE_LOCK_NAME).exists()
+
+    done = run_python("-c", SMOKE)  # times out (60 s) if the stale lock made it wait (130 s)
+
+    assert done.returncode == 0, done.stderr
+    assert "SHOWN ['Anki Miner Game'" in done.stdout
 
 
 def test_two_verbs_at_once_are_a_usage_error():

@@ -2,8 +2,9 @@
 
 With an instance of this home already running, the verb (or, without one, "show your window") goes
 to it and this process exits: 0 when it was accepted, 1 when not. Otherwise this process becomes the
-instance: it logs to ``<home>/anki_miner_game.log``, starts the app, applies the verb once the
-session actor runs, and quits when the window is closed. A frozen Linux build first makes sure stdlib
+instance: it first takes ``<home>/instance.lock`` (another launch that finds it held waits for that
+instance's answer), then it logs to ``<home>/anki_miner_game.log``, starts the app, applies the verb
+once the session actor runs, and quits when the window is closed. A frozen Linux build first makes sure stdlib
 HTTPS has CA certificates (``runtime.ca_bundle``); with ``ANKI_MINER_GAME_SMOKE=1`` the started app
 runs the bundle smoke (``runtime.bundle_smoke``) and quits on its own. The OBS password never reaches the log:
 nothing here or in the composition logs it, and ``obsws-python``'s own logger, which would, is held
@@ -20,17 +21,19 @@ import logging
 import logging.handlers
 import sys
 import threading
+import time
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from types import TracebackType
 from typing import Final
 
-from PyQt6.QtCore import QTimer
+from PyQt6.QtCore import QCoreApplication, QLockFile, QTimer
 from PyQt6.QtWidgets import QApplication
 
 from anki_miner_game import __version__, paths
-from anki_miner_game.app import App
+from anki_miner_game.app import SHUTDOWN_TIMEOUT_S, App
 from anki_miner_game.gui import cli_verbs
+from anki_miner_game.models.messages import UserCommand
 from anki_miner_game.runtime import bundle_smoke, ca_bundle
 
 log = logging.getLogger(__name__)
@@ -41,6 +44,13 @@ LOG_BACKUPS: Final = 3
 """The log rotates at 5 MB and keeps three old files: a hooker that is not running retries every
 10 s for as long as the game stays armed."""
 LOG_FORMAT: Final = "%(asctime)s %(levelname)s [%(threadName)s] %(name)s: %(message)s"
+INSTANCE_LOCK_NAME: Final = "instance.lock"
+"""In the home folder. The running instance holds it from before it starts until ``main`` returns, so a
+launch during another's start-up or quit never becomes a second instance (B2-01)."""
+CLAIM_TRY_MS: Final = 200
+CLAIM_TIMEOUT_S: Final = SHUTDOWN_TIMEOUT_S + 10.0
+"""How long a launch waits for an instance that holds the lock but does not answer yet: one that is
+starting (it listens at the end of ``App.start``) or quitting (up to its shutdown timeout)."""
 
 
 def setup_logging(home: Path, level: int = logging.INFO) -> logging.Handler:
@@ -86,6 +96,25 @@ def install_exception_hooks() -> Callable[[], None]:
     return restore
 
 
+def claim_instance(
+    lock: QLockFile, name: str, command: UserCommand | None, *, timeout_s: float = CLAIM_TIMEOUT_S
+) -> bool | None:
+    """Become the instance, or hand ``command`` to the one that holds ``lock``.
+
+    ``None`` once ``lock`` is held: this process is the instance. Otherwise the answer of the instance
+    that holds it (``cli_verbs.send``), or ``False`` when none answered within ``timeout_s``.
+    """
+    deadline = time.monotonic() + timeout_s
+    while True:
+        if lock.tryLock(CLAIM_TRY_MS):
+            return None
+        answered = cli_verbs.send(name, command)
+        if answered is not None:
+            return answered
+        if time.monotonic() >= deadline:
+            return False
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     command, qt_args = cli_verbs.parse_verb(sys.argv[1:] if argv is None else argv)
     program = sys.argv[0] if sys.argv else "anki_miner_game"
@@ -95,6 +124,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     answered = cli_verbs.send(name, command)
     if answered is not None:  # another instance of this home runs; it logs, this process does not
         return 0 if answered else 1
+    home.mkdir(parents=True, exist_ok=True)
+    lock = QLockFile(str(home / INSTANCE_LOCK_NAME))
+    lock.setStaleLockTime(0)  # a holder that is gone (crash, power loss) never blocks; a live one always does
+    answered = claim_instance(lock, name, command)
+    if answered is not None:
+        return 0 if answered else 1
+    try:
+        return _run_instance(qapp, home, name, command)
+    finally:
+        lock.unlock()
+
+
+def _run_instance(qapp: QCoreApplication, home: Path, name: str, command: UserCommand | None) -> int:
+    """This process is the instance: log, start the app, run until it stops."""
     handler = setup_logging(home)
     restore_hooks = install_exception_hooks()
     try:
