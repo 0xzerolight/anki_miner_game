@@ -123,14 +123,13 @@ warn_unused_ignores = true
 warn_no_return = true
 strict_equality = true
 
-# Parallel-safe test rule (master plan section 2): these modules are only ever
-# importable inside .venv-vad, never the main dev venv, so mypy must not choke
-# on missing stubs for them.
+# Keep: these modules are only ever importable inside .venv-vad, never the main
+# dev venv the gate runs from, so mypy must not choke on missing stubs for them.
 [[tool.mypy.overrides]]
 module = ["numpy.*", "onnxruntime.*", "av.*"]
 ignore_missing_imports = true
 
-# vad_worker.py itself imports the above and runs under .venv-vad's
+# Keep as well: vad_worker.py itself imports the above and runs under .venv-vad's
 # interpreter, not this project's; mypy in this venv cannot type-check it.
 [[tool.mypy.overrides]]
 module = ["anki_miner_game.vad.worker.*"]
@@ -140,7 +139,7 @@ ignore_errors = true
 module = ["obsws_python.*"]
 ignore_missing_imports = true
 
-# T01 acceptance: the contracts type-check strictly. Per-module `strict = true`
+# models/ and interfaces/ are the fixed contracts and type-check strictly. Per-module `strict = true`
 # leaks to every module in mypy 2.3, so the strict flags are listed one by one
 # (warn_redundant_casts / warn_unused_ignores / strict_equality are already global).
 [[tool.mypy.overrides]]

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Definition-of-Done gate (see CLAUDE.md). Runs every step, never stops on
-# first failure, prints PASS/FAIL per step and a SUMMARY, exits nonzero if any
-# step failed.
+# Definition-of-Done gate: black, ruff, mypy and pytest. Runs every step, never
+# stops on first failure, prints PASS/FAIL per step and a SUMMARY, exits nonzero
+# if any step failed.
 set -uo pipefail
 
 cd "$(dirname "$0")/.." || exit 2

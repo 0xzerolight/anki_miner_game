@@ -66,6 +66,10 @@ def _isolate_game_home(tmp_path_factory, monkeypatch):
     tmp dir, so a default ``AppConfig().output_root`` (``~/Videos/...``) or an
     OBS config root found under ``~`` can never reach the real home. All are
     set on every platform; the ones a platform ignores are harmless.
+
+    A test that starts a ``QLocalServer`` names it from this home with
+    ``cli_verbs.server_name``, never a fixed string, so parallel xdist workers
+    and worktrees gating at once never share a server name.
     """
     fake_home = tmp_path_factory.mktemp("home")
     for var, path in (
