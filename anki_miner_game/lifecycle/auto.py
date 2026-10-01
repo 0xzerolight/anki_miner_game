@@ -11,7 +11,12 @@ starts a new armed period with that game's settings.
   carrying that line (``UserCommand.line``), once per armed period; the
   actor holds the line and journals it at offset 0 on ``STARTED``. A
   ``StartRecord`` failure leaves the state at ``armed``; its banner
-  (``START_FAILED_BANNER_KEY``) lets the next line try again.
+  (``START_FAILED_BANNER_KEY``) lets the next line try again. A recording
+  that ends without auto mode's own stop (the user's Stop in the window,
+  the tray, the hotkey or OBS) pauses auto-start until a recording starts,
+  the app goes idle or another game is readied (D-06); OBS closing during
+  the recording (``obs_exited``) is no such stop. ``auto_start_pending``
+  tells the window whether the next line starts a recording.
 - Auto-stop, idle: while ``recording``, no accepted line for
   ``auto.stop_idle_minutes`` (counted from the recording start when no line
   came yet) posts ``stop``.
@@ -48,6 +53,7 @@ from anki_miner_game.models.messages import (
 from anki_miner_game.models.obs import ObsError
 from anki_miner_game.models.profile import AutoSettings, CaptureKind, GameProfile
 from anki_miner_game.obs.provision import window_class_exe
+from anki_miner_game.session.session import BannerKey
 
 log = logging.getLogger(__name__)
 
@@ -127,12 +133,17 @@ class AutoMode:
         self._stop_sent = False
         self._last_activity = now()
         self._misses = 0
+        self._manual_end = False
+        """The last recording ended without this auto mode's stop (D-06): auto-start waits."""
+        self._obs_exited = False
+        """``obs_exited`` was raised since the last recording started: OBS closing is no manual stop."""
         control.subscribe(self.on_event)
 
     def on_event(self, event: SessionEvent) -> None:
         if isinstance(event, StateChanged):
             if event.state is self._state and event.slug == self._slug:
                 return
+            self._note_pause(event)
             self._state, self._slug = event.state, event.slug
             self._profile = None if event.slug is None else self._profile_for(event.slug)
             self._start_sent = False
@@ -145,11 +156,32 @@ class AutoMode:
                 self._start_sent = False
             elif key == STOP_FAILED_BANNER_KEY and self._state is AppState.RECORDING:
                 self._stop_sent = False  # B1-08: the next check posts STOP again
+            elif key == BannerKey.OBS_EXITED:
+                self._obs_exited = True
         elif isinstance(event, LineAccepted):
             self._last_activity = self._now()
-            if self._state is AppState.ARMED and not self._start_sent and self._start_on_first_line():
+            if not self._start_sent and self.auto_start_pending():
                 self._start_sent = True
                 self._control.post(UserCommand(CommandKind.START, line=event.line))
+
+    def auto_start_pending(self) -> bool:
+        """True while the app is Ready (``armed``) with a game whose auto mode starts at the first line,
+        and auto-start is not paused by a manual stop (D-06): the next accepted line starts a recording.
+        Called from the Qt main thread; it reads attributes the loop writes at each ``StateChanged``,
+        before the presenter forwards that state (``AutoMode`` subscribes to the actor before the
+        presenter does, ``App._build``)."""
+        return self._state is AppState.ARMED and self._start_on_first_line() and not self._paused()
+
+    def _note_pause(self, event: StateChanged) -> None:
+        """D-06, on each state change, before the per-state resets read ``_stop_sent`` away."""
+        if event.state is AppState.RECORDING or event.state is AppState.IDLE or event.slug != self._slug:
+            self._manual_end = False  # a recording starts, Done playing, or another game: auto-start is live
+            self._obs_exited = False
+        elif self._state is AppState.RECORDING:
+            self._manual_end = not self._stop_sent
+
+    def _paused(self) -> bool:
+        return self._manual_end and not self._obs_exited
 
     async def check(self) -> None:
         """One idle check and one window poll; ``run`` calls it every ``POLL_S``."""
