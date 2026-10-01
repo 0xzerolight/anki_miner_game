@@ -1,8 +1,11 @@
 """Arming, disarming and the restore file (spec 6.2; 17 rows OBS not running, missing request, active
 output, switch timeout, output folder not writable, free space; R2 items 3-6)."""
 
+import ast
 import asyncio
 import os
+import re
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -433,7 +436,7 @@ async def test_settings_that_apply_at_the_next_arm_are_a_warning(h: Harness):
     await h.arm()
     assert h.actor.state is AppState.ARMED
     text = h.banners()[BannerKey.OBS_RESTART]
-    assert "disarm and arm" in text
+    assert "press Done playing and then Start recording again" in text
     assert h.gateway.names().count("SetCurrentProfile") == 1  # ensure_profile's switch; nothing restarts OBS
 
 
@@ -523,3 +526,60 @@ async def test_quitting_while_armed_disarms(h: Harness):
     await h.stop()
     assert (h.sources[0].stops, h.sources[0].closed) == (1, 1)
     assert (h.obs.profile, h.obs.collection) == ("Untitled", "Untitled")
+
+
+_ARM = re.compile(r"\b(dis)?arm(s|ed|ing)?\b|\bcues?\b", re.IGNORECASE)
+
+
+class _ActorTexts(ast.NodeVisitor):
+    """Every string constant in ``session.py`` that can reach the user: docstrings, ``BannerKey`` values and
+    log calls are left out."""
+
+    def __init__(self) -> None:
+        self.texts: list[str] = []
+
+    def _body(self, node: ast.Module | ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        body = node.body
+        if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
+            body = body[1:]
+        for child in body:
+            self.visit(child)
+
+    def visit_Module(self, node: ast.Module) -> None:
+        self._body(node)
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        if node.name != "BannerKey":
+            self._body(node)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self._body(node)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self._body(node)
+
+    def visit_Expr(self, node: ast.Expr) -> None:
+        if not (isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)):  # attribute docstrings
+            self.generic_visit(node)
+
+    def visit_Call(self, node: ast.Call) -> None:
+        func = node.func
+        if not (isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) and func.value.id == "log"):
+            self.generic_visit(node)
+
+    def visit_Constant(self, node: ast.Constant) -> None:
+        if isinstance(node.value, str):
+            self.texts.append(node.value)
+
+
+def test_no_actor_text_says_arm_cue_websocket_or_a_menu_path():
+    """D-01, UJ-32: the user never meets "arm"; "line" not "cue"; "WebSocket"; no menu that does not exist."""
+    source = Path(session_mod.__file__).read_text(encoding="utf-8")
+    finder = _ActorTexts()
+    finder.visit(ast.parse(source))
+    wrong = [
+        text
+        for text in finder.texts
+        if _ARM.search(text) or "websocket" in text or "Setup wizard" in text or "File ->" in text
+    ]
+    assert wrong == []

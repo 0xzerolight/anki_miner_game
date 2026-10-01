@@ -715,7 +715,7 @@ class SessionActor:
 
     async def _arm(self, slug: str) -> None:
         if self._state is AppState.RECORDING:
-            self._banner(BannerKey.ARM, BannerLevel.INFO, "Stop the recording before arming another game.")
+            self._banner(BannerKey.ARM, BannerLevel.INFO, "Stop the recording before choosing another game.")
             return
         profile = self._get_profile(slug)
         if profile is None:
@@ -723,7 +723,9 @@ class SessionActor:
             return
         problems = validate(profile)
         if problems:
-            self._banner(BannerKey.ARM, BannerLevel.ERROR, f"{profile.title} cannot be armed: {'; '.join(problems)}.")
+            self._banner(
+                BannerKey.ARM, BannerLevel.ERROR, f"{profile.title} cannot be recorded yet: {'; '.join(problems)}."
+            )
             return
         cfg = self._get_config()
         incoming = paths.incoming_dir(cfg)
@@ -765,7 +767,7 @@ class SessionActor:
                 BannerKey.OBS_RESTART,
                 BannerLevel.WARNING,
                 "Some of the app's OBS settings (container, output mode or recording encoder) take effect "
-                "only after you disarm and arm again.",
+                "only after you press Done playing and then Start recording again.",
             )
         self._armed = _Armed(profile=profile, cfg=cfg)
         self._pipeline = TextPipeline(profile.filters)
@@ -931,7 +933,7 @@ class SessionActor:
                         BannerKey.OBS_QUESTION,
                         BannerLevel.WARNING,
                         "OBS is asking to restart: answer it in OBS's window (No keeps OBS running and "
-                        "lets arming go on).",
+                        "lets the app go on).",
                     )
                 try:
                     result = await provisioning
@@ -1060,7 +1062,7 @@ class SessionActor:
 
     async def _disarm(self) -> None:
         if self._state is AppState.RECORDING:
-            self._banner(BannerKey.ARM, BannerLevel.INFO, "Stop the recording before disarming.")
+            self._banner(BannerKey.ARM, BannerLevel.INFO, "Stop the recording before pressing Done playing.")
             return
         if self._state is AppState.ARMED:
             await self._to_idle()
@@ -1299,7 +1301,8 @@ class SessionActor:
                 BannerKey.FOREIGN_RECORDING,
                 BannerLevel.WARNING,
                 f"OBS is recording to {output_path or 'an unknown file'}, outside the app's folder, so this "
-                "recording gets no subtitle. Arm the game again to put OBS back on the app's profile.",
+                "recording gets no subtitle. Press Done playing, then Start recording, to put OBS back on the "
+                "app's profile.",
             )
             return
         incoming = paths.incoming_dir(armed.cfg)
