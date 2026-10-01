@@ -25,4 +25,4 @@ STOP_FAILED_KEYS: Final = frozenset({STOP_FAILED_BANNER_KEY, INTERNAL_BANNER_KEY
 DONE_FAILED_KEYS: Final = frozenset({ARM_BANNER_KEY, INTERNAL_BANNER_KEY})
 """A Done playing (DISARM) that does not reach ``IDLE`` raises one of these (P1 pins it)."""
 SET_UP_OBS_KEYS: Final = frozenset({OBS_BANNER_KEY})
-"""Banners that carry the Set up OBS… button while idle (UJ-10)."""
+"""Banners that carry the Set up OBS… button in Idle and Ready (UJ-10, D-04)."""
