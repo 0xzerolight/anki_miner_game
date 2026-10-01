@@ -93,7 +93,7 @@ def test_ocr_mode_rejects_clipboard():
 
 def test_app_audio_needs_a_window():
     no_window = _hook_profile(audio=AudioSettings(mode=AudioMode.APP))
-    assert validate(no_window) == ["application audio needs a pinned window"]
+    assert validate(no_window) == ["recording only the game's sound needs a game window"]
     pinned = dataclasses.replace(
         no_window, capture=CaptureSettings(kind=CaptureKind.GAME, window="Game:UnityWndClass:game.exe")
     )
