@@ -533,10 +533,24 @@ def test_linux_ignores_another_users_obs(tmp_path, monkeypatch):
 
 def test_windows_asks_tasklist_for_obs64(tmp_path):
     runner = FakeRunner(lambda argv: (0, '"obs64.exe","4242","Console","1","250,000 K"\r\n'))
-    obs = make(tmp_path, platform="win32", runner=runner)
+    obs = make(tmp_path, platform="win32", runner=runner, session_id=lambda: None)
 
     assert obs.is_running()
     assert runner.ran == [("tasklist", "/FI", "IMAGENAME eq obs64.exe", "/FO", "CSV", "/NH")]
+
+
+def test_windows_counts_only_the_obs_of_this_session(tmp_path):
+    """B2-04: tasklist lists every session's processes; another user's OBS has its own config."""
+    runner = FakeRunner(lambda argv: (0, "INFO: No tasks are running which match the specified criteria.\r\n"))
+    obs = make(tmp_path, platform="win32", runner=runner, session_id=lambda: 3)
+
+    assert not obs.is_running()
+    assert runner.ran == [("tasklist", "/FI", "IMAGENAME eq obs64.exe", "/FI", "SESSION eq 3", "/FO", "CSV", "/NH")]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="off Windows only")
+def test_there_is_no_session_id_off_windows():
+    assert discovery.windows_session_id() is None
 
 
 @pytest.mark.parametrize("answer", [(0, "INFO: No tasks are running which match the specified criteria.\r\n"), (0, "")])

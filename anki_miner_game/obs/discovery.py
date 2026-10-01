@@ -17,7 +17,8 @@
   start. Sets ``server_enabled``, keeps every other key, and adds a password only when auth is
   required and none exists. A missing file is created that way.
 - ``is_running``: an ``obs`` process of this user in ``/proc`` (native and Flatpak alike), or
-  ``obs64.exe`` in ``tasklist`` on Windows; ``True`` when the process list cannot be read.
+  ``obs64.exe`` of this Windows session in ``tasklist`` on Windows; ``True`` when the process list
+  cannot be read.
 - ``launch``: the install's command plus ``--minimize-to-tray``, detached, in the folder it needs;
   nothing while OBS already runs.
 - ``wait_ready``: ready once ``GetVersion`` succeeds on a fresh connection. Until OBS has loaded,
@@ -237,6 +238,21 @@ def read_registry_value(key: str, name: str, view: str) -> str | None:
     return value if kind == winreg.REG_SZ else None
 
 
+def windows_session_id() -> int | None:
+    """This process's Windows session (``ProcessIdToSessionId``); ``None`` off Windows or when it cannot be read."""
+    if sys.platform != "win32":
+        return None
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    session = wintypes.DWORD()
+    if not kernel32.ProcessIdToSessionId(kernel32.GetCurrentProcessId(), ctypes.byref(session)):
+        log.warning("cannot read this process's session id (error %s)", ctypes.get_last_error())
+        return None
+    return int(session.value)
+
+
 class LocalObsDiscovery:
     """``ObsDiscovery`` for the OBS installed on this machine (spec 11.1).
 
@@ -244,7 +260,8 @@ class LocalObsDiscovery:
     on a worker thread.
     Everything else is injected for tests: ``platform`` (``sys.platform``), ``which`` (``PATH``
     lookup), ``registry`` (Windows install folder), ``runner`` (``flatpak``, ``tasklist``, starting
-    OBS), ``proc_root`` (Linux process table), ``probe`` (one ``GetVersion``), ``now`` and ``sleep``.
+    OBS), ``proc_root`` (Linux process table), ``probe`` (one ``GetVersion``), ``now``, ``sleep`` and
+    ``session_id`` (Windows session filter).
     """
 
     def __init__(
@@ -259,6 +276,7 @@ class LocalObsDiscovery:
         probe: Probe = get_version_succeeds,
         now: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        session_id: Callable[[], int | None] = windows_session_id,
     ) -> None:
         self._config = config
         self._windows = platform == "win32"
@@ -269,6 +287,7 @@ class LocalObsDiscovery:
         self._probe = probe
         self._now = now
         self._sleep = sleep
+        self._session_id = session_id
         self._install: ObsInstall | None = None
 
     # --- install and config root -----------------------------------------------------------
@@ -404,7 +423,11 @@ class LocalObsDiscovery:
         writing, or ``launch`` would start a second OBS.
         """
         if self._windows:
-            code, out = self._runner.run(TASKLIST)
+            argv = list(TASKLIST)
+            session = self._session_id()
+            if session is not None:
+                argv[3:3] = ["/FI", f"SESSION eq {session}"]  # another user's OBS has its own config (B2-04)
+            code, out = self._runner.run(argv)
             if code != 0:
                 log.warning("tasklist failed (exit code %s); assuming OBS runs", code)
                 return True
