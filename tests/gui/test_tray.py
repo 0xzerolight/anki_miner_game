@@ -152,7 +152,7 @@ def test_the_icon_follows_the_state(rig):
 
 
 @pytest.mark.parametrize("state", list(AppState))
-def test_the_state_dot_sits_on_the_app_icon(state):
+def test_the_state_dot_sits_on_the_app_icon(qapp, state):
     image = state_icon(state, app_icon()).pixmap(32, 32).toImage()
     assert image.pixelColor(25, 25) == QColor(colours.STATE_COLOUR[state])  # the dot, lower right
     assert image.pixelColor(8, 8).alpha() > 0  # the app icon under it
