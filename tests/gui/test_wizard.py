@@ -29,6 +29,7 @@ from anki_miner_game.models.addons import AddonStatus
 from anki_miner_game.models.config import DEFAULT_TEXT_SOURCES, AppConfig, TextSourceConfig
 from anki_miner_game.models.messages import SourceStatus
 from anki_miner_game.obs.provision import ObsProvisioner
+from anki_miner_game.obs.startup import LocalObsStarter
 from tests.gui.wizard_fakes import FakeDiscovery, WizardObs
 from tests.obs.fake_obs import Sleeps
 
@@ -347,7 +348,9 @@ def test_obs_errors_are_plain_text_not_markup(qtbot, io_loop):
 
 def test_the_real_obs_step_runs_on_the_io_loop_and_returns_obs_to_the_users_names(qtbot, io_loop):
     obs = WizardObs()
-    setup = ObsSetup(FakeDiscovery(), obs, ObsProvisioner(obs, platform="linux", sleep=Sleeps()))
+    discovery = FakeDiscovery()
+    provisioner = ObsProvisioner(obs, platform="linux", sleep=Sleeps())
+    setup = ObsSetup(discovery, obs, provisioner, starter=LocalObsStarter(discovery, obs))
     h = Harness(qtbot, io_loop, obs=setup)
     h.wizard.obs_page.button.click()
     qtbot.waitUntil(h.next_enabled, timeout=10_000)

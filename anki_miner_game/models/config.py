@@ -74,8 +74,10 @@ class AppConfig:
     obs: ObsSettings = field(default_factory=ObsSettings)
     text_sources: tuple[TextSourceConfig, ...] = DEFAULT_TEXT_SOURCES
     feed: FeedSettings = field(default_factory=FeedSettings)
-    hotkey: str = "Ctrl+Shift+F9"
-    """Windows only (spec 16)."""
+    hotkey: str = "Alt+F9"
+    """Windows only (spec 16). ``Ctrl+Shift+F9`` (the default before D-02) let the game see a held Ctrl,
+    which visual-novel engines read as force-skip; configs holding exactly that chord migrate on load
+    (``App._load_settings``)."""
     recording: RecordingSettings = field(default_factory=RecordingSettings)
     cue: CueSettings = field(default_factory=CueSettings)
     vad: VadSettings = field(default_factory=VadSettings)

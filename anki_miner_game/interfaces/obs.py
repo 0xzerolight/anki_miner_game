@@ -1,4 +1,4 @@
-"""OBS Protocols: gateway, discovery, provisioning and recorder (spec 11)."""
+"""OBS Protocols: gateway, discovery, the start-OBS sequence, provisioning and recorder (spec 11)."""
 
 from collections.abc import Callable
 from pathlib import Path
@@ -6,7 +6,15 @@ from typing import Any, Protocol
 
 from anki_miner_game.models.config import AppConfig
 from anki_miner_game.models.messages import ObsEvent
-from anki_miner_game.models.obs import ObsCredentials, ObsInfo, ObsInstall, ProvisionResult, WindowItem, WsConfig
+from anki_miner_game.models.obs import (
+    ObsCredentials,
+    ObsInfo,
+    ObsInstall,
+    ObsStartStage,
+    ProvisionResult,
+    WindowItem,
+    WsConfig,
+)
 from anki_miner_game.models.profile import GameProfile
 
 
@@ -114,6 +122,32 @@ class ObsDiscovery(Protocol):
         websocket ``config.json`` is missing or unreadable and
         ``cfg.obs.port`` is ``None``. With a port override and no readable
         file, the password is ``cfg.obs.password_override`` (possibly ``None``).
+        """
+        ...
+
+
+class ObsStarter(Protocol):
+    """Gets the user's OBS running and the gateway connected (spec 11.1, 17).
+
+    The one start-OBS sequence (D-03) shared by the session actor (arm, and start since D-04), the
+    wizard's OBS step and the game dialog's window list. The implementation takes the ``ObsDiscovery``
+    and ``ObsGateway`` it drives and a launch timeout (30 s).
+    """
+
+    async def start(self, report: Callable[[ObsStartStage], None] | None = None) -> ObsInfo:
+        """When OBS is not running (``ObsDiscovery.is_running``): turn its WebSocket server on
+        (``ensure_server_enabled``), launch it minimised and wait up to the timeout for it to answer;
+        then ``ObsGateway.connect()`` (which only answers again while connected).
+
+        ``report(stage)`` is called on the caller's thread as each stage begins: ``ENABLING_SERVER``
+        and ``LAUNCHING`` only when OBS was not running (a caller that heard neither knows OBS was
+        already running), ``CONNECTING`` always.
+
+        Raises ``ObsServerOffError`` when OBS was not running but the server could not be turned on
+        because OBS started meanwhile; ``ObsNotReadyError`` when a launched OBS did not answer within
+        the timeout; ``ObsConnectError`` when no install is found or OBS cannot be started; and what
+        ``ObsGateway.connect`` raises (``ObsAuthError``, ``ObsConfigError``, ``ObsUnsupportedError``,
+        ``ObsConnectError``, ``ObsRequestError``).
         """
         ...
 

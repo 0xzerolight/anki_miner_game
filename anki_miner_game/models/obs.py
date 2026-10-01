@@ -119,6 +119,17 @@ class WindowItem:
     """
 
 
+class ObsStartStage(StrEnum):
+    """What ``ObsStarter.start`` is doing, for a caller that shows progress."""
+
+    ENABLING_SERVER = "enabling_server"
+    """OBS is closed: turning its WebSocket server on in its config."""
+    LAUNCHING = "launching"
+    """Starting OBS minimised and waiting for it to answer (up to the starter's timeout, 30 s)."""
+    CONNECTING = "connecting"
+    """Connecting the gateway (an answer at once when it is connected already)."""
+
+
 @dataclass(frozen=True)
 class ProvisionResult:
     changed: bool
@@ -143,6 +154,15 @@ class ObsAuthError(ObsConnectError):
 
 class ObsConfigError(ObsConnectError):
     """OBS's websocket ``config.json`` is missing or unreadable, so the port to connect to is unknown."""
+
+
+class ObsNotReadyError(ObsConnectError):
+    """A launched OBS did not answer ``GetVersion`` within the timeout; an OBS dialog (such as
+    "OBS Studio Crash Detected") may be waiting."""
+
+
+class ObsServerOffError(ObsConnectError):
+    """OBS is running with its WebSocket server off; the app can turn the server on only while OBS is closed."""
 
 
 class ObsRequestError(ObsError):

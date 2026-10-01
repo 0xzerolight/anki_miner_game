@@ -9,8 +9,9 @@ the main thread, and every accepted line also goes to the text feed (spec 8.2, 1
 wizard hand their coroutines to the loop through ``IoThread.submit``.
 
 Launch (spec 17 "Unclean previous exit"): the actor itself restores ``obs_restore.json`` and
-finalises orphans once reconcile allows it (``SessionActor._launch``), on the one
-``FinaliseWorker`` built here; nothing else finalises. The window lists the recent sessions before
+finalises orphans once reconcile allows it (``SessionActor._launch``), on the one ``FinaliseWorker``
+built here; nothing else finalises. Settings that hold the old default hotkey ``Ctrl+Shift+F9``
+exactly move to the new default (D-02) and are saved. The window lists the recent sessions before
 the actor runs, so VAD passes a quit or a crash interrupted go to ``VadJobs.rerun`` before any
 finalise queues a new one. The settings file is written with the defaults when there is none, and
 the setup wizard opens; one that cannot be read is left alone and the defaults run with a banner.
@@ -19,6 +20,7 @@ A feed port in use turns the feed off with a banner (spec 17).
 OBS: one ``CapturePicker`` and one ``ObsSetup`` per app, since each subscribes to the gateway, which
 has no unsubscribe. They share one ``asyncio.Lock`` with the actor: arming, the restore, the
 picker's idle listing and wizard step 1 each hold it while they switch OBS's profile or collection.
+Both start OBS through one ``LocalObsStarter`` (D-03), the sequence the actor runs too.
 
 Saving: a profile saved in its dialog goes to disk and into the profiles the actor and auto mode
 look up (``_profile_for``, no disk read on the loop); settings saved in their dialog or by the
@@ -82,6 +84,7 @@ from anki_miner_game.obs.client import ObsClient
 from anki_miner_game.obs.discovery import LocalObsDiscovery
 from anki_miner_game.obs.provision import ObsProvisioner
 from anki_miner_game.obs.recorder import ObsRecorder
+from anki_miner_game.obs.startup import LocalObsStarter
 from anki_miner_game.runtime.child_env import child_environ
 from anki_miner_game.runtime.io_thread import IoThread
 from anki_miner_game.session.naming import slugify
@@ -98,6 +101,8 @@ CONFIG_BANNER_KEY: Final = "config"
 PROFILES_BANNER_KEY: Final = "profiles"
 PROFILE_SAVE_BANNER_KEY: Final = "profile_save"
 HOTKEY_BANNER_KEY: Final = "hotkey"
+OLD_DEFAULT_HOTKEY: Final = "Ctrl+Shift+F9"
+"""The default before D-02; a config holding exactly this chord moves to ``AppConfig().hotkey`` on load."""
 SHUTDOWN_TIMEOUT_S: Final = 120.0
 """``close`` waits this long for the quit; the actor's own worst case is about 40 s
 (``SessionActor.shutdown``)."""
@@ -358,6 +363,8 @@ class App(QObject):
                 except store.StoreError as exc:
                     log.warning("default settings not written: %s", exc)
                     banners.append(Banner(CONFIG_BANNER_KEY, BannerLevel.WARNING, f"Settings cannot be saved: {exc}"))
+            else:
+                self._migrate_hotkey()
         loaded = store.load_profiles()
         self._profiles = MappingProxyType(dict(loaded.profiles))
         if loaded.errors:
@@ -372,6 +379,23 @@ class App(QObject):
                 )
             )
         return banners
+
+    def _migrate_hotkey(self) -> None:
+        """D-02: the old default ``Ctrl+Shift+F9`` let the game see a held Ctrl, which visual-novel
+        engines read as force-skip. Settings holding exactly that chord take the new default and are
+        saved; any other chord is the user's own and stays. Not saved: this run still uses the new one."""
+        if self._config.hotkey != OLD_DEFAULT_HOTKEY:
+            return
+        new = AppConfig().hotkey
+        self._config = replace(self._config, hotkey=new)
+        try:
+            store.save_config(self._config)
+        except store.StoreError as exc:
+            log.warning(
+                "hotkey %s migrated to %s for this run only; settings not saved: %s", OLD_DEFAULT_HOTKEY, new, exc
+            )
+            return
+        log.info("hotkey %s migrated to %s", OLD_DEFAULT_HOTKEY, new)
 
     def _profile_for(self, slug: str) -> GameProfile | None:
         """Runs on the I/O loop: a lookup over the profiles already loaded, never the disk."""
@@ -405,9 +429,15 @@ class App(QObject):
         auto = AutoMode(actor, self._profile_for, services.provisioner.list_windows)  # before any StateChanged
         actor.subscribe(lambda event: forward(self.presenter, event))
         actor.subscribe(self._broadcast)
-        picker = CapturePicker(services.gateway, services.provisioner, actor, obs_lock=obs_lock)
+        starter = LocalObsStarter(services.discovery, services.gateway)
+        picker = CapturePicker(services.gateway, services.provisioner, actor, starter=starter, obs_lock=obs_lock)
         obs_setup = ObsSetup(
-            services.discovery, services.gateway, services.provisioner, session=actor, obs_lock=obs_lock
+            services.discovery,
+            services.gateway,
+            services.provisioner,
+            starter=starter,
+            session=actor,
+            obs_lock=obs_lock,
         )
         self._running = _Running(services, finaliser, actor, auto, picker, obs_setup)
         return actor

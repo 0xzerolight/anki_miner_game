@@ -31,6 +31,7 @@ from anki_miner_game.models.obs import (
     WsConfig,
 )
 from anki_miner_game.obs.provision import ObsProvisioner
+from anki_miner_game.obs.startup import LocalObsStarter
 from tests.gui.wizard_fakes import FakeDiscovery, FakeSession, WizardObs
 from tests.obs.fake_obs import Sleeps
 
@@ -58,7 +59,8 @@ def make_setup(
             return result
 
         provisioner.ensure_collection = then  # type: ignore[method-assign]
-    return ObsSetup(discovery, obs, provisioner, **kwargs), discovery
+    starter = LocalObsStarter(discovery, obs)
+    return ObsSetup(discovery, obs, provisioner, starter=starter, **kwargs), discovery
 
 
 async def until(condition: Callable[[], bool], timeout_s: float = 5.0) -> None:
@@ -117,8 +119,9 @@ async def test_a_missing_websocket_config_with_obs_closed_is_created_by_turning_
 async def test_obs_closed_with_the_server_on_is_launched_without_touching_the_file():
     obs = WizardObs()
     setup, discovery = make_setup(obs, FakeDiscovery(running=False))
+    before = discovery.ws
     assert (await setup.run(AppConfig())).status is ObsStatus.READY
-    assert "ensure_server_enabled" not in discovery.calls
+    assert discovery.ws == before  # the starter asks to turn the server on; an enabled one stays as it is
     assert "launch" in discovery.calls
 
 
@@ -264,7 +267,8 @@ async def test_ensure_profile_runs_while_the_users_profile_is_current():
         return await original(cfg)
 
     provisioner.ensure_profile = spy
-    setup = ObsSetup(FakeDiscovery(), obs, provisioner)
+    discovery = FakeDiscovery()
+    setup = ObsSetup(discovery, obs, provisioner, starter=LocalObsStarter(discovery, obs))
     assert (await setup.run(AppConfig())).status is ObsStatus.READY
     assert seen == [(USER, USER)]
 

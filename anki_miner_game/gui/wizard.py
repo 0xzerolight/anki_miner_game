@@ -1,12 +1,13 @@
 """First-run wizard (spec 16): OBS, text sources, output folder, optional add-ons.
 
-Step 1 (``ObsSetup``) finds OBS, turns its websocket server on or says how to, launches OBS, connects,
-checks that no output is active (spec 6.2 step 1), reads the user's profile and scene collection
-names, provisions the app's profile and collection while the user's profile is still current (so
-``ensure_profile`` copies its audio values and re-activates the app's profile itself, spec 11.3), and
-then switches OBS back to the user's names through ``ObsGateway``. Each switch back is done on its
-``...Changed`` event, never on the answer, and skipped when its target is already current
-(``docs/m0/obs-behaviour.md`` items 4-5). The app never restarts OBS; ``needs_restart`` is text.
+Step 1 (``ObsSetup``) finds OBS, says how to turn its websocket server on while OBS runs with it off,
+has the shared ``ObsStarter`` turn it on, launch OBS and connect (D-03), checks that no output is
+active (spec 6.2 step 1), reads the user's profile and scene collection names, provisions the app's
+profile and collection while the user's profile is still current (so ``ensure_profile`` copies its
+audio values and re-activates the app's profile itself, spec 11.3), and then switches OBS back to the
+user's names through ``ObsGateway``. Each switch back is done on its ``...Changed`` event, never on
+the answer, and skipped when its target is already current (``docs/m0/obs-behaviour.md`` items 4-5).
+The app never restarts OBS; ``needs_restart`` is text.
 
 The GUI reaches the rest of the app only through ``interfaces``: coroutines go to the I/O loop
 through the injected ``run``, whose futures complete there, and every result comes back to the Qt
@@ -43,7 +44,7 @@ from PyQt6.QtWidgets import (
 )
 
 from anki_miner_game.interfaces.addons import AddonService
-from anki_miner_game.interfaces.obs import ObsDiscovery, ObsGateway, Provisioner
+from anki_miner_game.interfaces.obs import ObsDiscovery, ObsGateway, ObsStarter, Provisioner
 from anki_miner_game.interfaces.session import SessionControl
 from anki_miner_game.interfaces.text_source import TextSource
 from anki_miner_game.models.addons import AddonStatus
@@ -55,7 +56,10 @@ from anki_miner_game.models.obs import (
     ObsError,
     ObsEventName,
     ObsInfo,
+    ObsNotReadyError,
     ObsRequestError,
+    ObsServerOffError,
+    ObsStartStage,
     ObsUnsupportedError,
     ProvisionResult,
 )
@@ -65,7 +69,8 @@ log = logging.getLogger(__name__)
 
 OBS_DOWNLOAD_URL: Final = "https://obsproject.com/download"
 OBS_LAUNCH_TIMEOUT_S: Final = 30.0
-"""How long a launched OBS gets to answer ``GetVersion`` (spec 11.1, 17)."""
+"""How long a launched OBS gets to answer ``GetVersion`` (spec 11.1, 17): the app's ``ObsStarter`` waits
+this long; the wizard names it when OBS did not answer."""
 SWITCH_TIMEOUT_S: Final = 15.0
 """How long one switch back may take before the wizard gives up on it (spec 6.2 step 3)."""
 NOT_AVAILABLE: Final = 604
@@ -136,6 +141,23 @@ class ObsCheck:
     """Warnings shown under the text: ``needs_restart``, a switch back that did not happen."""
 
 
+_STAGE_TEXT: Final = {
+    ObsStartStage.ENABLING_SERVER: "Turning on OBS's WebSocket server…",
+    ObsStartStage.LAUNCHING: "Starting OBS…",
+    ObsStartStage.CONNECTING: "Connecting to OBS…",
+}
+"""What step 1 says while the starter runs (spec 16: the page shows each stage)."""
+
+
+def _server_off() -> ObsCheck:
+    return ObsCheck(
+        ObsStatus.SERVER_OFF,
+        "OBS's websocket server is off. In OBS, tick Tools -> WebSocket Server Settings -> "
+        "Enable WebSocket server and press OK, then press Fix. Or close OBS and press Fix: "
+        "the app turns it on.",
+    )
+
+
 @dataclass(frozen=True)
 class _Switch:
     what: str
@@ -181,12 +203,14 @@ class _Waiter:
 class ObsSetup:
     """Wizard step 1 (spec 16): runs on the I/O loop; every run starts again from the top.
 
-    ``session`` (optional) is asked for its state: while a game is armed or recording the step
-    touches nothing. The user's profile and collection names are remembered across runs, so a run
-    after a switch back that failed still returns to them rather than to the app's names.
-    Subscribes to ``gateway`` once, at the first run; the handler only wakes a switch waiting for
-    that event. A run holds ``obs_lock``, which the session actor takes to arm and to restore OBS,
-    from start to end and asks for the state again once it has it; its own lock when ``None``.
+    ``starter`` is the app's one start-OBS sequence (D-03): it turns the websocket server on while OBS
+    is closed, launches OBS and connects. ``session`` (optional) is asked for its state: while a game
+    is armed or recording the step touches nothing. The user's profile and collection names are
+    remembered across runs, so a run after a switch back that failed still returns to them rather than
+    to the app's names. Subscribes to ``gateway`` once, at the first run; the handler only wakes a
+    switch waiting for that event. A run holds ``obs_lock``, which the session actor takes to arm and to
+    restore OBS, from start to end and asks for the state again once it has it; its own lock when
+    ``None``.
     """
 
     def __init__(
@@ -195,16 +219,16 @@ class ObsSetup:
         gateway: ObsGateway,
         provisioner: Provisioner,
         *,
+        starter: ObsStarter,
         session: SessionControl | None = None,
-        launch_timeout_s: float = OBS_LAUNCH_TIMEOUT_S,
         switch_timeout_s: float = SWITCH_TIMEOUT_S,
         obs_lock: asyncio.Lock | None = None,
     ) -> None:
         self._discovery = discovery
         self._gateway = gateway
         self._provisioner = provisioner
+        self._starter = starter
         self._session = session
-        self._launch_timeout_s = launch_timeout_s
         self._switch_timeout_s = switch_timeout_s
         self._obs_lock = obs_lock if obs_lock is not None else asyncio.Lock()
         self._home: dict[_Switch, str] = {}
@@ -237,11 +261,17 @@ class ObsSetup:
                 f"OBS Studio is not installed. Install it from {OBS_DOWNLOAD_URL}, then check again.",
             )
         try:
-            blocked = await self._start_obs(report)
-            if blocked is not None:
-                return blocked
-            report("Connecting to OBS…")
-            info = await self._gateway.connect()
+            if await self._server_off_while_running():
+                return _server_off()
+            info = await self._starter.start(lambda stage: report(_STAGE_TEXT[stage]))
+        except ObsServerOffError:  # OBS started while the server was being turned on
+            return _server_off()
+        except ObsNotReadyError:
+            return ObsCheck(
+                ObsStatus.NOT_READY,
+                f"OBS did not answer within {OBS_LAUNCH_TIMEOUT_S:g} s. If OBS shows a dialog "
+                '(such as "OBS Studio Crash Detected"), answer it, then check again.',
+            )
         except ObsAuthError:
             return ObsCheck(
                 ObsStatus.AUTH_FAILED,
@@ -266,32 +296,12 @@ class ObsSetup:
             )
         return await self._provision(cfg, info, report)
 
-    async def _start_obs(self, report: Callable[[str], None]) -> ObsCheck | None:
-        """Websocket server on and OBS running and ready (spec 11.1 steps 2-3); a check when blocked."""
+    async def _server_off_while_running(self) -> bool:
+        """Spec 11.1 step 3: the app may turn the websocket server on only while OBS is closed."""
         ws = await asyncio.to_thread(self._discovery.read_ws_config)
-        running = await asyncio.to_thread(self._discovery.is_running)
-        if ws is None or not ws.server_enabled:
-            off = ObsCheck(
-                ObsStatus.SERVER_OFF,
-                "OBS's websocket server is off. In OBS, tick Tools -> WebSocket Server Settings -> "
-                "Enable WebSocket server and press OK, then press Fix. Or close OBS and press Fix: "
-                "the app turns it on.",
-            )
-            if running:
-                return off
-            report("Turning on OBS's websocket server…")
-            if not await asyncio.to_thread(self._discovery.ensure_server_enabled):
-                return off  # OBS started meanwhile
-        if not running:
-            report("Starting OBS…")
-            await asyncio.to_thread(self._discovery.launch)
-            if not await self._discovery.wait_ready(self._launch_timeout_s):
-                return ObsCheck(
-                    ObsStatus.NOT_READY,
-                    f"OBS did not answer within {self._launch_timeout_s:g} s. If OBS shows a dialog "
-                    '(such as "OBS Studio Crash Detected"), answer it, then check again.',
-                )
-        return None
+        if ws is not None and ws.server_enabled:
+            return False
+        return await asyncio.to_thread(self._discovery.is_running)
 
     async def _active_outputs(self) -> list[str]:
         active: list[str] = []

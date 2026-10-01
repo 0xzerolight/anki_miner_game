@@ -35,8 +35,9 @@ ERROR_ACCESS_DENIED = 5
 ERROR_HOTKEY_ALREADY_REGISTERED = 1409
 
 
-def test_default_config_hotkey_is_ctrl_shift_f9() -> None:
-    assert parse_hotkey(AppConfig().hotkey) == Hotkey(modifiers=MOD_CONTROL | MOD_SHIFT, vk=VK_F9)
+def test_default_config_hotkey_is_alt_f9() -> None:
+    """D-02: no Ctrl, which visual-novel engines read as force-skip while it is held."""
+    assert parse_hotkey(AppConfig().hotkey) == Hotkey(modifiers=MOD_ALT, vk=VK_F9)
 
 
 @pytest.mark.parametrize("text", [" ctrl + shift + f9 ", "SHIFT+CTRL+F9", "Control+Shift+F9", "F9+Shift+Ctrl"])

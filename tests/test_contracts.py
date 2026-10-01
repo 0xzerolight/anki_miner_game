@@ -58,6 +58,7 @@ SECTION_4_NAMES = {
     ],
     "anki_miner_game.models.pipeline": ["DropReason", "DROP_COUNTER", "Accepted", "Replaced", "Dropped"],
     "anki_miner_game.models.messages": [
+        "STOP_FAILED_BANNER_KEY",
         "LineReceived",
         "ObsEvent",
         "UserCommand",
@@ -79,10 +80,13 @@ SECTION_4_NAMES = {
         "WsConfig",
         "WindowItem",
         "ProvisionResult",
+        "ObsStartStage",
+        "ObsNotReadyError",
+        "ObsServerOffError",
     ],
     "anki_miner_game.interfaces.text_source": ["TextSource"],
     "anki_miner_game.interfaces.record_clock": ["RecordClock"],
-    "anki_miner_game.interfaces.obs": ["ObsGateway", "ObsDiscovery", "Provisioner", "Recorder"],
+    "anki_miner_game.interfaces.obs": ["ObsGateway", "ObsDiscovery", "ObsStarter", "Provisioner", "Recorder"],
     "anki_miner_game.interfaces.presenter": ["Presenter"],
     "anki_miner_game.interfaces.session": ["SessionControl"],
     "anki_miner_game.interfaces.addons": ["AddonService", "VadJobs", "OcrAreaPicker"],
@@ -141,6 +145,7 @@ PROTOCOL_MEMBERS = {
         "list_windows": coro(),
         "capture_method": coro("profile"),
     },
+    ("anki_miner_game.interfaces.obs", "ObsStarter"): {"start": coro("report")},
     ("anki_miner_game.interfaces.obs", "Recorder"): {"start": coro(), "stop": coro()},
     ("anki_miner_game.interfaces.presenter", "Presenter"): {
         "state_changed": sync("state", "slug"),
@@ -278,6 +283,22 @@ def test_text_sources_are_started_on_the_actors_thread_and_awaited_after_stop():
     doc = TextSource.__doc__ or ""
     assert "actor" in doc and "thread" in doc
     assert "stop" in (TextSource.wait_closed.__doc__ or "")
+
+
+def test_the_local_obs_starter_is_an_obs_starter():
+    from anki_miner_game.interfaces.obs import ObsStarter
+    from anki_miner_game.obs.startup import LocalObsStarter
+
+    _assert_conforms(ObsStarter, LocalObsStarter)
+
+
+def test_obs_starter_documents_its_stages_and_what_it_raises():
+    """D-03: the actor, the wizard and the picker map these to their own texts."""
+    from anki_miner_game.interfaces.obs import ObsStarter
+
+    doc = ObsStarter.start.__doc__ or ""
+    for word in ("ENABLING_SERVER", "LAUNCHING", "CONNECTING", "ObsServerOffError", "ObsNotReadyError", "ObsAuthError"):
+        assert word in doc, word
 
 
 def test_list_windows_names_the_input_it_reads():

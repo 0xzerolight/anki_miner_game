@@ -1,6 +1,6 @@
 """The global Start/Stop hotkey on Windows (spec 16).
 
-``parse_hotkey`` turns the config string (``AppConfig.hotkey``, default ``Ctrl+Shift+F9``) into
+``parse_hotkey`` turns the config string (``AppConfig.hotkey``, default ``Alt+F9``) into
 ``RegisterHotKey`` modifier flags and a virtual-key code; it is pure and runs on every platform.
 Key names follow ``QKeySequence``'s portable text (``Ctrl``, ``Shift``, ``Alt``, ``Meta``, ``F9``,
 ``PgDown``, ...), so a string from a key-sequence editor parses as it reads.
@@ -95,7 +95,7 @@ class Hotkey:
 
 
 def parse_hotkey(text: str) -> Hotkey:
-    """``Ctrl+Shift+F9`` -> ``Hotkey``: parts split on ``+``, any case, spaces and order.
+    """``Alt+F9`` -> ``Hotkey``: parts split on ``+``, any case, spaces and order.
 
     Exactly one key and at least one modifier: a bare key would be taken from every other program.
     """

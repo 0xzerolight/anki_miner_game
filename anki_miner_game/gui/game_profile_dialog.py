@@ -57,7 +57,7 @@ from PyQt6.QtWidgets import (
 )
 
 from anki_miner_game.interfaces.addons import AddonService, OcrAreaPicker
-from anki_miner_game.interfaces.obs import ObsGateway, Provisioner
+from anki_miner_game.interfaces.obs import ObsGateway, ObsStarter, Provisioner
 from anki_miner_game.interfaces.session import SessionControl
 from anki_miner_game.models.addons import AddonStatus
 from anki_miner_game.models.config import TextSourceConfig
@@ -117,7 +117,8 @@ class CapturePicker:
 
     Built once by the composition, since it subscribes to the gateway for the collection-changed
     event. Its coroutines run on the I/O loop. ``obs_lock`` is the one the session actor holds while
-    it arms or restores OBS; its own when ``None``.
+    it arms or restores OBS; its own when ``None``. ``starter`` is the app's one start-OBS sequence
+    (D-03), which the window list uses to start OBS when it is not running.
     """
 
     def __init__(
@@ -126,12 +127,14 @@ class CapturePicker:
         provisioner: Provisioner,
         session: SessionControl,
         *,
+        starter: ObsStarter,
         switch_timeout_s: float = SWITCH_TIMEOUT_S,
         obs_lock: asyncio.Lock | None = None,
     ) -> None:
         self._gateway = gateway
         self._provisioner = provisioner
         self._session = session
+        self._starter = starter
         self._switch_timeout_s = switch_timeout_s
         self._obs_lock = obs_lock if obs_lock is not None else asyncio.Lock()
         self._waiting: tuple[asyncio.AbstractEventLoop, asyncio.Future[None], str] | None = None

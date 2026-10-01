@@ -21,7 +21,7 @@ def test_spec_defaults():
     assert cfg.output_root == "~/Videos/Anki Miner Game"
     assert cfg.obs == ObsSettings(host="127.0.0.1", port=None, password_override=None)
     assert cfg.feed == FeedSettings(enabled=True, ws_port=6678, http_port=6679)
-    assert cfg.hotkey == "Ctrl+Shift+F9"
+    assert cfg.hotkey == "Alt+F9"  # D-02: no Ctrl, which visual-novel engines read as force-skip
     assert cfg.recording == RecordingSettings(max_height=1080, fps=30)
     assert cfg.cue == CueSettings(max_cue_seconds=15, end_gap_ms=350)
     assert cfg.vad == VadSettings(enabled=True)
