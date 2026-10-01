@@ -46,7 +46,14 @@ from PyQt6.QtWidgets import (
 
 from anki_miner_game.gui.hotkey_win import HotkeyError, parse_hotkey
 from anki_miner_game.gui.strings import SET_UP_OBS, install_elsewhere_text, size_mb
-from anki_miner_game.gui.widgets.layout import clear_on_edit, error_label, fit_dialog, message_label, show_message
+from anki_miner_game.gui.widgets.layout import (
+    available_size,
+    clear_on_edit,
+    error_label,
+    fit_dialog,
+    message_label,
+    show_message,
+)
 from anki_miner_game.gui.wizard import WizardStep, native_path
 from anki_miner_game.interfaces.addons import AddonService
 from anki_miner_game.models.addons import AddonStatus
@@ -276,6 +283,11 @@ class SettingsDialog(QDialog):
         self.refresh_addons()
         clear_on_edit(self.problems_label, self)  # UJ-31: a stale "Cannot save" goes at the next edit
         fit_dialog(self, scroll=self._scroll, forms=self._forms)
+        # That first call widened the label column after the groups had measured themselves: let each group
+        # measure again and fit once more, so nothing opens squeezed under its minimum.
+        for form in self._forms:
+            form.activate()
+        fit_dialog(self, scroll=self._scroll, forms=self._forms)
 
     # Building -------------------------------------------------------------------------------
 
@@ -284,6 +296,10 @@ class SettingsDialog(QDialog):
         form = self._recordings_form = QFormLayout(box)
         self._shown_root = native_path(cfg.output_root)  # UJ-33: the real folder, not "~/..."
         self.output_edit = QLineEdit(self._shown_root)
+        # fit_dialog sizes to the content's hint, and a line edit's hint ignores its text: make room for the
+        # folder (two characters for the frame), up to half the screen so a long one cannot push past it.
+        wanted = self.output_edit.fontMetrics().horizontalAdvance(f"{self._shown_root}xx")
+        self.output_edit.setMinimumWidth(min(wanted, available_size(self).width() // 2))
         self.browse_button = QPushButton("Browse…")
         self.browse_button.clicked.connect(self._browse)
         row = QHBoxLayout()

@@ -181,6 +181,32 @@ def test_the_dialog_fits_the_screen_without_a_horizontal_scroll_bar(qtbot) -> No
     assert dialog.height() <= screen.height()
 
 
+def test_the_folder_field_shows_the_whole_folder(qtbot) -> None:
+    """``fit_dialog`` sizes the dialog to its content's hint, and a line edit's hint ignores its text."""
+    dialog = open_dialog(qtbot, replace(CUSTOM, output_root="/data/Game Sessions/Visual novels"))
+    dialog.show()
+    edit = dialog.output_edit
+    assert edit.width() > edit.fontMetrics().horizontalAdvance(edit.text())
+
+
+@pytest.mark.parametrize("platform", ["linux", "win32"])
+def test_the_dialog_opens_wide_enough_for_its_content(qtbot, platform: str) -> None:
+    """Nothing is squeezed under its minimum: the aligned label column counts when the dialog is sized."""
+    dialog = open_dialog(qtbot, replace(CUSTOM, output_root="/data/Game Sessions/Visual novels"), platform=platform)
+    dialog.show()
+    scroll = dialog.findChild(QScrollArea)
+    assert scroll is not None and scroll.widget() is not None
+    assert scroll.viewport().width() >= scroll.widget().minimumSizeHint().width()
+    dialog.advanced_button.click()
+    qtbot.waitUntil(lambda: scroll.viewport().width() >= scroll.widget().minimumSizeHint().width(), timeout=1000)
+
+
+def test_a_very_long_folder_still_fits_the_screen(qtbot) -> None:
+    dialog = open_dialog(qtbot, replace(CUSTOM, output_root="/data/" + "Game Sessions/" * 30))
+    dialog.show()
+    assert dialog.width() <= available_size(dialog).width()
+
+
 def test_the_labels_use_the_glossary(qtbot) -> None:
     dialog = open_dialog(qtbot, platform="win32")
     labels = {label.text() for label in dialog.findChildren(QLabel)}
