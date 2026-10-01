@@ -1,32 +1,38 @@
-"""The hand-off text shown after a session (spec 16, Appendix C)."""
+"""The hand-off shown after a session (spec 16, Appendix C as amended by UJ-08)."""
 
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from PyQt6.QtCore import QUrl
+from PyQt6.QtCore import QDir, QMargins, QUrl
 
 from anki_miner_game.gui.widgets.handoff import HandoffPanel, handoff_text
-from anki_miner_game.gui.widgets.recent_sessions import SessionRow
+from anki_miner_game.gui.widgets.recent_sessions import SessionRow, read_session
 from anki_miner_game.models.manifest import FilesRecord, ManifestState
-from tests.gui.session_fakes import TITLE, manifest
+from tests.gui.session_fakes import TITLE, manifest, place
 
 PATH = Path("/out") / TITLE / f"{TITLE} - 03.session.json"
-APPENDIX_C = (
-    'Saved "Steins;Gate - 03". To mine it in Anki Miner: Video -> Single, choose the .mkv; the subtitle '
-    "fills in by itself. To mine every session of this game at once: Video -> Batch, and choose this folder "
-    "for both the video and the subtitle folder."
+SINGLE = (
+    'Saved "Steins;Gate - 03". In Anki Miner, choose Video -> Single and pick this video; the subtitle fills in '
+    "by itself."
 )
 
 
-def test_a_placed_session_with_a_subtitle_gets_the_appendix_c_text():
-    assert handoff_text(SessionRow(PATH, manifest())) == APPENDIX_C
+def test_one_session_gets_the_single_video_sentence():
+    assert handoff_text(SessionRow(PATH, manifest())) == SINGLE
+
+
+def test_two_or_more_sessions_add_the_batch_sentence():
+    assert handoff_text(SessionRow(PATH, manifest()), sessions=3) == (
+        f"{SINGLE} To mine all 3 sessions at once: Video -> Batch, with this folder as both the video and the "
+        "subtitle folder."
+    )
 
 
 @pytest.mark.parametrize(
     "m",
     [
-        manifest(cues=()),  # no cues: no subtitle to fill in (the no_cues banner says so)
+        manifest(cues=()),  # no lines: no subtitle to fill in (the no_cues banner says so)
         manifest(state=ManifestState.FINALISE_PENDING),  # not in the game folder yet (its banner says so)
     ],
 )
@@ -47,14 +53,32 @@ def panel(qtbot):
     return widget, opened
 
 
-def test_the_panel_shows_the_text_and_the_folder_and_opens_it(panel):
+def test_the_panel_shows_the_text_and_opens_the_folder_named_in_its_tooltip(panel):
     widget, opened = panel
     assert widget.isHidden()
     widget.show_session(SessionRow(PATH, manifest()))
     assert not widget.isHidden()
-    assert widget.label.text() == f"{APPENDIX_C}\nFolder: {PATH.parent}"
+    assert widget.label.text() == SINGLE  # the path left the text for the button's tooltip
+    assert widget.open_button.text() == "Open folder"
+    assert widget.open_button.toolTip() == QDir.toNativeSeparators(str(PATH.parent))
     widget.open_button.click()
     assert opened == [QUrl.fromLocalFile(str(PATH.parent))]
+
+
+def test_the_panel_counts_the_sessions_in_the_game_folder(panel, tmp_path):
+    widget, _ = panel
+    place(tmp_path, manifest(1))
+    row = read_session(place(tmp_path, manifest(2)))
+    assert row is not None
+    widget.show_session(row)
+    assert widget.label.text().endswith(
+        "To mine all 2 sessions at once: Video -> Batch, with this folder as " "both the video and the subtitle folder."
+    )
+
+
+def test_the_panel_lines_up_with_the_banners(panel):
+    widget, _ = panel
+    assert widget.layout().contentsMargins() == QMargins(6, 4, 4, 4)
 
 
 def test_a_session_without_a_hand_off_hides_the_last_one_and_the_user_can_dismiss_it(panel):
