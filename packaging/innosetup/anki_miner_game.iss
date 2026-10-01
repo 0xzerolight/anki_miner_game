@@ -72,7 +72,7 @@ begin
   if (CurUninstallStep = usPostUninstall) and (not UninstallSilent) then
     MsgBox(
       'Anki Miner Game settings, game profiles and add-ons were kept at ' +
-      '%USERPROFILE%\.anki_miner_game, and your recordings in their output folder. ' +
+      ExpandConstant('{%USERPROFILE}') + '\.anki_miner_game, and your recordings in their output folder. ' +
       'Remove them by hand if you no longer need them.',
       mbInformation,
       MB_OK);

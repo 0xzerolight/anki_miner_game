@@ -369,7 +369,10 @@ def test_the_windows_installer_paths_resolve_from_its_folder():
 
 
 def test_the_windows_uninstaller_says_where_the_user_data_stays():
-    assert "%USERPROFILE%\\.anki_miner_game" in ISS.read_text(encoding="utf-8")
+    """B2-07: Pascal passes a string literal as it is: a literal ``%USERPROFILE%`` reached the user."""
+    code = ISS.read_text(encoding="utf-8").split("[Code]", 1)[1]
+    assert "ExpandConstant('{%USERPROFILE}') + '\\.anki_miner_game" in code
+    assert "%USERPROFILE%" not in code
 
 
 # --- shell scripts ------------------------------------------------------------------------------
