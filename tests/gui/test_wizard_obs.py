@@ -33,6 +33,7 @@ from anki_miner_game.models.obs import (
     ObsUnsupportedError,
     WsConfig,
 )
+from anki_miner_game.obs import startup
 from anki_miner_game.obs.provision import ObsProvisioner
 from anki_miner_game.obs.startup import LocalObsStarter
 from tests.gui.wizard_fakes import FakeDiscovery, FakeSession, WizardObs
@@ -135,6 +136,48 @@ async def test_obs_running_with_the_server_on_is_not_launched_again():
     assert (await setup.run(AppConfig())).status is ObsStatus.READY
     assert "launch" not in discovery.calls
     assert not any(isinstance(c, tuple) for c in discovery.calls)
+
+
+class StartedMeanwhile(FakeDiscovery):
+    """The user starts OBS, with its server off, while the app turns the server on in OBS's config."""
+
+    def ensure_server_enabled(self) -> bool:
+        self.running = True
+        return super().ensure_server_enabled()
+
+
+async def test_obs_started_while_the_server_was_being_turned_on_asks_the_user():
+    obs = WizardObs()
+    off = WsConfig(server_enabled=False, port=4455, password=None, auth_required=True)
+    setup, discovery = make_setup(obs, StartedMeanwhile(ws=off, running=False))
+    check = await setup.run(AppConfig())
+    assert check.status is ObsStatus.SERVER_OFF  # ObsServerOffError, not a connect failure
+    assert check.text.startswith("OBS's WebSocket server is off.")
+    assert "launch" not in discovery.calls and obs.connects == 0
+
+
+async def test_obs_closed_with_the_server_off_says_it_turns_the_server_on():
+    obs = WizardObs()
+    off = WsConfig(server_enabled=False, port=4455, password=None, auth_required=True)
+    setup, _ = make_setup(obs, FakeDiscovery(ws=off, running=False))
+    stages: list[str] = []
+    assert (await setup.run(AppConfig(), stages.append)).status is ObsStatus.READY
+    starting = stages[stages.index("Turning on OBS's WebSocket server…") :]
+    assert starting[:3] == ["Turning on OBS's WebSocket server…", "Starting OBS…", "Connecting to OBS…"]
+
+
+async def test_obs_closed_with_the_server_on_does_not_claim_to_turn_it_on():
+    obs = WizardObs()
+    setup, _ = make_setup(obs, FakeDiscovery(running=False))
+    stages: list[str] = []
+    assert (await setup.run(AppConfig(), stages.append)).status is ObsStatus.READY
+    assert not [stage for stage in stages if stage.startswith("Turning on")]
+    assert stages.index("Starting OBS…") < stages.index("Connecting to OBS…")
+
+
+def test_the_not_ready_text_names_the_timeout_the_apps_starter_waits():
+    """The GUI may not import ``obs``; the app's ``LocalObsStarter`` waits ``startup.OBS_LAUNCH_TIMEOUT_S``."""
+    assert OBS_LAUNCH_TIMEOUT_S == startup.OBS_LAUNCH_TIMEOUT_S
 
 
 async def test_obs_that_does_not_answer_in_time_names_the_dialog_it_may_be_showing():

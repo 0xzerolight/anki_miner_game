@@ -267,9 +267,15 @@ class ObsSetup:
                 f"OBS Studio is not installed. Install it from {OBS_DOWNLOAD_URL}, then check again.",
             )
         try:
-            if await self._server_off_while_running():
-                return _server_off()
-            info = await self._starter.start(lambda stage: report(_STAGE_TEXT[stage]))
+            server_on = await self._server_on()
+            if not server_on and await asyncio.to_thread(self._discovery.is_running):
+                return _server_off()  # spec 11.1 step 3: the app turns the server on only while OBS is closed
+
+            def stage(stage: ObsStartStage) -> None:
+                if not (stage is ObsStartStage.ENABLING_SERVER and server_on):  # nothing to turn on
+                    report(_STAGE_TEXT[stage])
+
+            info = await self._starter.start(stage)
         except ObsServerOffError:  # OBS started while the server was being turned on
             return _server_off()
         except ObsNotReadyError:
@@ -302,12 +308,10 @@ class ObsSetup:
             )
         return await self._provision(cfg, info, report)
 
-    async def _server_off_while_running(self) -> bool:
-        """Spec 11.1 step 3: the app may turn the websocket server on only while OBS is closed."""
+    async def _server_on(self) -> bool:
+        """Whether OBS's config has its WebSocket server on (``False`` without a config yet)."""
         ws = await asyncio.to_thread(self._discovery.read_ws_config)
-        if ws is not None and ws.server_enabled:
-            return False
-        return await asyncio.to_thread(self._discovery.is_running)
+        return ws is not None and ws.server_enabled
 
     async def _active_outputs(self) -> list[str]:
         active: list[str] = []
