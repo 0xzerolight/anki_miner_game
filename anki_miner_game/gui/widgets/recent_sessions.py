@@ -80,8 +80,9 @@ class SessionRow:
 
     @property
     def name(self) -> str:
+        """The placed video's name; before placing, the game's title (the status says "Not filed yet")."""
         files = self.manifest.files
-        return Path(files.video).stem if files is not None else f"{self.manifest.game.title} (not moved yet)"
+        return Path(files.video).stem if files is not None else self.manifest.game.title
 
     @property
     def duration(self) -> str:
