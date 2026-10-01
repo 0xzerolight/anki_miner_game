@@ -438,6 +438,9 @@ class SessionActor:
         self._counts = Counts()
         self._held: list[GameLine] | None = None
         """Auto-start: lines accepted between a ``START`` carrying a line and ``STARTED``."""
+        self._ready_line: GameLine | None = None
+        """The last line accepted or merged while armed without a session (B1-05): an auto start whose
+        ``START`` was queued behind newer lines holds this one instead of its stale trigger."""
         self._start_deadline: float | None = None
         """A ``StartRecord`` was answered; ``STARTED`` is due before this ``now()``."""
 
@@ -812,6 +815,7 @@ class SessionActor:
         self._armed = _Armed(profile=profile, cfg=cfg)
         self._pipeline = TextPipeline(profile.filters)
         self._held = None
+        self._ready_line = None
         self._start_deadline = None
         self._counts = Counts()
         self._start_sources(cfg, profile)
@@ -1117,6 +1121,7 @@ class SessionActor:
         self._armed = None
         self._pipeline = None
         self._held = None
+        self._ready_line = None
         self._start_deadline = None
         self._clear(BannerKey.NO_SOURCE, BannerKey.LOW_DISK, BannerKey.OBS_RESTART, START_FAILED_BANNER_KEY)
         if self._state is not AppState.IDLE:
@@ -1179,6 +1184,9 @@ class SessionActor:
             self._start_failed("OBS did not start recording: the app could not reach OBS.")
             return
         if line is not None:  # auto mode: the session's counts start with the line that started it
+            newer = self._ready_line
+            if newer is not None and (newer.t_mono > line.t_mono or _same_line(newer, line)):
+                line = newer  # B1-05: lines were handled before this START; the screen shows the newest
             self._held = [line]
             self._counts = Counts(received=1, accepted=1)
         try:
@@ -1289,6 +1297,8 @@ class SessionActor:
         if s is not None and not s.stop_journalled:
             self._publish(LineAccepted(line, self._journal_line(s, line)))
             return
+        if s is None and self._state is AppState.ARMED:
+            self._ready_line = line
         if self._held is not None:
             self._held.append(line)
         self._publish(LineAccepted(line, None))
@@ -1305,6 +1315,8 @@ class SessionActor:
                 offset = self._journal_line(s, line)
             self._publish(LineAccepted(line, offset, replaces_previous=True))
             return
+        if s is None and self._state is AppState.ARMED:
+            self._ready_line = line
         if self._held is not None:
             if self._held and _same_line(self._held[-1], line):
                 self._held[-1] = line
@@ -1343,6 +1355,7 @@ class SessionActor:
             return
         self._start_deadline = None
         held, self._held = self._held, None
+        self._ready_line = None
         output_path = ev.data.get("outputPath")
         if not isinstance(output_path, str) or not self._in_incoming(output_path):
             self._banner(
@@ -1507,6 +1520,7 @@ class SessionActor:
         await self._finalise(s.manifest_path, armed.cfg)
         if self._pipeline is not None:
             self._pipeline.reset()
+        self._ready_line = None
         self._counts = Counts()
         self._set_state(AppState.ARMED)
 
@@ -1706,6 +1720,7 @@ class SessionActor:
         self._armed = _Armed(profile=profile, cfg=cfg)
         self._pipeline = TextPipeline(profile.filters)
         self._held = None
+        self._ready_line = None
         self._start_deadline = None
         self._counts = manifest.counts
         await self._mark_degraded(s, mid)

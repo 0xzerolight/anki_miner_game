@@ -7,7 +7,9 @@ import json
 import logging
 import os
 import threading
+from dataclasses import replace
 
+from anki_miner_game.lifecycle.auto import AutoMode
 from anki_miner_game.models.config import AppConfig, VadSettings
 from anki_miner_game.models.manifest import ClockKind, ClockRecord, Counts, DriftSample, Flag, ManifestState
 from anki_miner_game.models.messages import (
@@ -22,6 +24,7 @@ from anki_miner_game.models.messages import (
     StateChanged,
 )
 from anki_miner_game.models.obs import ObsEventName, ObsRequestError, OutputState
+from anki_miner_game.models.profile import AutoSettings
 from anki_miner_game.session import session as session_mod
 from anki_miner_game.session.journal import (
     LineRecord,
@@ -310,20 +313,56 @@ async def test_a_merge_into_a_held_line_replaces_it(rig: Harness):
     assert journal(rig) == [LineRecord(offset_ms=0, text="えっと…", source="textractor")]
 
 
-async def test_a_merge_whose_base_was_never_journalled_is_a_new_line(rig: Harness):
+async def _no_windows() -> list:
+    return []
+
+
+async def test_an_auto_start_after_a_burst_holds_the_newest_line(rig: Harness):
+    """B1-05: two lines handled back to back before auto mode's START: the line on screen is the newer one."""
+    rig.profiles[SLUG] = replace(profile(), auto=AutoSettings(enabled=True, start_on_first_line=True))
+    AutoMode(rig.actor, rig.profiles.get, _no_windows, now=rig.clock)
+    await rig.start()
+    await rig.arm()
+    rig.clock.t = T0 + 0.30
+    rig.sources[0].line("まゆしぃです", T0 + 0.20)  # two frames handled in one go, before auto mode's START
+    rig.sources[0].line("「エル・プサイ・コングルゥ」", T0 + 0.30)
+    await rig.settle()
+    await rig.started(T0 + 0.40)
+    assert journal(rig) == [LineRecord(offset_ms=0, text="「エル・プサイ・コングルゥ」", source="textractor")]
+
+
+async def test_a_merge_into_the_newer_line_held_at_an_auto_start_is_a_replace_record(rig: Harness):
     rig.profiles[SLUG] = profile(typewriter=True)
     await rig.start()
     await rig.arm()
     await rig.line("はじまり", T0 + 0.1)
     trigger = rig.accepted()[0].line
-    await rig.line("え", T0 + 0.2)  # accepted before auto mode's START arrives: not held
+    await rig.line("え", T0 + 0.2)  # accepted before auto mode's START arrives: the newer line is held
     await rig.send(CommandKind.START, line=trigger)
     await rig.started(ZERO)
-    await rig.line("えっと…", ZERO + 0.5)  # merges into "え", which the journal never saw
-    assert journal(rig) == [
-        LineRecord(offset_ms=0, text="はじまり", source="textractor"),
-        LineRecord(offset_ms=0, text="えっと…", source="textractor"),
-    ]
+    await rig.line("えっと…", ZERO + 0.5)  # merges into "え", which the journal holds
+    assert journal(rig) == [LineRecord(offset_ms=0, text="え", source="textractor"), ReplaceRecord(text="えっと…")]
+
+
+async def test_a_merge_of_the_trigger_before_the_start_arrives_holds_the_merged_line(rig: Harness):
+    rig.profiles[SLUG] = profile(typewriter=True)
+    await rig.start()
+    await rig.arm()
+    await rig.line("え", T0 + 0.2)
+    trigger = rig.accepted()[0].line
+    await rig.line("えっと…", T0 + 0.4)  # a typewriter merge keeps the trigger's t_mono and source
+    await rig.send(CommandKind.START, line=trigger)
+    await rig.started(ZERO)
+    assert journal(rig) == [LineRecord(offset_ms=0, text="えっと…", source="textractor")]
+
+
+async def test_a_line_from_before_a_manual_start_is_not_held(h: Harness):
+    """Only an auto start (a START carrying a line) holds anything; a manual Start resets at STARTED."""
+    await h.arm()
+    await h.line("まえ", T0 + 0.2)
+    await h.send(CommandKind.START)
+    await h.started(ZERO)
+    assert journal(h) == []
 
 
 async def test_a_start_without_a_line_holds_nothing(h: Harness):
