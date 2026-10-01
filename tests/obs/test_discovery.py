@@ -298,17 +298,21 @@ def test_no_install_has_no_config_root(tmp_path):
 
 
 def test_config_root_follows_the_latest_check(tmp_path):
+    """A miss is never cached (B2-02); a hit is, until the next ``find_install``."""
     found: dict[str, str] = {}
     obs = LocalObsDiscovery(
         AppConfig, which=found.get, runner=FakeRunner(flatpak_installed), proc_root=tmp_path, platform="linux"
     )
+    flatpak_root = Path.home() / ".var" / "app" / "com.obsproject.Studio" / "config" / "obs-studio"
     assert obs.config_root() is None
 
     found["flatpak"] = "/usr/bin/flatpak"
-    assert obs.config_root() is None  # no new check yet
-    obs.find_install()
+    assert obs.config_root() == flatpak_root
 
-    assert obs.config_root() == Path.home() / ".var" / "app" / "com.obsproject.Studio" / "config" / "obs-studio"
+    del found["flatpak"]
+    assert obs.config_root() == flatpak_root
+    assert obs.find_install() is None
+    assert obs.config_root() is None
 
 
 # --- read_ws_config ----------------------------------------------------------------------------
@@ -384,6 +388,11 @@ def test_no_install_reads_as_none(tmp_path):
     write_ws(native_root(), FULL)
 
     assert make(tmp_path).read_ws_config() is None
+
+
+def test_credentials_without_an_install_name_the_websocket_config(tmp_path):
+    with pytest.raises(ObsConfigError, match="OBS's WebSocket config.json: not found"):
+        make(tmp_path).credentials(AppConfig())
 
 
 @pytest.mark.parametrize(
@@ -529,10 +538,24 @@ def test_linux_ignores_another_users_obs(tmp_path, monkeypatch):
 
 def test_windows_asks_tasklist_for_obs64(tmp_path):
     runner = FakeRunner(lambda argv: (0, '"obs64.exe","4242","Console","1","250,000 K"\r\n'))
-    obs = make(tmp_path, platform="win32", runner=runner)
+    obs = make(tmp_path, platform="win32", runner=runner, session_id=lambda: None)
 
     assert obs.is_running()
     assert runner.ran == [("tasklist", "/FI", "IMAGENAME eq obs64.exe", "/FO", "CSV", "/NH")]
+
+
+def test_windows_counts_only_the_obs_of_this_session(tmp_path):
+    """B2-04: tasklist lists every session's processes; another user's OBS has its own config."""
+    runner = FakeRunner(lambda argv: (0, "INFO: No tasks are running which match the specified criteria.\r\n"))
+    obs = make(tmp_path, platform="win32", runner=runner, session_id=lambda: 3)
+
+    assert not obs.is_running()
+    assert runner.ran == [("tasklist", "/FI", "IMAGENAME eq obs64.exe", "/FI", "SESSION eq 3", "/FO", "CSV", "/NH")]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="off Windows only")
+def test_there_is_no_session_id_off_windows():
+    assert discovery.windows_session_id() is None
 
 
 @pytest.mark.parametrize("answer", [(0, "INFO: No tasks are running which match the specified criteria.\r\n"), (0, "")])
@@ -731,6 +754,21 @@ def test_launch_reports_a_program_that_cannot_start(tmp_path):
 
     with pytest.raises(ObsConnectError):
         native_linux(tmp_path, runner=runner).launch()
+
+
+def test_an_install_made_after_a_miss_is_found_by_launch(tmp_path):
+    """B2-02: the wizard found no OBS, the user installed it and armed: ``launch`` must look again."""
+    found: dict[str, str] = {}
+    runner = FakeRunner()
+    obs = LocalObsDiscovery(
+        AppConfig, which=found.get, runner=runner, proc_root=fake_proc(tmp_path / "proc", []), platform="linux"
+    )
+    assert obs.find_install() is None
+
+    found["obs"] = "/usr/bin/obs"
+    obs.launch()
+
+    assert runner.spawned == [(("/usr/bin/obs", "--minimize-to-tray"), None)]
 
 
 # --- the default registry reader ---------------------------------------------------------------
@@ -1027,7 +1065,7 @@ async def test_the_probe_authenticates_with_the_password():
 async def test_the_probe_raises_when_obs_rejects_the_password(password):
     started = time.monotonic()
     async with MiniObs([100], password="s3cretPassw0rd12") as obs:
-        with pytest.raises(ObsAuthError):
+        with pytest.raises(ObsAuthError, match="OBS rejected the WebSocket password"):
             await probe(ObsCredentials("127.0.0.1", obs.port, password))
 
     assert obs.requests == []

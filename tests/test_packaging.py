@@ -15,6 +15,7 @@ import pytest
 
 from anki_miner_game.addons.vad_addon import REQUIREMENTS
 from anki_miner_game.feed.http_server import PAGE_PATH
+from anki_miner_game.gui.icon import APP_ICON_PATH
 from anki_miner_game.runtime.bundle_smoke import ABSENT_MODULES, FAIL_MARKER, PASS_MARKER, SMOKE_ENV
 from anki_miner_game.vad.trimmer import WORKER_SCRIPT
 
@@ -73,12 +74,19 @@ def test_the_spec_bundles_each_file_the_code_opens_where_the_code_looks_for_it()
     """A frozen module's ``__file__`` sits in the bundle as the module would, so each file keeps its folder."""
     datas = run_spec()["Analysis"].kwargs["datas"]
     bundled = {Path(src).resolve(): Path(dest) for src, dest in datas}
-    wanted = [PAGE_PATH, WORKER_SCRIPT, REQUIREMENTS]
+    wanted = [PAGE_PATH, WORKER_SCRIPT, REQUIREMENTS, APP_ICON_PATH]
     assert set(bundled) == {path.resolve() for path in wanted}
     for path in wanted:
         source = path.resolve()
         assert source.is_file()
         assert bundled[source] == source.parent.relative_to(REPO)
+
+
+def test_the_windows_executable_carries_the_app_icon():
+    """B2-06: without ``icon=`` PyInstaller stamps its own icon on the exe, the shortcuts and the Apps list."""
+    icon = Path(run_spec()["EXE"].kwargs["icon"])
+    assert icon.resolve() == REPO / "packaging" / "icons" / "anki-miner-game.ico"
+    assert icon.is_file()
 
 
 def test_every_bundled_data_file_is_also_package_data():

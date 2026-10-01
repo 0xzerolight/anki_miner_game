@@ -144,7 +144,7 @@ async def test_a_password_refused_twice_raises_obs_auth_error(obs_server, make_g
     credentials = Credentials(obs_server, password)
     gateway, events = make_gateway(credentials=credentials)
 
-    with pytest.raises(ObsAuthError):
+    with pytest.raises(ObsAuthError, match="OBS refused the WebSocket password"):
         await gateway.connect()
 
     assert credentials.calls == 2

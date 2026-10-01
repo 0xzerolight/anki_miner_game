@@ -14,12 +14,14 @@ ROOT = SPECPATH  # noqa: F821 - defined by PyInstaller
 
 # Files the code opens beside its own modules: feed/http_server.py serves page.html, the VAD add-on
 # builds its environment from requirements.txt and runs vad_worker.py with that environment's Python
-# (the app never imports it). A frozen module's __file__ points into the bundle as if the module sat
-# there, so each file goes to the folder its module looks in.
+# (the app never imports it), gui/icon.py loads the window icon beside itself. A frozen module's
+# __file__ points into the bundle as if the module sat there, so each file goes to the folder its
+# module looks in.
 DATA_FILES = [
     "anki_miner_game/feed/page.html",
     "anki_miner_game/vad/worker/requirements.txt",
     "anki_miner_game/vad/worker/vad_worker.py",
+    "anki_miner_game/gui/anki-miner-game.png",
 ]
 
 # The frozen app carries PyQt6, obsws-python, websockets and truststore and nothing else (spec 4.3).
@@ -32,6 +34,10 @@ EXCLUDES = ["onnxruntime", "numpy", "av", "owocr"]
 EXCLUDES += ["setuptools"]
 
 NAME = "AnkiMinerGame"
+
+# The exe's own icon: Explorer, the shortcuts the installer makes, Settings -> Apps and the taskbar
+# before the app sets its window icon. Ignored off Windows (the Linux .desktop files name the PNGs).
+ICON = os.path.join(ROOT, "packaging", "icons", "anki-miner-game.ico")
 
 a = Analysis(  # noqa: F821
     [os.path.join(ROOT, "anki_miner_game", "launch.py")],
@@ -56,6 +62,7 @@ exe = EXE(  # noqa: F821
     strip=False,
     upx=False,  # a packed executable is a common antivirus false positive
     console=False,  # a window app on Windows; no effect on Linux
+    icon=ICON,
 )
 
 coll = COLLECT(  # noqa: F821

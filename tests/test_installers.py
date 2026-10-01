@@ -37,6 +37,7 @@ NFPM = PACKAGING / "nfpm.yaml"
 ISS = PACKAGING / "innosetup" / "anki_miner_game.iss"
 DESKTOP_FILES = [PACKAGING / "appimage" / f"{PACKAGE}.desktop", PACKAGING / "deb" / f"{PACKAGE}.desktop"]
 ICON_SIZES = (48, 64, 128, 256)
+ICO = PACKAGING / "icons" / f"{PACKAGE}.ico"
 
 posix_only = pytest.mark.skipif(sys.platform == "win32", reason="the Linux packaging scripts are bash")
 
@@ -266,6 +267,22 @@ def test_each_bitmap_icon_has_its_size(px):
     assert png_size(PACKAGING / "icons" / f"{PACKAGE}-{px}.png") == (px, px)
 
 
+def test_the_windows_icon_holds_every_size_as_png():
+    data = ICO.read_bytes()
+    reserved, kind, count = struct.unpack_from("<HHH", data, 0)
+    assert (reserved, kind) == (0, 1)
+    sizes: list[int] = []
+    for index in range(count):
+        width, height, _colours, _reserved, _planes, _bits, length, offset = struct.unpack_from(
+            "<BBBBHHII", data, 6 + 16 * index
+        )
+        image = data[offset : offset + length]
+        assert image[:8] == b"\x89PNG\r\n\x1a\n"
+        assert struct.unpack(">II", image[16:24]) == (width or 256, height or 256)
+        sizes.append(width or 256)
+    assert sorted(sizes) == [16, 32, 48, 64, 128, 256]
+
+
 # --- the .deb (nfpm) ----------------------------------------------------------------------------
 
 
@@ -345,13 +362,17 @@ def test_the_app_setup_launches_does_not_inherit_redirectionguard():
 
 def test_the_windows_installer_paths_resolve_from_its_folder():
     setup = iss_setup()
-    for key in ("LicenseFile",):
+    for key in ("LicenseFile", "SetupIconFile"):
         assert (ISS.parent / setup[key].replace("\\", "/")).resolve().is_file(), key
+    assert (ISS.parent / setup["SetupIconFile"].replace("\\", "/")).resolve() == ICO
     assert (ISS.parent / setup["OutputDir"].replace("\\", "/")).resolve() == REPO / "dist"
 
 
 def test_the_windows_uninstaller_says_where_the_user_data_stays():
-    assert "%USERPROFILE%\\.anki_miner_game" in ISS.read_text(encoding="utf-8")
+    """B2-07: Pascal passes a string literal as it is: a literal ``%USERPROFILE%`` reached the user."""
+    code = ISS.read_text(encoding="utf-8").split("[Code]", 1)[1]
+    assert "ExpandConstant('{%USERPROFILE}') + '\\.anki_miner_game" in code
+    assert "%USERPROFILE%" not in code
 
 
 # --- shell scripts ------------------------------------------------------------------------------

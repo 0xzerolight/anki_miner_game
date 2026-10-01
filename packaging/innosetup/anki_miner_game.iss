@@ -20,6 +20,7 @@ AppPublisherURL=https://github.com/0xzerolight/anki_miner_game
 DefaultDirName={autopf}\AnkiMinerGame
 DefaultGroupName=Anki Miner Game
 UninstallDisplayIcon={app}\AnkiMinerGame.exe
+SetupIconFile=..\icons\anki-miner-game.ico
 OutputDir=..\..\dist
 OutputBaseFilename=AnkiMinerGame-{#AppVersion}-Windows-x86_64-Setup
 LicenseFile=..\..\LICENSE
@@ -71,7 +72,7 @@ begin
   if (CurUninstallStep = usPostUninstall) and (not UninstallSilent) then
     MsgBox(
       'Anki Miner Game settings, game profiles and add-ons were kept at ' +
-      '%USERPROFILE%\.anki_miner_game, and your recordings in their output folder. ' +
+      ExpandConstant('{%USERPROFILE}') + '\.anki_miner_game, and your recordings in their output folder. ' +
       'Remove them by hand if you no longer need them.',
       mbInformation,
       MB_OK);

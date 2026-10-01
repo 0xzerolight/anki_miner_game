@@ -6,9 +6,10 @@
   OBS installer records in the registry, then the folder of Steam's OBS build from Steam's Uninstall
   entry (each in the 64-bit view, then the 32-bit view); Linux ``obs`` on ``PATH``, then the Flatpak
   ``com.obsproject.Studio``. Each call looks again (the wizard's re-check).
-- ``config_root``: the config root of the install the latest ``find_install`` found: Windows
-  ``%APPDATA%\\obs-studio``, native Linux ``$XDG_CONFIG_HOME/obs-studio`` (``~/.config/obs-studio``
-  when unset), Flatpak ``~/.var/app/com.obsproject.Studio/config/obs-studio``.
+- ``config_root``: the config root of the install the latest ``find_install`` found (looking again
+  while none was found): Windows ``%APPDATA%\\obs-studio``, native Linux
+  ``$XDG_CONFIG_HOME/obs-studio`` (``~/.config/obs-studio`` when unset), Flatpak
+  ``~/.var/app/com.obsproject.Studio/config/obs-studio``.
 - ``read_ws_config`` / ``credentials``: ``plugin_config/obs-websocket/config.json`` under that root,
   read at every call. A key that is missing or of the wrong JSON type takes obs-websocket's own
   default, as ``Config::Load`` does (``docs/m0/source-findings.md`` section 5).
@@ -16,7 +17,8 @@
   start. Sets ``server_enabled``, keeps every other key, and adds a password only when auth is
   required and none exists. A missing file is created that way.
 - ``is_running``: an ``obs`` process of this user in ``/proc`` (native and Flatpak alike), or
-  ``obs64.exe`` in ``tasklist`` on Windows; ``True`` when the process list cannot be read.
+  ``obs64.exe`` of this Windows session in ``tasklist`` on Windows; ``True`` when the process list
+  cannot be read.
 - ``launch``: the install's command plus ``--minimize-to-tray``, detached, in the folder it needs;
   nothing while OBS already runs.
 - ``wait_ready``: ready once ``GetVersion`` succeeds on a fresh connection. Until OBS has loaded,
@@ -202,7 +204,7 @@ def get_version_succeeds(creds: ObsCredentials, timeout_s: float) -> bool:
                 client.authenticate()
             except OBSSDKError as exc:
                 if "authentication" in client.server_hello["d"]:
-                    raise ObsAuthError("OBS rejected the websocket password") from exc
+                    raise ObsAuthError("OBS rejected the WebSocket password") from exc
                 raise
             status = client.req("GetVersion")["requestStatus"]
         finally:
@@ -236,6 +238,21 @@ def read_registry_value(key: str, name: str, view: str) -> str | None:
     return value if kind == winreg.REG_SZ else None
 
 
+def windows_session_id() -> int | None:
+    """This process's Windows session (``ProcessIdToSessionId``); ``None`` off Windows or when it cannot be read."""
+    if sys.platform != "win32":
+        return None
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    session = wintypes.DWORD()
+    if not kernel32.ProcessIdToSessionId(kernel32.GetCurrentProcessId(), ctypes.byref(session)):
+        log.warning("cannot read this process's session id (error %s)", ctypes.get_last_error())
+        return None
+    return int(session.value)
+
+
 class LocalObsDiscovery:
     """``ObsDiscovery`` for the OBS installed on this machine (spec 11.1).
 
@@ -243,7 +260,8 @@ class LocalObsDiscovery:
     on a worker thread.
     Everything else is injected for tests: ``platform`` (``sys.platform``), ``which`` (``PATH``
     lookup), ``registry`` (Windows install folder), ``runner`` (``flatpak``, ``tasklist``, starting
-    OBS), ``proc_root`` (Linux process table), ``probe`` (one ``GetVersion``), ``now`` and ``sleep``.
+    OBS), ``proc_root`` (Linux process table), ``probe`` (one ``GetVersion``), ``now``, ``sleep`` and
+    ``session_id`` (Windows session filter).
     """
 
     def __init__(
@@ -258,6 +276,7 @@ class LocalObsDiscovery:
         probe: Probe = get_version_succeeds,
         now: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        session_id: Callable[[], int | None] = windows_session_id,
     ) -> None:
         self._config = config
         self._windows = platform == "win32"
@@ -268,14 +287,14 @@ class LocalObsDiscovery:
         self._probe = probe
         self._now = now
         self._sleep = sleep
+        self._session_id = session_id
         self._install: ObsInstall | None = None
-        self._looked = False
 
     # --- install and config root -----------------------------------------------------------
 
     def find_install(self) -> ObsInstall | None:
         install = self._find_windows() if self._windows else self._find_linux()
-        self._install, self._looked = install, True
+        self._install = install
         if install is None:
             log.info("OBS not found")
         else:
@@ -309,11 +328,11 @@ class LocalObsDiscovery:
         return None
 
     def _found(self) -> ObsInstall | None:
-        """What the latest ``find_install`` found, looking once if none ran."""
-        return self._install if self._looked else self.find_install()
+        """What the latest ``find_install`` found; a miss is never kept, so each caller looks again (B2-02)."""
+        return self._install if self._install is not None else self.find_install()
 
     def config_root(self) -> Path | None:
-        """The config root of the install the latest ``find_install`` found (looking once if none ran)."""
+        """The config root of the install the latest ``find_install`` found (looking again while none was found)."""
         install = self._found()
         if install is None:
             return None
@@ -386,7 +405,7 @@ class LocalObsDiscovery:
         elif ws is not None:
             port = ws.port
         else:
-            where = self._ws_config_path() or "OBS's websocket config.json"
+            where = self._ws_config_path() or "OBS's WebSocket config.json"
             raise ObsConfigError(f"{where}: not found, and no OBS port override is set")
         password: str | None = None
         if override.password_override is not None:
@@ -404,7 +423,11 @@ class LocalObsDiscovery:
         writing, or ``launch`` would start a second OBS.
         """
         if self._windows:
-            code, out = self._runner.run(TASKLIST)
+            argv = list(TASKLIST)
+            session = self._session_id()
+            if session is not None:
+                argv[3:3] = ["/FI", f"SESSION eq {session}"]  # another user's OBS has its own config (B2-04)
+            code, out = self._runner.run(argv)
             if code != 0:
                 log.warning("tasklist failed (exit code %s); assuming OBS runs", code)
                 return True
