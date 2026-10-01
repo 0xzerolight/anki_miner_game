@@ -14,7 +14,7 @@ from typing import Any
 
 import pytest
 from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QAbstractButton, QComboBox, QLabel, QScrollArea
+from PyQt6.QtWidgets import QAbstractButton, QComboBox, QLabel, QScrollArea, QStyle, QStyleOptionComboBox
 
 from anki_miner_game.gui import strings
 from anki_miner_game.gui.game_profile_dialog import (
@@ -1011,6 +1011,49 @@ def test_the_dialog_never_scrolls_sideways(win_rig: Rig):
 
     assert scroll is not None
     assert scroll.horizontalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+
+
+def test_the_game_window_dropdown_is_as_wide_as_the_title(win_rig: Rig):
+    """The mock's Game window row spans the field, so its first item is not cut."""
+    dialog = win_rig.open()
+    dialog.show()
+    win_rig.qtbot.waitExposed(dialog)
+
+    assert dialog.window_combo.width() == dialog.title_edit.width()
+
+
+@pytest.mark.parametrize("platform", ["linux", "win32"])
+def test_the_no_window_item_is_not_cut(io_loop, qtbot, platform: str):
+    rig = Rig(io_loop, qtbot, platform=platform)
+    dialog = rig.open()
+    dialog.show()
+    qtbot.waitExposed(dialog)
+    combo = dialog.window_combo
+    option = QStyleOptionComboBox()
+    combo.initStyleOption(option)
+    style = combo.style()
+    assert style is not None
+
+    field = style.subControlRect(
+        QStyle.ComplexControl.CC_ComboBox, option, QStyle.SubControl.SC_ComboBoxEditField, combo
+    )
+
+    assert field.width() >= combo.fontMetrics().horizontalAdvance(combo.itemText(0))
+
+
+def test_a_failed_save_grows_the_dialog_instead_of_squeezing_the_form(win_rig: Rig):
+    dialog = win_rig.open()
+    dialog.show()
+    win_rig.qtbot.waitExposed(dialog)
+    scroll = dialog.findChild(QScrollArea)
+    assert scroll is not None
+    before = scroll.height()
+
+    dialog.accept()  # no title: the problems line shows
+    win_rig.qtbot.waitUntil(lambda: dialog.problems_label.isVisible(), timeout=5000)
+    dialog.layout().activate()
+
+    assert scroll.height() >= before
 
 
 @pytest.mark.parametrize(

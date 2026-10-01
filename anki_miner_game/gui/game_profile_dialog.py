@@ -55,6 +55,7 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSpinBox,
     QStyle,
     QToolButton,
@@ -596,11 +597,16 @@ class GameProfileDialog(QDialog):
 
         self.window_combo = _WindowCombo()
         self.window_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
-        self.window_combo.setMinimumContentsLength(24)
+        metrics = self.window_combo.fontMetrics()  # the first item is never cut; Qt counts in "x" widths
+        no_window = NO_WINDOW_WINDOWS if self._windows else NO_WINDOW_LINUX
+        self.window_combo.setMinimumContentsLength(
+            -(-metrics.horizontalAdvance(no_window) // max(1, metrics.horizontalAdvance("x")))
+        )
         self.window_combo.opening.connect(self._list_windows)
         self.window_combo.activated.connect(self._window_chosen)
         self.window_note = layout.message_label()
         window_field = QWidget()
+        window_field.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)  # the mock's full row
         window_rows = QVBoxLayout(window_field)
         window_rows.setContentsMargins(0, 0, 0, 0)
         window_rows.addWidget(self.window_combo)
@@ -781,6 +787,7 @@ class GameProfileDialog(QDialog):
         problems = self.problems(profile)
         if problems:
             self.problems_label.set_error(f"Cannot save: {'; '.join(problems)}.")
+            self._fit()  # the line grows the dialog rather than squeezing the form
             return
         self.problems_label.clear()
         self.profile_saved.emit(profile)
