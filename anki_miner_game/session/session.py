@@ -444,6 +444,9 @@ class SessionActor:
         ``START`` was queued behind newer lines holds this one instead of its stale trigger."""
         self._start_deadline: float | None = None
         """A ``StartRecord`` was answered; ``STARTED`` is due before this ``now()``."""
+        self._quitting = False
+        """``shutdown`` was called. An ``ARM`` or ``START`` still queued, or one waiting for OBS to start,
+        does nothing more: a recording now would be stopped at once and filed as a session of its own."""
 
         self._connected = False
         self._obs_versions = ("unknown", "unknown")
@@ -517,12 +520,15 @@ class SessionActor:
         to the user's profile). While recording it first stops OBS and finalises the session, then
         disarms; if OBS cannot be stopped, the journal is closed and the next launch resumes the
         session (reconcile row 4) or finalises it (last row). While idle and connected with
-        ``obs_restore.json`` still present, it restores once. With a start in flight it first waits up to
-        ``QUIT_START_WAIT_S`` for that recording to start, then stops it. At most about ``QUIT_STOP_TIMEOUT_S``
-        plus one finalise (up to 10 s of rename retries on Windows) plus ``RECORD_INACTIVE_WAIT_S``
-        plus the restore's two switches (up to ``SWITCH_TIMEOUT_S`` each, plus
-        ``RESTART_QUESTION_S`` when OBS asks to restart).
+        ``obs_restore.json`` still present, it restores once. An ``ARM`` or ``START`` queued before the
+        quit, or waiting for OBS to start, does nothing more (``_quitting``); a start whose
+        ``StartRecord`` was sent is waited for up to ``QUIT_START_WAIT_S``, then stopped. After the
+        message being handled now (an OBS start in it: up to ``OBS_LAUNCH_TIMEOUT_S``), at most about
+        ``QUIT_START_WAIT_S`` plus ``QUIT_STOP_TIMEOUT_S`` plus one finalise (up to 10 s of rename
+        retries on Windows) plus ``RECORD_INACTIVE_WAIT_S`` plus the restore's two switches (up to
+        ``SWITCH_TIMEOUT_S`` each, plus ``RESTART_QUESTION_S`` when OBS asks to restart).
         """
+        self._quitting = True
         done: asyncio.Future[None] = self._loop.create_future()
         self._queue.put_nowait(_Shutdown(done))
         await done
@@ -758,6 +764,8 @@ class SessionActor:
     # --- arming (spec 6.2) ----------------------------------------------------------------------
 
     async def _arm(self, slug: str) -> None:
+        if self._quitting:
+            return
         if self._state is AppState.RECORDING:
             self._banner(BannerKey.ARM, BannerLevel.INFO, "Stop the recording before choosing another game.")
             return
@@ -781,7 +789,7 @@ class SessionActor:
 
     async def _arm_obs(self, profile: GameProfile, cfg: AppConfig, incoming: Path) -> None:
         """Spec 6.2 steps 1-3 and the arm itself, under ``_obs_lock`` until the state is ``armed``."""
-        if not await self._ensure_connected():
+        if not await self._ensure_connected() or self._quitting:  # a quit while OBS started: no switch to undo
             return
         try:
             active = await self._active_outputs()
@@ -1179,10 +1187,12 @@ class SessionActor:
         that fails the start fails (``START_FAILED_BANNER_KEY``, after the ``obs`` banner) and auto mode
         tries again at its next line.
         """
-        if self._state is not AppState.ARMED or self._start_deadline is not None:
+        if self._quitting or self._state is not AppState.ARMED or self._start_deadline is not None:
             return
         if not await self._ensure_connected():
             self._start_failed("OBS did not start recording: the app could not reach OBS.")
+            return
+        if self._quitting:  # the quit came while OBS was starting
             return
         if line is not None:  # auto mode: the session's counts start with the line that started it
             newer = self._ready_line

@@ -107,7 +107,7 @@ HOTKEY_BANNER_KEY: Final = "hotkey"
 OLD_DEFAULT_HOTKEY: Final = "Ctrl+Shift+F9"
 """The default before D-02; a config holding exactly this chord moves to ``AppConfig().hotkey`` on load."""
 SHUTDOWN_TIMEOUT_S: Final = 120.0
-"""``close`` waits this long for the quit; the actor's own worst case is about 40 s
+"""``close`` waits this long for the quit; the actor's own worst case is about 90 s
 (``SessionActor.shutdown``)."""
 
 
