@@ -13,9 +13,9 @@ Anki Miner Game is maintained by a single person on a best-effort basis. You can
 
 In scope:
 
-- Handling of the OBS websocket password, which the app reads from OBS's own settings and never logs.
-- The text feed's page and websocket servers, which listen on this machine only.
-- The websocket clients that connect to text hookers.
+- Handling of the OBS WebSocket password, which the app reads from OBS's own settings and never logs.
+- The text feed's page and WebSocket servers, which listen on this machine only. The WebSocket accepts apps and scripts that send no Origin, pages from `http://127.0.0.1` or `http://localhost`, and the hosted texthooker-ui (`https://renji-xd.github.io`); any other web page is refused.
+- The WebSocket clients that connect to text hookers.
 - Add-on downloads and the environments they install into (VAD, OCR).
 - Bundled installers (PyInstaller, AppImage, `.deb`, `.tar.gz`, Inno Setup).
 
