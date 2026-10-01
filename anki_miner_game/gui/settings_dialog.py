@@ -11,13 +11,15 @@ rows with ``test_sources_requested``; ``take_setup`` shows the OBS password such
 """
 
 import os
+import shlex
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import replace
+from pathlib import Path, PurePosixPath
 from typing import Final
 
 from PyQt6.QtCore import Qt, QUrl, pyqtSignal
-from PyQt6.QtGui import QDesktopServices
+from PyQt6.QtGui import QDesktopServices, QKeySequence
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -28,6 +30,7 @@ from PyQt6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
+    QKeySequenceEdit,
     QLabel,
     QLineEdit,
     QPushButton,
@@ -83,10 +86,40 @@ LINUX_CONTROL_NOTE: Final = (
     "of AnkiMinerGame/anki_miner_game in the folder you extracted it to."
 )
 """Only the .deb puts ``anki_miner_game`` on PATH (packaging/nfpm.yaml)."""
+DEB_DIR: Final = PurePosixPath("/opt/anki-miner-game")
+"""Where the .deb puts the bundle; it links ``/usr/bin/anki_miner_game`` to its launcher (packaging/nfpm.yaml)."""
+COMMAND: Final = "anki_miner_game"
+BIND_TEXT: Final = "Bind this command to a key in your desktop's keyboard settings:"
+_PORTABLE: Final = QKeySequence.SequenceFormat.PortableText
 
 _SOURCE_HEADERS: Final = ("On", "Name", "Address (host:port)")
 _ON, _NAME, _ADDRESS = range(3)
 _ID_ROLE: Final = Qt.ItemDataRole.UserRole
+
+
+def linux_toggle_command(
+    *, environ: Mapping[str, str] | None = None, frozen: bool | None = None, executable: str | None = None
+) -> str | None:
+    """UJ-24: the command a Linux user binds to start and stop recording, for this install; ``None``
+    when running from source, where the dialog explains every package instead (``LINUX_CONTROL_NOTE``).
+
+    The AppImage is ``$APPIMAGE``; the .deb's bundle under ``/opt/anki-miner-game/`` has ``anki_miner_game``
+    on PATH; the .tar.gz's launcher sits beside the bundle's executable (its libstdc++ check), else the
+    executable itself.
+    """
+    environ = os.environ if environ is None else environ
+    frozen = bool(getattr(sys, "frozen", False)) if frozen is None else frozen
+    executable = sys.executable if executable is None else executable
+    if not frozen:
+        return None
+    appimage = environ.get("APPIMAGE")
+    if appimage:
+        return f"{shlex.quote(appimage)} --toggle"
+    if PurePosixPath(executable).is_relative_to(DEB_DIR):
+        return f"{COMMAND} --toggle"
+    launcher = Path(executable).with_name(COMMAND)
+    program = launcher if launcher.is_file() else Path(executable)
+    return f"{shlex.quote(str(program))} --toggle"
 
 
 def vad_install_text(size_bytes: int) -> str:
@@ -239,12 +272,18 @@ class SettingsDialog(QDialog):
         self.feed_link.setOpenExternalLinks(False)
         self.feed_link.linkActivated.connect(lambda href: self._open_url(QUrl(href)))
         form.addRow(self.feed_link)
-        self.hotkey_edit: QLineEdit | None = None
+        self.hotkey_edit: QKeySequenceEdit | None = None
+        self._hotkey_edited = False
         if self._windows:
-            self.hotkey_edit = QLineEdit(cfg.hotkey)
+            self.hotkey_edit = QKeySequenceEdit(QKeySequence.fromString(cfg.hotkey, _PORTABLE))
+            self.hotkey_edit.setMaximumSequenceLength(1)
+            self.hotkey_edit.setClearButtonEnabled(True)
+            self.hotkey_edit.keySequenceChanged.connect(self._hotkey_changed)
             form.addRow(HOTKEY_LABEL, self.hotkey_edit)
         else:
-            self.control_label = _note(LINUX_CONTROL_NOTE)
+            command = linux_toggle_command()
+            self.control_label = _note(f"{BIND_TEXT} {command}" if command else LINUX_CONTROL_NOTE)
+            self.control_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             form.addRow(self.control_label)
         return box
 
@@ -356,6 +395,10 @@ class SettingsDialog(QDialog):
         self._cfg = cfg
         self.password_edit.setText(cfg.obs.password_override or "")
 
+    def _hotkey_changed(self, _keys: QKeySequence) -> None:
+        """Only a chord the user pressed replaces the stored one: Qt cannot show every stored spelling."""
+        self._hotkey_edited = True
+
     def _feed_changed(self, *_args: object) -> None:
         on = self.feed_check.isChecked()
         url = FEED_PAGE_URL.format(port=self.http_port_spin.value())
@@ -455,7 +498,11 @@ class SettingsDialog(QDialog):
                 ws_port=self.ws_port_spin.value(),
                 http_port=self.http_port_spin.value(),
             ),
-            hotkey=cfg.hotkey if self.hotkey_edit is None else self.hotkey_edit.text().strip(),
+            hotkey=(
+                self.hotkey_edit.keySequence().toString(_PORTABLE)
+                if self.hotkey_edit is not None and self._hotkey_edited
+                else cfg.hotkey
+            ),
             recording=RecordingSettings(max_height=max_height, fps=fps),
             cue=CueSettings(max_cue_seconds=self.max_cue_spin.value(), end_gap_ms=self.end_gap_spin.value()),
             vad=VadSettings(enabled=self.vad_check.isChecked()),

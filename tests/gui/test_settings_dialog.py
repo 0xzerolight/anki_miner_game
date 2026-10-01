@@ -1,19 +1,32 @@
 """The settings dialog (spec 5 ``AppConfig``; UJ-21..UJ-24, UJ-30, UJ-31, UJ-33, B4-03, B4-07, B5-02)."""
 
+import shlex
 from dataclasses import replace
 
 import pytest
 from PyQt6.QtCore import Qt, QUrl
-from PyQt6.QtWidgets import QFileDialog, QGroupBox, QHeaderView, QLabel, QLineEdit, QScrollArea
+from PyQt6.QtGui import QKeySequence
+from PyQt6.QtWidgets import (
+    QFileDialog,
+    QGroupBox,
+    QHeaderView,
+    QKeySequenceEdit,
+    QLabel,
+    QLineEdit,
+    QScrollArea,
+)
 
 import anki_miner_game.gui.settings_dialog as settings_module
 from anki_miner_game.gui.settings_dialog import (
+    BIND_TEXT,
     END_GAP_NOTE,
+    HOTKEY_LABEL,
     LINUX_CONTROL_NOTE,
     RESERVED_SOURCE_IDS,
     TRIM_TEXT,
     VIDEO_PRESETS,
     SettingsDialog,
+    linux_toggle_command,
     vad_install_text,
 )
 from anki_miner_game.gui.widgets.layout import available_size
@@ -333,25 +346,102 @@ def test_the_problems_line_clears_at_the_next_edit(qtbot) -> None:
 # Start and stop (Task 8 replaces the Windows field) ---------------------------------------------------
 
 
-def test_windows_edits_the_hotkey_and_checks_it(qtbot) -> None:
-    dialog = open_dialog(qtbot, platform="win32")
-    assert dialog.hotkey_edit is not None
-    dialog.hotkey_edit.setText("Ctrl+Shift+F8")
-    assert dialog.config().hotkey == "Ctrl+Shift+F8"
+PORTABLE = QKeySequence.SequenceFormat.PortableText
 
-    dialog.hotkey_edit.setText("Ctrl+Nonsense")
+
+def test_windows_records_the_hotkey_by_key_press(qtbot) -> None:
+    dialog = open_dialog(qtbot, platform="win32")
+    edit = dialog.hotkey_edit
+    assert isinstance(edit, QKeySequenceEdit)
+    assert edit.maximumSequenceLength() == 1
+    assert edit.isClearButtonEnabled()
+    assert edit.keySequence().toString(PORTABLE) == "Ctrl+Alt+F10"
+    assert dialog._playing_form.labelForField(edit).text() == HOTKEY_LABEL == "Start/stop recording hotkey"
+
+    edit.setKeySequence(QKeySequence("Alt+F9"))
+
+    assert save(qtbot, dialog).hotkey == "Alt+F9"
+
+
+@pytest.mark.parametrize("stored", ["Win+F9", "ctrl+shift+f8"])
+def test_an_untouched_hotkey_is_kept_as_stored(qtbot, stored: str) -> None:
+    dialog = open_dialog(qtbot, replace(CUSTOM, hotkey=stored), platform="win32")
+    assert save(qtbot, dialog).hotkey == stored
+
+
+@pytest.mark.parametrize(
+    ("press", "problem"),
+    [
+        (lambda edit: edit.setKeySequence(QKeySequence("F8")), "The hotkey F8 cannot be used"),
+        (lambda edit: edit.clear(), "No start/stop recording hotkey is set."),
+    ],
+)
+def test_a_hotkey_the_app_cannot_use_is_refused_in_one_sentence(qtbot, press, problem: str) -> None:
+    dialog = open_dialog(qtbot, platform="win32")
+    press(dialog.hotkey_edit)
 
     text = refused(qtbot, dialog)
-    assert "hotkey" in text
-    assert "Hotkey 'Ctrl+Nonsense'" not in text  # UJ-31: no sentence nested in another
+
+    assert problem in text
+    assert "Hotkey '" not in text
 
 
-def test_linux_shows_how_to_bind_the_cli_verbs_instead_of_a_hotkey(qtbot) -> None:
+def test_linux_shows_the_one_command_to_bind(qtbot, monkeypatch) -> None:
+    monkeypatch.setattr(
+        settings_module, "linux_toggle_command", lambda: "/home/you/Apps/AnkiMinerGame.AppImage --toggle"
+    )
     dialog = open_dialog(qtbot, platform="linux")
 
     assert dialog.hotkey_edit is None
-    assert LINUX_CONTROL_NOTE in [label.text() for label in dialog.findChildren(QLabel)]
+    assert dialog.control_label.text() == (
+        "Bind this command to a key in your desktop's keyboard settings: "
+        "/home/you/Apps/AnkiMinerGame.AppImage --toggle"
+    )
+    assert dialog.control_label.text().startswith(BIND_TEXT)
+    assert dialog.control_label.textInteractionFlags() & Qt.TextInteractionFlag.TextSelectableByMouse
     assert dialog.config().hotkey == CUSTOM.hotkey
+
+
+def test_linux_from_source_explains_every_package(qtbot, monkeypatch) -> None:
+    monkeypatch.setattr(settings_module, "linux_toggle_command", lambda: None)
+    dialog = open_dialog(qtbot, platform="linux")
+    assert dialog.control_label.text() == LINUX_CONTROL_NOTE
+
+
+def test_the_command_is_the_appimage_when_running_as_one() -> None:
+    command = linux_toggle_command(
+        environ={"APPIMAGE": "/home/you/Apps/AnkiMinerGame.AppImage"},
+        frozen=True,
+        executable="/tmp/.mount_AnkiMi/usr/bin/AnkiMinerGame",
+    )
+    assert command == "/home/you/Apps/AnkiMinerGame.AppImage --toggle"
+
+
+def test_the_deb_command_is_on_path() -> None:
+    command = linux_toggle_command(environ={}, frozen=True, executable="/opt/anki-miner-game/AnkiMinerGame")
+    assert command == "anki_miner_game --toggle"
+
+
+def test_the_tarball_command_is_its_launcher_quoted(tmp_path) -> None:
+    bundle = tmp_path / "My Games" / "AnkiMinerGame"
+    bundle.mkdir(parents=True)
+    (bundle / "anki_miner_game").write_text("#!/bin/sh\n", encoding="utf-8")
+
+    command = linux_toggle_command(environ={}, frozen=True, executable=str(bundle / "AnkiMinerGame"))
+
+    assert command == f"{shlex.quote(str(bundle / 'anki_miner_game'))} --toggle"
+    assert command.startswith("'")
+
+
+def test_a_frozen_build_without_a_launcher_names_its_executable(tmp_path) -> None:
+    exe = tmp_path / "AnkiMinerGame"
+    assert linux_toggle_command(environ={}, frozen=True, executable=str(exe)) == f"{shlex.quote(str(exe))} --toggle"
+
+
+def test_a_source_run_has_no_single_command() -> None:
+    assert (
+        linux_toggle_command(environ={"APPIMAGE": "/x.AppImage"}, frozen=False, executable="/usr/bin/python3") is None
+    )
 
 
 # Voice trimming (UJ-21, UJ-22a) ---------------------------------------------------------------------
