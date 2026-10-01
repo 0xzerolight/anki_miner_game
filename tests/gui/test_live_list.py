@@ -1,8 +1,9 @@
 """The live list (spec 16 item 4) and the cue count taken from what the session actor journals."""
 
 import pytest
+from PyQt6.QtWidgets import QApplication
 
-from anki_miner_game.gui.widgets.live_list import LIVE_LINES, JournalCounter, LiveList
+from anki_miner_game.gui.widgets.live_list import LINES_FONT_SCALE, LIVE_LINES, JournalCounter, LiveList
 from anki_miner_game.models.lines import GameLine
 
 
@@ -134,3 +135,26 @@ def test_a_merge_whose_base_is_gone_from_the_list_is_added(live):
 def test_the_list_is_read_only(live):
     live.add(line("はい", 1.0), None, False)
     assert live.editTriggers() == live.EditTrigger.NoEditTriggers
+
+
+# The hint while empty and the font (UJ-06, UJ-14) -------------------------------------------------
+
+
+def test_the_list_text_is_larger_than_the_ui_text(live):
+    base = QApplication.font()
+    if base.pointSizeF() > 0:
+        assert live.font().pointSizeF() == pytest.approx(base.pointSizeF() * LINES_FONT_SCALE)
+    else:
+        assert live.font().pixelSize() == round(base.pixelSize() * LINES_FONT_SCALE)
+
+
+def test_an_empty_list_paints_its_hint_and_a_filled_one_does_not(live):
+    live.resize(400, 200)
+    live.show()
+    blank = live.grab().toImage()
+    live.set_placeholder("Start the game and your text hooker, then press Start recording.")
+    assert live.placeholder() == "Start the game and your text hooker, then press Start recording."
+    hinted = live.grab().toImage()
+    assert hinted != blank
+    live.add(line("はい", 1.0), None, False)
+    assert live.grab().toImage() != hinted
