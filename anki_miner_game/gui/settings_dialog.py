@@ -17,6 +17,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import replace
 from pathlib import Path, PurePosixPath
 from typing import Final
+from urllib.parse import urlsplit
 
 from PyQt6.QtCore import QDir, Qt, QUrl, pyqtSignal
 from PyQt6.QtGui import QDesktopServices, QKeySequence
@@ -176,9 +177,31 @@ def _new_source_id(name: str, taken: set[str]) -> str:
 
 
 def _address(text: str) -> str:
-    """A source address without the ``ws://`` scheme the source adds itself (``TextSourceConfig.uri``)."""
+    """A source address as stored (``TextSourceConfig.uri``): without a ``ws://`` or ``http://`` the user
+    pasted (the source adds ``ws://`` itself, B4-07)."""
     text = text.strip()
-    return text.removeprefix("ws://")
+    for scheme in ("ws://", "http://"):
+        if text.lower().startswith(scheme):
+            return text[len(scheme) :]
+    return text
+
+
+def address_problem(uri: str) -> str | None:
+    """Why ``ws://<uri>`` cannot reach a hooker (B4-07), or ``None``."""
+    if "://" in uri:
+        return f"write the address as host:port, without {uri.split('://', 1)[0]}://"
+    try:
+        parts = urlsplit(f"ws://{uri}")
+        port = parts.port
+    except ValueError:
+        return "the port must be a number from 1 to 65535"
+    if not parts.hostname:
+        return "the address needs a host, such as localhost:6677"
+    if port is None:
+        return "the address needs a port, such as localhost:6677"
+    if not 1 <= port <= 65535:
+        return "the port must be a number from 1 to 65535"
+    return None
 
 
 def _hotkey_problem(text: str) -> str | None:
@@ -564,6 +587,8 @@ class SettingsDialog(QDialog):
                 problems.append(f"Text source {number} has no name.")
             if not source.uri:
                 problems.append(f"Text source {number} ({source.name}) has no address.")
+            elif (problem := address_problem(source.uri)) is not None:
+                problems.append(f"Text source {number} ({source.name}): {problem}.")
         if cfg.feed.ws_port == cfg.feed.http_port:
             problems.append("The text feed needs two different ports.")
         if self.hotkey_edit is not None and (problem := _hotkey_problem(cfg.hotkey)) is not None:

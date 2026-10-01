@@ -41,6 +41,7 @@ def test_saved_settings_are_stored_and_used_at_once(rig, tmp_path):
     assert dialog is not None
     dialog.output_edit.setText(str(tmp_path / "elsewhere"))
     dialog.add_source_button.click()
+    dialog.sources_table.item(dialog.sources_table.rowCount() - 1, 2).setText("localhost:7001")
     dialog.feed_check.setChecked(False)  # the dialog's ports start at 1: the rig's feed binds port 0
     dialog.ws_port_spin.setValue(2)
     dialog.accept()

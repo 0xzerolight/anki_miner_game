@@ -317,6 +317,49 @@ def test_test_asks_for_the_game_text_page_with_the_rows_as_they_stand(qtbot) -> 
     assert asked.args[0][0].enabled is True
 
 
+@pytest.mark.parametrize(
+    ("typed", "stored"),
+    [
+        ("localhost:6677", "localhost:6677"),
+        ("http://localhost:6677", "localhost:6677"),
+        ("WS://localhost:6677", "localhost:6677"),
+        ("127.0.0.1:7000/text", "127.0.0.1:7000/text"),
+    ],
+)
+def test_a_working_address_is_saved_without_a_pasted_scheme(qtbot, typed: str, stored: str) -> None:
+    dialog = open_dialog(qtbot)
+    dialog.sources_table.item(1, 2).setText(typed)
+
+    assert save(qtbot, dialog).text_sources[1].uri == stored
+
+
+@pytest.mark.parametrize(
+    ("typed", "why"),
+    [
+        ("localhost:", "needs a port"),
+        (":6677", "needs a host"),
+        ("localhost:70000", "a number from 1 to 65535"),
+        ("localhost:0", "a number from 1 to 65535"),
+        ("localhost:port", "a number from 1 to 65535"),
+        ("https://localhost:6677", "without https://"),
+    ],
+)
+def test_an_address_that_cannot_work_is_refused_naming_its_row(qtbot, typed: str, why: str) -> None:
+    dialog = open_dialog(qtbot)
+    dialog.sources_table.item(1, 2).setText(typed)
+
+    text = refused(qtbot, dialog)
+
+    assert "Text source 2 (My hooker):" in text
+    assert why in text
+
+
+def test_a_new_row_needs_its_port_before_it_saves(qtbot) -> None:
+    dialog = open_dialog(qtbot)
+    dialog.add_source_button.click()
+    assert "Text source 3 (New source): the address needs a port" in refused(qtbot, dialog)
+
+
 # Invalid settings (UJ-31) ---------------------------------------------------------------------------
 
 
