@@ -45,6 +45,10 @@ START_FAILED_BANNER_KEY: Final = "start_failed"
 """``Banner.key`` of the banner the actor raises when ``StartRecord`` fails (spec 17: the state stays
 ``armed``). Auto mode listens for it, so the next line may try to start again."""
 
+STOP_FAILED_BANNER_KEY: Final = "stop_failed"
+"""``Banner.key`` of the banner the actor raises when ``StopRecord`` fails (spec 17: the recording goes on).
+Auto mode listens for it, so its next poll may try to stop again (B1-08)."""
+
 
 @dataclass(frozen=True)
 class Banner:

@@ -58,6 +58,7 @@ SECTION_4_NAMES = {
     ],
     "anki_miner_game.models.pipeline": ["DropReason", "DROP_COUNTER", "Accepted", "Replaced", "Dropped"],
     "anki_miner_game.models.messages": [
+        "STOP_FAILED_BANNER_KEY",
         "LineReceived",
         "ObsEvent",
         "UserCommand",
@@ -79,6 +80,9 @@ SECTION_4_NAMES = {
         "WsConfig",
         "WindowItem",
         "ProvisionResult",
+        "ObsStartStage",
+        "ObsNotReadyError",
+        "ObsServerOffError",
     ],
     "anki_miner_game.interfaces.text_source": ["TextSource"],
     "anki_miner_game.interfaces.record_clock": ["RecordClock"],

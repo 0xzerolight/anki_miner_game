@@ -6,6 +6,8 @@ from anki_miner_game.models.addons import AddonStatus
 from anki_miner_game.models.lines import GameLine
 from anki_miner_game.models.messages import (
     OBS_SOURCE_ID,
+    START_FAILED_BANNER_KEY,
+    STOP_FAILED_BANNER_KEY,
     AppState,
     Banner,
     BannerCleared,
@@ -36,7 +38,10 @@ from anki_miner_game.models.obs import (
     ObsEventName,
     ObsInfo,
     ObsInstall,
+    ObsNotReadyError,
     ObsRequestError,
+    ObsServerOffError,
+    ObsStartStage,
     ObsUnsupportedError,
     OutputState,
     ProvisionResult,
@@ -55,6 +60,8 @@ def test_enum_values_are_the_spec_strings():
     assert OutputState.STARTED == "OBS_WEBSOCKET_OUTPUT_STARTED"
     assert ObsEventName.RECORD_STATE_CHANGED == "RecordStateChanged"
     assert OBS_SOURCE_ID == "obs"
+    assert (START_FAILED_BANNER_KEY, STOP_FAILED_BANNER_KEY) == ("start_failed", "stop_failed")
+    assert [s.value for s in ObsStartStage] == ["enabling_server", "launching", "connecting"]
 
 
 def test_gateway_connection_events_cannot_collide_with_obs_events():
@@ -137,6 +144,8 @@ def test_obs_error_hierarchy_and_messages():
     assert issubclass(ObsAuthError, ObsConnectError)
     assert issubclass(ObsConfigError, ObsConnectError)
     assert issubclass(ObsConnectError, ObsError)
+    assert issubclass(ObsNotReadyError, ObsConnectError)  # the start-OBS sequence's own failures (D-03)
+    assert issubclass(ObsServerOffError, ObsConnectError)
     err = ObsRequestError("StartRecord", 500, "Output is already active")
     assert (err.request, err.code, err.comment) == ("StartRecord", 500, "Output is already active")
     assert "Output is already active" in str(err)
