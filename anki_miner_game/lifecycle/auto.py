@@ -20,6 +20,8 @@ starts a new armed period with that game's settings.
   counts enabled items only (``window_open``, spec 12 as amended by
   ``docs/m0/wave-1-amendments.md`` item 10). PipeWire capture has no window
   list, so it relies on the idle stop.
+- A ``StopRecord`` failure leaves the state at ``recording``; its banner
+  (``STOP_FAILED_BANNER_KEY``) lets the next check stop again.
 
 ``on_event`` runs on the actor's thread and ``check``/``run`` on the I/O
 loop, which is the same thread (``SessionControl``), so no lock is needed.
@@ -34,6 +36,7 @@ from typing import Final, Protocol
 from anki_miner_game.interfaces.session import SessionControl
 from anki_miner_game.models.messages import (
     START_FAILED_BANNER_KEY,
+    STOP_FAILED_BANNER_KEY,
     AppState,
     BannerRaised,
     CommandKind,
@@ -137,8 +140,11 @@ class AutoMode:
             self._misses = 0
             self._last_activity = self._now()
         elif isinstance(event, BannerRaised):
-            if event.banner.key == START_FAILED_BANNER_KEY and self._state is AppState.ARMED:
+            key = event.banner.key
+            if key == START_FAILED_BANNER_KEY and self._state is AppState.ARMED:
                 self._start_sent = False
+            elif key == STOP_FAILED_BANNER_KEY and self._state is AppState.RECORDING:
+                self._stop_sent = False  # B1-08: the next check posts STOP again
         elif isinstance(event, LineAccepted):
             self._last_activity = self._now()
             if self._state is AppState.ARMED and not self._start_sent and self._start_on_first_line():

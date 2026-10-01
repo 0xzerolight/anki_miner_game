@@ -18,6 +18,7 @@ from anki_miner_game.models.config import AppConfig, VadSettings
 from anki_miner_game.models.manifest import ClockKind, ClockRecord, Counts, DriftSample, Flag, ManifestState
 from anki_miner_game.models.messages import (
     START_FAILED_BANNER_KEY,
+    STOP_FAILED_BANNER_KEY,
     AppState,
     BannerRaised,
     CommandKind,
@@ -777,3 +778,7 @@ async def test_done_playing_while_ready_ends_in_idle(h: Harness):
     mark = len(h.events)
     await h.send(CommandKind.DISARM)
     assert StateChanged(AppState.IDLE, None) in h.events[mark:]
+
+
+def test_the_actors_stop_failed_key_is_the_one_auto_mode_listens_for():
+    assert BannerKey.STOP_FAILED == STOP_FAILED_BANNER_KEY == "stop_failed"

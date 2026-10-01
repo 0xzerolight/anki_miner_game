@@ -10,6 +10,7 @@ from anki_miner_game.lifecycle.auto import POLL_S, AutoMode, window_open
 from anki_miner_game.models.lines import GameLine
 from anki_miner_game.models.messages import (
     START_FAILED_BANNER_KEY,
+    STOP_FAILED_BANNER_KEY,
     AppState,
     Banner,
     BannerLevel,
@@ -546,3 +547,36 @@ def test_profile_replace_keeps_auto_off_by_default() -> None:
     rig.check()
     assert rig.control.commands() == []
     assert rig.windows.calls == 0
+
+
+# Auto-stop retry (B1-08).
+
+
+def test_a_failed_auto_stop_is_posted_again_at_the_next_check() -> None:
+    rig = Rig(make_profile(idle_min=1, window=None, start=False))
+    rig.state(AppState.ARMED)
+    rig.state(AppState.RECORDING)
+    rig.advance(60)
+    rig.check()
+    rig.control.emit(BannerRaised(Banner(STOP_FAILED_BANNER_KEY, BannerLevel.ERROR, "OBS did not stop recording")))
+    rig.check()
+    assert rig.control.commands() == [CommandKind.STOP, CommandKind.STOP]
+
+
+def test_a_stop_that_worked_is_not_posted_again() -> None:
+    rig = Rig(make_profile(idle_min=1, window=None, start=False))
+    rig.state(AppState.ARMED)
+    rig.state(AppState.RECORDING)
+    rig.advance(60)
+    rig.check()
+    rig.state(AppState.FINALISING)
+    rig.check()
+    assert rig.control.commands() == [CommandKind.STOP]
+
+
+def test_a_stop_failure_banner_outside_recording_changes_nothing() -> None:
+    rig = Rig(make_profile(idle_min=1, window=None, start=False))
+    rig.state(AppState.ARMED)
+    rig.control.emit(BannerRaised(Banner(STOP_FAILED_BANNER_KEY, BannerLevel.ERROR, "x")))
+    rig.check()
+    assert rig.control.commands() == []

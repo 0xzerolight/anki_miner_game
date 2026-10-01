@@ -71,6 +71,7 @@ from anki_miner_game.models.manifest import (
 from anki_miner_game.models.messages import (
     OBS_SOURCE_ID,
     START_FAILED_BANNER_KEY,
+    STOP_FAILED_BANNER_KEY,
     AppState,
     Banner,
     BannerCleared,
@@ -218,7 +219,7 @@ class BannerKey(StrEnum):
     OBS_QUESTION = "obs_question"
     RESTORE = "obs_restore"
     NO_SOURCE = "no_source"
-    STOP_FAILED = "stop_failed"
+    STOP_FAILED = STOP_FAILED_BANNER_KEY  # auto mode listens for it (B1-08)
     FOREIGN_RECORDING = "foreign_recording"
     SESSION_FILES = "session_files"
     SPLIT = "split_unsupported"
