@@ -669,6 +669,8 @@ class ObsPage(QWizardPage):
         self._obs = obs
         self._check: ObsCheck | None = None
         self._running = False
+        self._started_obs = False
+        """This run started OBS on Windows: the status keeps ``FIREWALL_TEXT`` from then on."""
         self.setTitle("OBS")
         self.setSubTitle(OBS_SUBTITLE)
         self.summary = _plain_label(OBS_SUMMARY)
@@ -747,6 +749,7 @@ class ObsPage(QWizardPage):
                 self.error.set_error(error)
                 return
         self._running = True
+        self._started_obs = False
         self.button.setEnabled(False)
         for widget in (self.link, self.password, self.notes):
             widget.hide()
@@ -756,10 +759,17 @@ class ObsPage(QWizardPage):
         post = self._wizard.main_thread.post
 
         def report(stage: str) -> None:
-            text = f"{stage} {FIREWALL_TEXT}" if stage == STARTING_OBS and _on_windows() else stage
-            post(lambda: show_message(self.status, text))
+            post(lambda: self._show_stage(stage))
 
         self._wizard.submit(self._obs.run(self._wizard.config, report), self._finished)
+
+    def _show_stage(self, stage: str) -> None:
+        self._started_obs = self._started_obs or (stage == STARTING_OBS and _on_windows())
+        show_message(self.status, self._with_firewall(stage))
+
+    def _with_firewall(self, text: str) -> str:
+        """Windows asks whether OBS may use networks once OBS listens, which can be after setup is done."""
+        return " ".join(part for part in (text, FIREWALL_TEXT if self._started_obs else "") if part)
 
     def _finished(self, future: concurrent.futures.Future[Any]) -> None:
         try:
@@ -770,7 +780,7 @@ class ObsPage(QWizardPage):
         self._running = False
         self._check = check
         ready = check.status is ObsStatus.READY
-        show_message(self.status, check.text if ready else "")
+        show_message(self.status, self._with_firewall(check.text if ready else ""))
         self.error.set_error("" if ready else check.text)  # UJ-31: every failure in the one error style
         self.link.setVisible(check.status is ObsStatus.NOT_INSTALLED)
         self.password.setVisible(check.status is ObsStatus.AUTH_FAILED)

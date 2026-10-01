@@ -273,6 +273,20 @@ def test_starting_obs_mentions_the_windows_network_question_only_on_windows(qtbo
     assert FIREWALL_TEXT == "If Windows asks whether OBS may use networks, you can press Cancel."
     obs.proceed.set()
     qtbot.waitUntil(h.next_enabled)
+    # Windows asks once OBS listens, which can be after setup is done (P8: within 2 s of the start)
+    assert page.status.text() == (f"done {FIREWALL_TEXT}" if windows else "done")
+
+
+@pytest.mark.parametrize("check", [ObsCheck(ObsStatus.READY, "done"), ObsCheck(ObsStatus.FAILED, "failed")])
+def test_the_network_question_is_not_mentioned_when_obs_was_running_already(qtbot, io_loop, monkeypatch, check):
+    monkeypatch.setattr(wizard_module, "_on_windows", lambda: True)
+    obs = StubObsSetup(check)
+    obs.stages = ["Connecting to OBS…"]
+    h = Harness(qtbot, io_loop, obs=obs)
+    page = h.wizard.obs_page
+    page.button.click()
+    qtbot.waitUntil(lambda: page.button.isEnabled() or page.button.isHidden())
+    assert FIREWALL_TEXT not in page.status.text()
 
 
 def test_a_refused_password_is_typed_above_the_button_and_retried_with_enter(qtbot, io_loop):
