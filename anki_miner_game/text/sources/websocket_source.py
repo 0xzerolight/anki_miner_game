@@ -4,7 +4,8 @@ Ported from GameSentenceMiner ``GameSentenceMiner/gametext.py::listen_on_websock
 commit 479747fe82d64f66980797a50bd6782ea06f58fa (GPL-3.0). Kept: connect to ``ws://<uri>``, the
 LunaTranslator path fallback, ``ping_interval=None``, plain/JSON frame parsing and reconnecting.
 Changed: the non-dict JSON guard (GSM calls ``.get`` on any JSON value), the spec's 1, 2, 5, 10 s
-backoff, and the JSON ``source`` and ``time`` fields are not used: a line belongs to the configured
+backoff (another schedule can be given: the OCR source's owocr is a local child it retries at
+once), and the JSON ``source`` and ``time`` fields are not used: a line belongs to the configured
 source and its time is read here at receipt. Also changed: a JSON object with ``"type":
 "translate"`` is dropped, not GSM behaviour but needed for the Agent hooker (0xDC00/agent), whose
 default settings send it as a second frame per line carrying its own machine translation
@@ -17,7 +18,7 @@ import asyncio
 import json
 import logging
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from typing import Final
 
 from websockets.asyncio.client import ClientConnection, connect
@@ -81,12 +82,15 @@ class WebsocketSource:
         *,
         now: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        backoff: Sequence[float] = BACKOFF_S,
     ) -> None:
-        """``uri`` is ``host:port[/path]`` without the scheme (``TextSourceConfig.uri``)."""
+        """``uri`` is ``host:port[/path]`` without the scheme (``TextSourceConfig.uri``); ``backoff``
+        the waits before successive reconnect attempts, the last one repeating."""
         self._id = source_id
         self._urls = (f"ws://{uri}", f"ws://{uri.rstrip('/')}{LUNA_PATH}")
         self._now = now
         self._sleep = sleep
+        self._backoff = tuple(backoff)
         self._status = SourceStatus.DISCONNECTED
         self._listener: StatusListener | None = None
         self._task: asyncio.Task[None] | None = None
@@ -140,7 +144,7 @@ class WebsocketSource:
                 attempt = 0
                 await self._receive(ws, sink)
             self._set_status(SourceStatus.DISCONNECTED)
-            await self._sleep(BACKOFF_S[min(attempt, len(BACKOFF_S) - 1)])
+            await self._sleep(self._backoff[min(attempt, len(self._backoff) - 1)])
             attempt += 1
 
     async def _open(self) -> ClientConnection | None:

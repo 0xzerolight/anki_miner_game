@@ -457,3 +457,12 @@ async def test_the_source_and_a_texthooker_page_both_receive_every_frame(make_so
         assert [(await sink.next())[0] for _ in range(3)] == ["一", "二", "三"]
         async with asyncio.timeout(5):
             assert [await page.recv() for _ in range(3)] == ["一", "二", "三"]
+
+
+async def test_an_injected_backoff_schedule_is_used_and_its_last_wait_repeats(make_source):
+    """B3-01: OCR retries its local owocr at once; the hookers keep spec 8.1's schedule."""
+    sleep = FakeSleep(free=3)
+    async with FakeHookerServer(accept_paths=()) as hooker:
+        make_source(hooker.uri, sleep=sleep, backoff=(0.25,)).start(Sink())
+        await sleep.wait_calls(4)
+        assert sleep.delays == [0.25, 0.25, 0.25, 0.25]
