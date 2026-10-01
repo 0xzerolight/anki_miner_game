@@ -1,13 +1,17 @@
-"""The main window (spec 16): status row, game row, Arm/Start with elapsed time and cue count, live
-list, banners; requests for the dialogs and the wizard; close to tray. The recent sessions and the
-hand-off are in ``test_main_window_sessions.py`` (audit 2026-10-01 plan, section 4.10)."""
+"""The main window (spec 16 as amended by D-01 and UJ-01..UJ-14): lights, the game row, one primary
+button with Get ready and Done playing, one status text, banners with Set up OBS…, the hand-off, the
+Lines list with its hints, recent sessions; requests for the dialogs and the wizard; close to tray."""
 
 from collections.abc import Callable
+from types import SimpleNamespace
 
 import pytest
+from PyQt6.QtCore import QSize
 
+from anki_miner_game.gui import colours
 from anki_miner_game.gui.main_window import MainWindow, Pending, RecordingControls
 from anki_miner_game.gui.presenters.qt_presenter import QtPresenter
+from anki_miner_game.gui.widgets.layout import screen_bounded
 from anki_miner_game.models.lines import GameLine
 from anki_miner_game.models.messages import (
     OBS_SOURCE_ID,
@@ -20,6 +24,7 @@ from anki_miner_game.models.messages import (
     SourceStatus,
     UserCommand,
 )
+from tests.gui.session_fakes import Jobs, manifest, place
 
 GAMES = [("steins-gate", "Steins;Gate"), ("zero-escape", "Zero Escape")]
 LINE = GameLine(text="はい", raw="はい", t_mono=1.0, source_id="textractor")
@@ -70,65 +75,26 @@ def rig(qtbot):
     return window, control, presenter, clock, quits
 
 
-def test_arm_arms_the_selected_game(rig):
-    window, control, *_ = rig
-    assert window.game.currentData() == "zero-escape"
-    assert (window.state_label.text(), window.record_button.isEnabled()) == ("Idle", False)
-    window.arm_button.click()
-    assert control.posted == [UserCommand(CommandKind.ARM, slug="zero-escape")]
+@pytest.fixture
+def make(qtbot):
+    """A window with keyword arguments of the test's choice; ``selected`` defaults to Zero Escape."""
 
+    def build(games=GAMES, **kwargs) -> SimpleNamespace:
+        control, presenter, clock, quits = Control(), QtPresenter(), Clock(), []
+        kwargs.setdefault("selected", "zero-escape")
+        window = MainWindow(
+            control,
+            presenter.signals,
+            games,
+            on_quit=lambda: quits.append(1),
+            now=clock,
+            text_sources=SOURCES,
+            **kwargs,
+        )
+        qtbot.addWidget(window)
+        return SimpleNamespace(window=window, control=control, presenter=presenter, clock=clock, quits=quits)
 
-def test_arm_needs_a_game(qtbot):
-    window = MainWindow(Control(), QtPresenter().signals, [], on_quit=lambda: None)
-    qtbot.addWidget(window)
-    assert not window.arm_button.isEnabled()
-
-
-def test_while_armed_arm_becomes_disarm_and_start_starts(qtbot, rig):
-    window, control, presenter, *_ = rig
-    presenter.state_changed(AppState.ARMED, "steins-gate")
-    qtbot.waitUntil(lambda: window.state_label.text() == "Armed")
-    assert window.game.currentData() == "steins-gate"  # follows a CLI --arm
-    assert not window.game.isEnabled()
-    window.arm_button.click()
-    window.record_button.click()
-    assert control.posted == [UserCommand(CommandKind.DISARM), UserCommand(CommandKind.START)]
-    assert (window.arm_button.text(), window.record_button.text()) == ("Disarm", "Start")
-
-
-def test_while_recording_stop_stops_and_the_session_is_counted(qtbot, rig):
-    window, control, presenter, clock, _ = rig
-    presenter.state_changed(AppState.ARMED, "steins-gate")
-    presenter.line_accepted(LINE, None, False)  # before the recording: not a cue
-    presenter.state_changed(AppState.RECORDING, "steins-gate")
-    presenter.line_accepted(LINE, 1200, False)
-    presenter.line_accepted(LINE, 1200, True)  # typewriter merge: the same cue
-    presenter.line_accepted(LINE, 4000, False)
-    qtbot.waitUntil(lambda: window.cues_label.text() == "2 cues")
-    assert window.state_label.text() == "Recording"
-    assert not window.arm_button.isEnabled()
-    clock.t += 3725
-    qtbot.waitUntil(lambda: window.elapsed_label.text() == "1:02:05", timeout=3000)
-    window.record_button.click()
-    assert control.posted == [UserCommand(CommandKind.STOP)]
-    clock.t += 1
-    presenter.state_changed(AppState.FINALISING, "steins-gate")
-    qtbot.waitUntil(lambda: window.state_label.text() == "Finalising")
-    assert not window.record_button.isEnabled()
-    clock.t += 60
-    presenter.state_changed(AppState.ARMED, "steins-gate")
-    qtbot.waitUntil(lambda: window.state_label.text() == "Armed")
-    assert (window.elapsed_label.text(), window.cues_label.text()) == ("1:02:06", "2 cues")  # the last session
-
-
-def test_a_new_recording_counts_from_zero(qtbot, rig):
-    window, _, presenter, *_ = rig
-    presenter.state_changed(AppState.RECORDING, "steins-gate")
-    presenter.line_accepted(LINE, 10, False)
-    presenter.state_changed(AppState.ARMED, "steins-gate")
-    presenter.state_changed(AppState.RECORDING, "steins-gate")
-    qtbot.waitUntil(lambda: window.state_label.text() == "Recording")
-    assert (window.cues_label.text(), window.elapsed_label.text()) == ("0 cues", "0:00:00")
+    return build
 
 
 def test_banners_are_shown_replaced_and_cleared_by_key(qtbot, rig):
@@ -141,7 +107,7 @@ def test_banners_are_shown_replaced_and_cleared_by_key(qtbot, rig):
     qtbot.waitUntil(lambda: window.banner_texts() == ["OBS is not running"])
 
 
-# The cue count: the lines the actor journals -----------------------------------------------------
+# The line count: the lines the actor journals ----------------------------------------------------
 
 
 def line(text: str, t_mono: float) -> GameLine:
@@ -156,7 +122,7 @@ def test_lines_held_for_an_auto_start_count_once_journalled(qtbot, rig):
     presenter.state_changed(AppState.RECORDING, "steins-gate")
     presenter.line_accepted(held, 0, False)  # journalled at STARTED, published again with its offset
     presenter.line_accepted(line("つぎ", 3.0), 2000, False)
-    qtbot.waitUntil(lambda: window.cues_label.text() == "2 cues")
+    qtbot.waitUntil(lambda: window.status_label.text() == "Recording 0:00:00 · 2 lines")
     assert window.live_list.entries() == [("はじまり", 0), ("つぎ", 2000)]
 
 
@@ -168,7 +134,7 @@ def test_a_merge_the_actor_journals_as_a_new_line_is_counted(qtbot, rig):
     presenter.state_changed(AppState.RECORDING, "steins-gate")
     presenter.line_accepted(line("はい", 2.0), 700, False)
     presenter.line_accepted(GameLine("えっと…", "えっと…", early.t_mono, early.source_id), 900, True)
-    qtbot.waitUntil(lambda: window.cues_label.text() == "2 cues")
+    qtbot.waitUntil(lambda: window.status_label.text() == "Recording 0:00:00 · 2 lines")
     assert window.live_list.entries() == [("えっと…", 900), ("はい", 700)]
 
 
@@ -215,16 +181,6 @@ def test_edit_needs_a_game(qtbot):
     assert window.new_game_button.isEnabled() and not window.edit_game_button.isEnabled()
 
 
-def test_settings_and_the_setup_wizard_are_asked_for_from_the_menu(qtbot, rig):
-    window, *_, quits = rig
-    with qtbot.waitSignal(window.settings_requested):
-        window.settings_action.trigger()
-    with qtbot.waitSignal(window.setup_requested):
-        window.setup_action.trigger()
-    window.quit_action.trigger()
-    assert quits == [1]
-
-
 def test_the_game_list_can_change_and_keeps_the_selection(rig):
     window, *_ = rig
     window.set_games([("persona-5", "Persona 5"), ("zero-escape", "Zero Escape")])
@@ -246,13 +202,13 @@ def test_closing_the_window_asks_the_app_to_quit(rig):
 
 
 @pytest.mark.parametrize("state", [AppState.ARMED, AppState.RECORDING])
-def test_closing_while_armed_or_recording_minimises_to_the_tray(qtbot, rig, state):
+def test_closing_while_ready_or_recording_minimises_to_the_tray_and_says_so(qtbot, rig, state):
     window, _, presenter, *_, quits = rig
     window.minimise_to_tray = True
     window.show()
     presenter.state_changed(state, "steins-gate")
-    qtbot.waitUntil(lambda: window.state_label.text() != "Idle")
-    window.close()
+    with qtbot.waitSignal(window.hidden_to_tray):
+        window.close()
     assert quits == []
     assert not window.isVisible()
 
@@ -410,3 +366,243 @@ def test_elapsed_counts_from_the_recording_start():
     assert loop.controls.elapsed() == 3725
     loop.state(AppState.FINALISING)
     assert loop.controls.elapsed() == 0.0
+
+
+# One click records; the window follows RecordingControls (D-01, UJ-01..UJ-03, B4-05) --------------
+
+
+def test_idle_shows_start_recording_no_status_and_no_lights(make):
+    window = make().window
+    assert (window.primary_button.text(), window.primary_button.isEnabled()) == ("Start recording", True)
+    assert window.get_ready_button.isHidden() and window.done_button.isHidden()
+    assert window.status_label.text() == "" and window.status_dot.isHidden()
+    assert window.status_row.names() == []
+
+
+def test_one_click_in_idle_shows_starting_until_the_recording_runs(make):
+    w = make()
+    window = w.window
+    window.primary_button.click()
+    assert w.control.posted == [UserCommand(CommandKind.ARM, slug="zero-escape"), UserCommand(CommandKind.START)]
+    assert (window.primary_button.text(), window.primary_button.isEnabled()) == ("Starting…", False)
+    assert not window.game.isEnabled() and not window.edit_game_button.isEnabled()
+    assert window.status_row.names() == ["OBS", "Game text: waiting"]  # lights from the click on
+    window.primary_button.click()
+    assert len(w.control.posted) == 2  # no second command while pending (B4-05)
+    w.presenter.state_changed(AppState.ARMED, "zero-escape")
+    assert window.primary_button.text() == "Starting…"  # not the Ready on the way
+    assert not window.done_button.isHidden() and not window.done_button.isEnabled()
+    w.presenter.state_changed(AppState.RECORDING, "zero-escape")
+    assert (window.primary_button.text(), window.primary_button.isEnabled()) == ("Stop recording", True)
+    assert window.done_button.isHidden()
+
+
+@pytest.mark.parametrize("key", ["arm", "obs", "start_failed", "internal_error"])
+def test_a_failed_one_click_gives_the_button_back(make, key):
+    w = make()
+    w.window.primary_button.click()
+    w.presenter.banner(Banner(key, BannerLevel.ERROR, "it failed"))
+    assert (w.window.primary_button.text(), w.window.primary_button.isEnabled()) == ("Start recording", True)
+    assert w.window.game.isEnabled() and w.window.edit_game_button.isEnabled()
+    assert w.window.status_row.names() == []
+
+
+def test_ready_starts_and_done_playing_ends_the_game(make):
+    w = make()
+    window = w.window
+    w.presenter.state_changed(AppState.ARMED, "steins-gate")
+    assert window.game.currentData() == "steins-gate"  # follows a CLI --arm
+    assert (window.primary_button.text(), window.done_button.text()) == ("Start recording", "Done playing")
+    assert window.status_label.text() == "Ready"
+    window.done_button.click()
+    assert w.control.posted == [UserCommand(CommandKind.DISARM)]
+    assert not window.done_button.isEnabled() and not window.primary_button.isEnabled()
+    w.presenter.state_changed(AppState.IDLE, None)
+    assert window.primary_button.isEnabled() and window.done_button.isHidden()
+
+
+def test_recording_shows_time_and_lines_and_stops_with_one_click(qtbot, make):
+    w = make()
+    window = w.window
+    w.presenter.state_changed(AppState.ARMED, "steins-gate")
+    w.presenter.line_accepted(LINE, None, False)  # before the recording: not counted
+    w.presenter.state_changed(AppState.RECORDING, "steins-gate")
+    w.presenter.line_accepted(LINE, 1200, False)
+    w.presenter.line_accepted(LINE, 1200, True)  # typewriter merge: the same line
+    w.presenter.line_accepted(LINE, 4000, False)
+    assert window.status_label.text() == "Recording 0:00:00 · 2 lines"
+    assert not window.status_dot.isHidden() and colours.RED in window.status_dot.styleSheet()
+    w.clock.t += 3725
+    qtbot.waitUntil(lambda: window.status_label.text() == "Recording 1:02:05 · 2 lines", timeout=3000)
+    window.primary_button.click()
+    assert w.control.posted == [UserCommand(CommandKind.STOP)]
+    assert (window.primary_button.text(), window.primary_button.isEnabled()) == ("Stopping…", False)
+    w.presenter.state_changed(AppState.FINALISING, "steins-gate")
+    assert window.status_label.text() == "Saving the session…"
+    assert not window.primary_button.isEnabled()
+    w.presenter.state_changed(AppState.ARMED, "steins-gate")
+    assert window.status_label.text() == "Ready" and window.status_dot.isHidden()
+    assert window.primary_button.text() == "Start recording"  # after Stop the app stays ready
+
+
+def test_a_new_recording_counts_from_zero(make):
+    w = make()
+    w.presenter.state_changed(AppState.RECORDING, "steins-gate")
+    w.presenter.line_accepted(LINE, 10, False)
+    w.presenter.state_changed(AppState.ARMED, "steins-gate")
+    w.presenter.state_changed(AppState.RECORDING, "steins-gate")
+    assert w.window.status_label.text() == "Recording 0:00:00 · 0 lines"
+
+
+def test_ready_promises_an_automatic_start_only_while_it_is_pending(make):
+    """D-06: after a manual Stop auto mode pauses, and the status must not claim otherwise."""
+    pending = [True]
+    w = make(auto_start_pending=lambda: pending[0])
+    w.presenter.state_changed(AppState.ARMED, "zero-escape")
+    assert w.window.status_label.text() == "Ready: recording starts at the first line"
+    pending[0] = False
+    w.presenter.state_changed(AppState.RECORDING, "zero-escape")
+    w.presenter.state_changed(AppState.FINALISING, "zero-escape")
+    w.presenter.state_changed(AppState.ARMED, "zero-escape")
+    assert w.window.status_label.text() == "Ready"
+
+
+def test_a_banner_after_ready_reads_auto_start_again(make):
+    """Review Focus 1: the ``obs_exited`` banner comes after ``StateChanged(ARMED)`` and lifts the pause
+    with no new state change; the status must follow it."""
+    flag = [False]
+    w = make(auto_start_pending=lambda: flag[0])
+    w.presenter.state_changed(AppState.ARMED, "zero-escape")
+    assert w.window.status_label.text() == "Ready"
+    flag[0] = True
+    w.presenter.banner(Banner("obs_exited", BannerLevel.WARNING, "OBS closed during the recording."))
+    assert w.window.status_label.text() == "Ready: recording starts at the first line"
+
+
+def test_get_ready_only_for_a_game_that_starts_at_the_first_line(make):
+    w = make(auto_start_game=lambda slug: slug == "zero-escape")
+    window = w.window
+    assert not window.get_ready_button.isHidden() and window.get_ready_button.text() == "Get ready"
+    window.game.setCurrentIndex(window.game.findData("steins-gate"))
+    assert window.get_ready_button.isHidden()
+    window.game.setCurrentIndex(window.game.findData("zero-escape"))
+    window.get_ready_button.click()
+    assert w.control.posted == [UserCommand(CommandKind.ARM, slug="zero-escape")]
+    assert window.primary_button.text() == "Getting OBS ready…" and window.get_ready_button.isHidden()
+    assert window.controls.pending is Pending.GET_READY
+    w.presenter.state_changed(AppState.ARMED, "zero-escape")
+    assert window.primary_button.text() == "Start recording" and not window.done_button.isHidden()
+
+
+@pytest.mark.parametrize(
+    ("state", "enabled"),
+    [(AppState.IDLE, True), (AppState.ARMED, False), (AppState.RECORDING, False), (AppState.FINALISING, False)],
+)
+def test_edit_only_in_idle_and_new_game_always(make, state, enabled):
+    """B5-01 / D-05: a profile saved while ready was ignored until the next Get ready."""
+    w = make()
+    w.presenter.state_changed(state, None if state is AppState.IDLE else "steins-gate")
+    assert w.window.edit_game_button.isEnabled() is enabled
+    assert w.window.new_game_button.isEnabled()
+
+
+def test_the_window_shares_its_controls(make):
+    window = make().window
+    assert isinstance(window.controls, RecordingControls)
+    assert window.controls.game() == "zero-escape"
+    assert window.selected_title() == "Zero Escape"
+
+
+# Layout: first run, Settings…, banners, hints, sizes (UJ-06, UJ-07, UJ-08b, UJ-10a, UJ-13, UJ-14) --
+
+
+def test_first_run_offers_only_settings_and_add_your_game(qtbot):
+    window = MainWindow(Control(), QtPresenter().signals, [], on_quit=lambda: None)
+    qtbot.addWidget(window)
+    assert not window.first_run.isHidden()
+    assert window.add_game_button.text() == "Add your game…"
+    assert window.first_run_hint.text() == (
+        "Add the game you want to play. You do this once per game; after that, pick it here and press "
+        "Start recording."
+    )
+    for part in (window.game_row, window.control_row, window.lines_label, window.live_list):
+        assert part.isHidden()
+    assert window.recent.isHidden() and window.recent_label.isHidden()
+    assert window.selected_title() is None
+    with qtbot.waitSignal(window.new_game_requested):
+        window.add_game_button.click()
+    window.set_games(GAMES)
+    assert window.first_run.isHidden() and not window.game_row.isHidden() and not window.live_list.isHidden()
+
+
+def test_settings_is_a_flat_button_and_there_is_no_menu_bar(qtbot, make):
+    window = make().window
+    assert window.menuWidget() is None
+    assert window.settings_button.text() == "Settings…" and window.settings_button.isFlat()
+    with qtbot.waitSignal(window.settings_requested):
+        window.settings_button.click()
+
+
+def test_an_obs_banner_offers_set_up_obs_only_while_idle(qtbot, make):
+    w = make()
+    w.presenter.banner(Banner("obs", BannerLevel.ERROR, "OBS's WebSocket server is off."))
+    w.presenter.banner(Banner("feed", BannerLevel.WARNING, "port 6678 is in use"))
+    button = w.window.banners.action_button("obs")
+    assert button is not None and button.text() == "Set up OBS…" and not button.isHidden()
+    assert w.window.banners.action_button("feed") is None
+    with qtbot.waitSignal(w.window.setup_requested):
+        button.click()
+    w.presenter.state_changed(AppState.ARMED, "steins-gate")
+    assert button.isHidden()
+    w.presenter.state_changed(AppState.IDLE, None)
+    w.window.primary_button.click()
+    assert button.isHidden()  # not while a click is pending either
+
+
+def test_the_empty_lines_list_says_what_comes_next(make):
+    w = make()
+    live = w.window.live_list
+    assert live.placeholder() == (
+        "Start the game and your text hooker, then press Start recording. Lines from the game show here."
+    )
+    w.window.primary_button.click()
+    w.presenter.source_status(OBS_SOURCE_ID, SourceStatus.CONNECTING)
+    assert live.placeholder() == "Starting OBS. The first time can take up to 30 s."
+    w.presenter.source_status(OBS_SOURCE_ID, SourceStatus.CONNECTED)
+    w.presenter.state_changed(AppState.ARMED, "zero-escape")
+    assert live.placeholder() == "Waiting for the first line from your text hooker…"
+    w.presenter.state_changed(AppState.RECORDING, "zero-escape")
+    w.presenter.state_changed(AppState.FINALISING, "zero-escape")
+    w.presenter.state_changed(AppState.ARMED, "zero-escape")
+    assert live.placeholder() == "Press Start recording for the next session, or Done playing when you stop."
+    w.presenter.state_changed(AppState.IDLE, None)
+    assert live.placeholder().startswith("Start the game and your text hooker")
+
+
+def test_the_hand_off_goes_when_the_next_recording_starts(make):
+    w = make()
+    w.window.handoff.show()
+    w.presenter.state_changed(AppState.ARMED, "zero-escape")
+    assert not w.window.handoff.isHidden()
+    w.presenter.state_changed(AppState.RECORDING, "zero-escape")
+    assert w.window.handoff.isHidden()
+
+
+def test_recent_sessions_show_only_once_there_is_one(qtbot, tmp_path):
+    root = tmp_path / "out"
+    window = MainWindow(
+        Control(), QtPresenter().signals, GAMES, on_quit=lambda: None, output_root=lambda: root, vad_jobs=Jobs()
+    )
+    qtbot.addWidget(window)
+    assert window.recent.isHidden() and window.recent_label.isHidden()
+    place(root, manifest(1))
+    window.reload_sessions()
+    assert not window.recent.isHidden() and not window.recent_label.isHidden()
+
+
+def test_the_window_fits_the_screen_and_lines_and_sessions_share_the_height(make):
+    window = make().window
+    assert window.size() == screen_bounded(window, QSize(560, 680))
+    column = window.centralWidget().layout()
+    assert column.stretch(column.indexOf(window.live_list)) == 1
+    assert column.stretch(column.indexOf(window.recent)) == 1

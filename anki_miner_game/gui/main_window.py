@@ -1,24 +1,30 @@
-"""The main window (spec 16), compact and single-column:
+"""The main window (spec 16 as amended by the 2026-10-01 audit: D-01, D-05, UJ-01..UJ-14), one column:
 
-1. Status row: OBS, each enabled text source, OCR in OCR mode (``widgets.status_row``).
-2. Game dropdown, **New game…**, **Edit…**.
-3. **Arm** / **Disarm**, **Start** / **Stop**, the state, the elapsed time and the cue count.
-4. Banners (``widgets.banner_area``) and the last session's hand-off text (Appendix C).
-5. Live list: the last 200 accepted lines (``widgets.live_list``).
-6. Recent sessions with **Open folder**; VAD re-run and restore in a row's context menu.
+1. Status row: from a click on, and while a game is ready or recording, one light for OBS and one
+   **Game text** light (``widgets.status_row``); nothing in Idle. A flat **Settings…** button at its
+   right; there is no menu bar (UJ-07).
+2. Game dropdown, **New game…**, **Edit…** (Edit… and the dropdown only in Idle, D-05).
+3. The primary button (**Start recording** / **Stop recording**), **Get ready** (Idle, for a game that
+   starts at the first line), **Done playing** (Ready), and one status text (UJ-03).
+4. Banners (``widgets.banner_area``; ``obs`` banners carry **Set up OBS…** while Idle) and the last
+   session's hand-off, hidden when the next recording starts.
+5. Lines: the last 200 accepted lines (``widgets.live_list``), with a hint while empty.
+6. Recent sessions (``widgets.recent_sessions``), hidden while there is none.
 
-It reaches the rest of the app only through ``SessionControl`` (commands out), the presenter's
-signals (state in) and ``VadJobs``; its slots run on the main thread. The cue count is the number of
-lines the session actor journalled in the running recording, counted from its ``LineAccepted``
+With no game yet, rows 2-6 give way to one **Add your game…** button and a hint (UJ-06).
+
+Commands go out through ``RecordingControls`` (shared with the tray), state comes in through the
+presenter's signals, VAD jobs through ``VadJobs``; slots run on the main thread. The line count is
+the lines the session actor journalled in the running recording, counted from its ``LineAccepted``
 events (``widgets.live_list.JournalCounter``); after an app restart that resumed a recording it
 counts from the resume.
 
 The dialogs and the wizard are the app's to open: the window only asks (``new_game_requested``,
 ``edit_game_requested(slug)``, ``settings_requested``, ``setup_requested``). Closing the window
-quits, except while armed or recording with a tray icon shown (``minimise_to_tray``, set by the app
-when ``Tray.show()`` succeeds): then it hides to the tray. The recent sessions load when the window
-is built, before the actor runs, so interrupted VAD passes are handed on before any new job is
-queued (``widgets.recent_sessions``).
+quits, except while ready or recording with a tray icon shown (``minimise_to_tray``, set by the app
+when ``Tray.show()`` succeeds): then it hides to the tray and says so (``hidden_to_tray``). The
+recent sessions load when the window is built, before the actor runs, so interrupted VAD passes are
+handed on before any new job is queued (``widgets.recent_sessions``).
 """
 
 import time
@@ -28,8 +34,8 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Final
 
-from PyQt6.QtCore import QObject, QTimer, pyqtSignal
-from PyQt6.QtGui import QAction, QCloseEvent, QDesktopServices
+from PyQt6.QtCore import QObject, QSize, Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import QCloseEvent, QDesktopServices, QPalette
 from PyQt6.QtWidgets import (
     QComboBox,
     QHBoxLayout,
@@ -40,27 +46,42 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from anki_miner_game.gui import banner_keys, strings
+from anki_miner_game.gui import banner_keys, colours, strings
 from anki_miner_game.gui.presenters.qt_presenter import PresenterSignals
 from anki_miner_game.gui.widgets import clock_text
 from anki_miner_game.gui.widgets.banner_area import BannerArea
 from anki_miner_game.gui.widgets.handoff import HandoffPanel
+from anki_miner_game.gui.widgets.layout import screen_bounded
 from anki_miner_game.gui.widgets.live_list import JournalCounter, LiveList
 from anki_miner_game.gui.widgets.recent_sessions import RecentSessions, UrlOpener, read_session
 from anki_miner_game.gui.widgets.status_row import StatusRow
 from anki_miner_game.interfaces.addons import VadJobs
 from anki_miner_game.interfaces.session import SessionControl
 from anki_miner_game.models.lines import GameLine
-from anki_miner_game.models.messages import AppState, Banner, CommandKind, SourceStatus, UserCommand
+from anki_miner_game.models.messages import (
+    OBS_SOURCE_ID,
+    AppState,
+    Banner,
+    CommandKind,
+    SourceStatus,
+    UserCommand,
+)
 
-WINDOW_TITLE: Final = "Anki Miner Game"
+WINDOW_TITLE: Final = strings.APP_NAME
+WINDOW_SIZE: Final = QSize(560, 680)
+"""Wanted at launch; bounded by the screen (UJ-13)."""
 ELAPSED_REFRESH_MS: Final = 1000
-_STATE_TEXT: Final = {
-    AppState.IDLE: "Idle",
-    AppState.ARMED: "Armed",
-    AppState.RECORDING: "Recording",
-    AppState.FINALISING: "Finalising",
-}
+RECORDING_DOT: Final = "●"
+LINES_TITLE: Final = "Lines"
+RECENT_TITLE: Final = "Recent sessions"
+FIRST_RUN_HINT: Final = (
+    "Add the game you want to play. You do this once per game; after that, pick it here and press Start recording."
+)
+IDLE_HINT: Final = "Start the game and your text hooker, then press Start recording. Lines from the game show here."
+STARTING_OBS_HINT: Final = "Starting OBS. The first time can take up to 30 s."
+WAITING_HINT: Final = "Waiting for the first line from your text hooker…"
+AFTER_SESSION_HINT: Final = "Press Start recording for the next session, or Done playing when you stop."
+_PRIMARY_PADDING_PX: Final = 32
 
 
 class Pending(StrEnum):
@@ -196,11 +217,31 @@ class RecordingControls(QObject):
             self.changed.emit()
 
 
+def _hint_label(text: str) -> QLabel:
+    label = QLabel(text)
+    label.setTextFormat(Qt.TextFormat.PlainText)
+    label.setWordWrap(True)
+    label.setForegroundRole(QPalette.ColorRole.PlaceholderText)
+    return label
+
+
+def _row(*widgets: QWidget, stretch: QWidget | None = None) -> QWidget:
+    """A margin-less row of ``widgets``; ``stretch`` takes the spare width."""
+    holder = QWidget()
+    row = QHBoxLayout(holder)
+    row.setContentsMargins(0, 0, 0, 0)
+    for widget in widgets:
+        row.addWidget(widget, 1 if widget is stretch else 0)
+    return holder
+
+
 class MainWindow(QMainWindow):
-    """``games`` lists ``(slug, title)`` and ``text_sources`` the enabled sources' ``(id, name)``.
+    """``games`` lists ``(slug, title)`` and ``text_sources`` the configured sources' ``(id, name)``.
 
     ``on_quit`` is called instead of closing (the app quits). ``output_root()`` is the recordings
-    folder the recent sessions list; without it the list stays empty.
+    folder the recent sessions list; without it the list stays empty. ``auto_start_game(slug)`` says
+    whether that game's profile has auto mode with start at the first line (Get ready);
+    ``auto_start_pending()`` whether, while Ready, the next line starts a recording (D-06).
     """
 
     new_game_requested = pyqtSignal()
@@ -208,6 +249,8 @@ class MainWindow(QMainWindow):
     """The slug of the selected game."""
     settings_requested = pyqtSignal()
     setup_requested = pyqtSignal()
+    """The Set up OBS… button of an OBS banner (UJ-10)."""
+    hidden_to_tray = pyqtSignal()
 
     def __init__(
         self,
@@ -222,105 +265,124 @@ class MainWindow(QMainWindow):
         output_root: Callable[[], Path] | None = None,
         vad_jobs: VadJobs | None = None,
         open_url: UrlOpener = QDesktopServices.openUrl,
+        auto_start_game: Callable[[str], bool] = lambda _slug: False,
+        auto_start_pending: Callable[[], bool] = lambda: False,
     ) -> None:
         super().__init__()
-        self._control = control
         self._on_quit = on_quit
-        self._now = now
         self._output_root = output_root
-        self._state = AppState.IDLE
-        self._recording_since: float | None = None
-        self._last_elapsed = 0.0
-        """The length of the last recording, shown until the next one starts."""
+        self._auto_start_pending = auto_start_pending
         self._journalled = JournalCounter()
+        self._session_this_time = False
+        """A recording ended since the game got ready: the Lines hint says what comes next."""
         self.minimise_to_tray = False
         """Set by the app while a tray icon is shown."""
         self.setWindowTitle(WINDOW_TITLE)
-        self._build_menu()
 
         self.status_row = StatusRow(text_sources)
-        self.status_row.set_shown(False)
+        self.settings_button = QPushButton(strings.SETTINGS)
+        self.settings_button.setFlat(True)
+        self.settings_button.clicked.connect(lambda _checked=False: self.settings_requested.emit())
+        self.add_game_button = QPushButton(strings.ADD_YOUR_GAME)
+        self.add_game_button.clicked.connect(lambda _checked=False: self.new_game_requested.emit())
+        self.first_run_hint = _hint_label(FIRST_RUN_HINT)
         self.game = QComboBox()
-        self.new_game_button = QPushButton("New game…")
+        self.new_game_button = QPushButton(strings.NEW_GAME)
         self.new_game_button.clicked.connect(lambda _checked=False: self.new_game_requested.emit())
-        self.edit_game_button = QPushButton("Edit…")
+        self.edit_game_button = QPushButton(strings.EDIT_GAME)
         self.edit_game_button.clicked.connect(self._edit_clicked)
-        self.arm_button = QPushButton("Arm")
-        self.arm_button.clicked.connect(self._arm_clicked)
-        self.record_button = QPushButton("Start")
-        self.record_button.clicked.connect(self._record_clicked)
-        self.state_label = QLabel()
-        self.elapsed_label = QLabel()
-        self.cues_label = QLabel()
-        self.banners = BannerArea()
+        self.primary_button = QPushButton(strings.START_RECORDING)
+        self.primary_button.clicked.connect(lambda _checked=False: self.controls.record())
+        metrics = self.primary_button.fontMetrics()
+        widest = max(
+            metrics.horizontalAdvance(text)
+            for text in (strings.START_RECORDING, strings.STOP_RECORDING, *PENDING_TEXT.values())
+        )
+        self.primary_button.setMinimumWidth(widest + _PRIMARY_PADDING_PX)
+        self.get_ready_button = QPushButton(strings.GET_READY)
+        self.get_ready_button.clicked.connect(lambda _checked=False: self.controls.get_ready())
+        self.done_button = QPushButton(strings.DONE_PLAYING)
+        self.done_button.clicked.connect(lambda _checked=False: self.controls.done_playing())
+        self.status_dot = QLabel(RECORDING_DOT)
+        self.status_dot.setStyleSheet(f"color: {colours.RED};")
+        self.status_label = QLabel()
+        self.status_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.banners = BannerArea(actions=dict.fromkeys(banner_keys.SET_UP_OBS_KEYS, strings.SET_UP_OBS))
+        self.banners.action_clicked.connect(lambda _key: self.setup_requested.emit())
         self.handoff = HandoffPanel(open_url=open_url)
+        self.lines_label = QLabel(LINES_TITLE)
         self.live_list = LiveList()
+        self.recent_label = QLabel(RECENT_TITLE)
         self.recent = RecentSessions(vad_jobs=vad_jobs, open_url=open_url)
 
-        game_row = QHBoxLayout()
-        game_row.addWidget(self.game, 1)
-        game_row.addWidget(self.new_game_button)
-        game_row.addWidget(self.edit_game_button)
-        controls = QHBoxLayout()
-        controls.addWidget(self.arm_button)
-        controls.addWidget(self.record_button)
-        controls.addWidget(self.state_label, 1)
-        controls.addWidget(self.elapsed_label)
-        controls.addWidget(self.cues_label)
+        top = QHBoxLayout()
+        top.addWidget(self.status_row)
+        top.addStretch(1)
+        top.addWidget(self.settings_button)
+        self.first_run = QWidget()
+        first = QVBoxLayout(self.first_run)
+        first.setContentsMargins(0, 0, 0, 0)
+        first.addWidget(self.add_game_button)
+        first.addWidget(self.first_run_hint)
+        self.game_row = _row(self.game, self.new_game_button, self.edit_game_button, stretch=self.game)
+        self.control_row = _row(
+            self.primary_button,
+            self.get_ready_button,
+            self.done_button,
+            self.status_dot,
+            self.status_label,
+            stretch=self.status_label,
+        )
         column = QVBoxLayout()
-        column.addWidget(self.status_row)
-        column.addLayout(game_row)
-        column.addLayout(controls)
+        column.addLayout(top)
+        column.addWidget(self.first_run)
+        column.addWidget(self.game_row)
+        column.addWidget(self.control_row)
         column.addWidget(self.banners)
         column.addWidget(self.handoff)
-        column.addWidget(QLabel("Lines"))
-        column.addWidget(self.live_list, 3)
-        column.addWidget(QLabel("Recent sessions"))
-        column.addWidget(self.recent, 2)
+        column.addWidget(self.lines_label)
+        column.addWidget(self.live_list, 1)
+        column.addWidget(self.recent_label)
+        column.addWidget(self.recent, 1)
+        column.addStretch(0)  # keeps the first-run rows at the top while the lists are hidden
         body = QWidget()
         body.setLayout(column)
         self.setCentralWidget(body)
-        self.resize(560, 680)
+        self.resize(screen_bounded(self, WINDOW_SIZE))
 
         self._timer = QTimer(self)
         self._timer.setInterval(ELAPSED_REFRESH_MS)
-        self._timer.timeout.connect(self._show_counts)
+        self._timer.timeout.connect(self._show_status)
+        # Before the controls: _on_state reads the state the controls still hold as the previous one.
         signals.state_changed.connect(self._on_state)
+        self.controls = RecordingControls(
+            control, signals, game=self._selected_slug, auto_start_game=auto_start_game, now=now, parent=self
+        )
+        self.controls.changed.connect(self._show_state)
         signals.source_status.connect(self._on_source_status)
         signals.line_accepted.connect(self._on_line)
         signals.banner.connect(self.banners.show_banner)
+        signals.banner.connect(self._on_banner)
         signals.banner_cleared.connect(self.banners.clear)
         signals.session_finished.connect(self._on_session_finished)
         signals.vad_progress.connect(self.recent.vad_progress)
         signals.vad_finished.connect(self.recent.vad_finished)
+        self.game.currentIndexChanged.connect(lambda _index: self._show_state())
         self.set_games(games, selected)
         self.reload_sessions()
-
-    def _build_menu(self) -> None:
-        self.settings_action = QAction("Settings…", self)
-        self.settings_action.triggered.connect(lambda _checked=False: self.settings_requested.emit())
-        self.setup_action = QAction("Setup wizard…", self)
-        self.setup_action.triggered.connect(lambda _checked=False: self.setup_requested.emit())
-        self.quit_action = QAction("Quit", self)
-        self.quit_action.triggered.connect(lambda _checked=False: self._on_quit())
-        bar = self.menuBar()
-        menu = bar.addMenu("&File") if bar is not None else None
-        if menu is not None:
-            menu.addAction(self.settings_action)
-            menu.addAction(self.setup_action)
-            menu.addSeparator()
-            menu.addAction(self.quit_action)
 
     # --- what the app changes -------------------------------------------------------------------
 
     def set_games(self, games: Sequence[tuple[str, str]], selected: str | None = None) -> None:
         """Replace the game list; ``selected`` (else the current game, while listed) stays selected."""
         keep = selected if selected is not None else self.game.currentData()
+        self.game.blockSignals(True)
         self.game.clear()
         for slug, title in games:
             self.game.addItem(title, slug)
         if keep is not None and (index := self.game.findData(keep)) >= 0:
             self.game.setCurrentIndex(index)
+        self.game.blockSignals(False)
         self._show_state()
 
     def set_text_sources(self, text_sources: Sequence[tuple[str, str]]) -> None:
@@ -330,64 +392,65 @@ class MainWindow(QMainWindow):
         """List the recent sessions again from ``output_root()`` (after a finalise, or a new folder)."""
         if self._output_root is not None:
             self.recent.load(self._output_root())
+        self._show_recent()
 
     def banner_texts(self) -> list[str]:
         """The banners shown, oldest first."""
         return self.banners.texts()
 
+    def selected_title(self) -> str | None:
+        """The selected game's title (the tray names it)."""
+        return self.game.currentText() if self.game.count() else None
+
     # --- commands out ---------------------------------------------------------------------------
 
-    def _arm_clicked(self) -> None:
-        if self._state is AppState.IDLE:
-            slug = self.game.currentData()
-            if isinstance(slug, str):
-                self._control.post(UserCommand(CommandKind.ARM, slug=slug))
-        else:
-            self._control.post(UserCommand(CommandKind.DISARM))
-
-    def _record_clicked(self) -> None:
-        kind = CommandKind.STOP if self._state is AppState.RECORDING else CommandKind.START
-        self._control.post(UserCommand(kind))
+    def _selected_slug(self) -> str | None:
+        slug = self.game.currentData()
+        return slug if isinstance(slug, str) else None
 
     def _edit_clicked(self) -> None:
-        slug = self.game.currentData()
-        if isinstance(slug, str):
+        if (slug := self._selected_slug()) is not None:
             self.edit_game_requested.emit(slug)
 
     def closeEvent(self, event: QCloseEvent | None) -> None:  # noqa: N802 - Qt override
         if event is not None:
             event.ignore()
-        if self.minimise_to_tray and self._state is not AppState.IDLE:
+        if self.minimise_to_tray and self.controls.state is not AppState.IDLE:
             self.hide()
+            self.hidden_to_tray.emit()
             return
         self._on_quit()
 
     # --- state in -------------------------------------------------------------------------------
 
     def _on_state(self, state: AppState, slug: str | None) -> None:
-        if state is AppState.RECORDING and self._state is not AppState.RECORDING:
-            self._recording_since = self._now()
+        """Runs before ``RecordingControls`` hears the state: ``controls.state`` is still the previous one."""
+        was = self.controls.state
+        if state is AppState.RECORDING and was is not AppState.RECORDING:
             self._journalled.reset()
             self._timer.start()
-        elif state is not AppState.RECORDING and self._recording_since is not None:
-            self._last_elapsed = self._now() - self._recording_since
-            self._recording_since = None
+            self.handoff.hide()  # UJ-08: the last hand-off goes once the next recording runs
+        elif state is not AppState.RECORDING and was is AppState.RECORDING:
             self._timer.stop()
+            self._session_this_time = True
         if state is AppState.IDLE:
             self.status_row.clear_sources()
-        self.status_row.set_shown(state is not AppState.IDLE)
-        self._state = state
+            self._session_this_time = False
         if slug is not None and (index := self.game.findData(slug)) >= 0:
             self.game.setCurrentIndex(index)
-        self._show_state()
 
     def _on_source_status(self, source_id: str, status: SourceStatus) -> None:
         self.status_row.set_status(source_id, status)
+        self._show_placeholder()
 
     def _on_line(self, line: GameLine, offset_ms: int | None, replaces_previous: bool) -> None:
         self.live_list.add(line, offset_ms, replaces_previous)
         self._journalled.add(line, offset_ms, replaces_previous)
-        self._show_counts()
+        self._show_status()
+
+    def _on_banner(self, _banner: Banner) -> None:
+        """``auto_start_pending()`` can change on a banner alone (a late ``obs_exited`` lifts the D-06 pause)."""
+        self._show_status()
 
     def _on_session_finished(self, manifest_path: Path) -> None:
         self.reload_sessions()
@@ -395,20 +458,62 @@ class MainWindow(QMainWindow):
         if row is not None:
             self.handoff.show_session(row)
 
-    def _show_state(self) -> None:
-        idle = self._state is AppState.IDLE
-        has_game = self.game.count() > 0
-        self.state_label.setText(_STATE_TEXT[self._state])
-        self.game.setEnabled(idle)
-        self.edit_game_button.setEnabled(has_game)
-        self.arm_button.setText("Arm" if idle else "Disarm")
-        self.arm_button.setEnabled((idle and has_game) or self._state is AppState.ARMED)
-        self.record_button.setText("Stop" if self._state is AppState.RECORDING else "Start")
-        self.record_button.setEnabled(self._state in (AppState.ARMED, AppState.RECORDING))
-        self._show_counts()
+    # --- what the window shows ------------------------------------------------------------------
 
-    def _show_counts(self) -> None:
-        since = self._recording_since
-        self.elapsed_label.setText(clock_text(self._last_elapsed if since is None else self._now() - since))
-        cues = self._journalled.count
-        self.cues_label.setText(f"{cues} cue" if cues == 1 else f"{cues} cues")
+    def _show_state(self) -> None:
+        controls = self.controls
+        state, pending = controls.state, controls.pending
+        idle = state is AppState.IDLE
+        has_game = self.game.count() > 0
+        self.first_run.setHidden(has_game)
+        for part in (self.game_row, self.control_row, self.lines_label, self.live_list):
+            part.setHidden(not has_game)
+        self.game.setEnabled(idle and pending is None)
+        self.edit_game_button.setEnabled(idle and has_game and pending is None)
+        pending_text = PENDING_TEXT.get(pending) if pending is not None else None
+        if pending_text is not None:
+            self.primary_button.setText(pending_text)
+        else:
+            self.primary_button.setText(
+                strings.STOP_RECORDING if state is AppState.RECORDING else strings.START_RECORDING
+            )
+        self.primary_button.setEnabled(controls.can_record())
+        self.get_ready_button.setHidden(not controls.offers_get_ready())
+        self.done_button.setHidden(state is not AppState.ARMED)
+        self.done_button.setEnabled(pending is None)
+        self.status_row.set_shown(not idle or pending is not None)
+        self.banners.set_actions_shown(idle and pending is None)
+        self._show_status()
+        self._show_placeholder()
+        self._show_recent()
+
+    def _show_status(self) -> None:
+        state = self.controls.state
+        self.status_label.setText(
+            strings.status_text(
+                state,
+                auto_start_pending=state is AppState.ARMED and self._auto_start_pending(),
+                elapsed=clock_text(self.controls.elapsed()),
+                lines=self._journalled.count,
+            )
+        )
+        self.status_dot.setHidden(state is not AppState.RECORDING)
+
+    def _show_placeholder(self) -> None:
+        controls = self.controls
+        if controls.pending is not None and self.status_row.status(OBS_SOURCE_ID) is SourceStatus.CONNECTING:
+            text = STARTING_OBS_HINT
+        elif controls.state is AppState.IDLE:
+            text = IDLE_HINT
+        elif controls.state is AppState.ARMED:
+            text = AFTER_SESSION_HINT if self._session_this_time else WAITING_HINT
+        elif controls.state is AppState.RECORDING:
+            text = WAITING_HINT
+        else:
+            text = ""
+        self.live_list.set_placeholder(text)
+
+    def _show_recent(self) -> None:
+        hidden = self.game.count() == 0 or not self.recent.rows()
+        self.recent_label.setHidden(hidden)
+        self.recent.setHidden(hidden)
