@@ -20,7 +20,7 @@ from anki_miner_game.models.messages import (
     SourceStatus,
     StateChanged,
 )
-from anki_miner_game.models.obs import ObsRequestError, OutputState
+from anki_miner_game.models.obs import ObsEventName, ObsRequestError, OutputState
 from anki_miner_game.session import session as session_mod
 from anki_miner_game.session.journal import (
     LineRecord,
@@ -533,3 +533,37 @@ async def test_quitting_while_recording_leaves_the_session_to_the_next_launch_wh
     ]
     assert h.sources[0].closed == 1
     assert restore_path().exists()
+
+
+async def lose_obs_while_ready(h: Harness) -> None:
+    """OBS exits while Ready (the user closes it, or it crashes): no session, so nothing ends; the link drops."""
+    await h.emit(ObsEventName.EXIT_STARTED)
+    h.gateway.connected = False
+    h.discovery.running = False
+    await h.emit(ObsEventName.CONNECTION_LOST)
+
+
+async def test_a_start_after_obs_went_away_relaunches_and_reconnects_it_first(h: Harness):
+    """D-04, B1-02: Start does what Get ready does when OBS is gone, then records."""
+    await h.arm()
+    await lose_obs_while_ready(h)
+    connects = h.gateway.connects
+    await h.send(CommandKind.START)
+    assert (h.discovery.launches, h.gateway.connects) == (1, connects + 1)
+    assert "StartRecord" in h.gateway.names()  # sent once connected: the fake refuses it before
+    assert START_FAILED_BANNER_KEY not in h.banners()
+    await h.started(ZERO)
+    assert h.actor.state is AppState.RECORDING
+
+
+async def test_a_start_whose_relaunch_fails_is_a_failed_start_and_stays_ready(h: Harness):
+    await h.arm()
+    await h.line("はじまり", T0 + 0.2)
+    await lose_obs_while_ready(h)
+    h.discovery.ready = False  # OBS shows a dialog (Crash Detected) and never answers
+    await h.send(CommandKind.START, line=h.accepted()[0].line)
+    assert "30 s" in h.banners()[BannerKey.OBS]
+    assert h.banners()[START_FAILED_BANNER_KEY] == "OBS did not start recording: the app could not reach OBS."
+    assert "StartRecord" not in h.gateway.names()
+    assert h.actor.state is AppState.ARMED
+    assert h.actor._held is None

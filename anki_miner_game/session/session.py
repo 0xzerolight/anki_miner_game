@@ -1127,8 +1127,16 @@ class SessionActor:
         self._counts = self._counts.incremented(name)
 
     async def _start(self, line: GameLine | None) -> None:
-        """``StartRecord`` while armed (spec 11.4); the session begins at ``STARTED``, whoever starts it."""
+        """``StartRecord`` while armed (spec 11.4); the session begins at ``STARTED``, whoever starts it.
+
+        D-04: an OBS that went away while ready is started and connected first, as arming does; when
+        that fails the start fails (``START_FAILED_BANNER_KEY``, after the ``obs`` banner) and auto mode
+        tries again at its next line.
+        """
         if self._state is not AppState.ARMED or self._start_deadline is not None:
+            return
+        if not await self._ensure_connected():
+            self._start_failed("OBS did not start recording: the app could not reach OBS.")
             return
         if line is not None:  # auto mode: the session's counts start with the line that started it
             self._held = [line]
