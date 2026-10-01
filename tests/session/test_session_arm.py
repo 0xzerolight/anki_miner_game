@@ -300,6 +300,37 @@ async def test_unreadable_websocket_settings_point_at_set_up_obs(rig: Harness):
 
 
 @pytest.mark.parametrize(
+    ("error", "text"),
+    [
+        (
+            ObsConnectError("cannot connect to OBS at 127.0.0.1:4455: ConnectionRefusedError"),
+            "OBS's WebSocket server is off. Close OBS and press Start recording: the app turns it on.",
+        ),
+        (
+            ObsAuthError("authentication failed"),
+            "OBS rejected the app's password. Press Done playing, then Set up OBS to enter it.",
+        ),
+        (
+            ObsConfigError("Expecting value: line 1 column 1"),
+            "OBS's WebSocket settings cannot be read (Expecting value: line 1 column 1); press Done playing, then "
+            "Set up OBS.",
+        ),
+    ],
+)
+async def test_while_ready_the_obs_banner_names_what_works_then(h: Harness, error: ObsError, text: str):
+    """D-04: a Start while ready connects again and can meet these. Set up OBS refuses until Done playing
+    then, and a Start with OBS closed turns the server on itself."""
+    await h.arm()
+    h.gateway.connected = False  # the server was turned off, or the password changed, in OBS
+    await h.emit(ObsEventName.CONNECTION_LOST)
+    h.discovery.ws_config = WsConfig(server_enabled=False, port=4455, password=None, auth_required=False)
+    h.gateway.connect_error = error
+    await h.send(CommandKind.START)
+    assert h.banners()[BannerKey.OBS] == text
+    assert h.actor.state is AppState.ARMED
+
+
+@pytest.mark.parametrize(
     "home_profile",
     [
         "Untitled",  # the profile switch, made by ensure_profile, loses its event

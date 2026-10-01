@@ -169,9 +169,17 @@ SWITCH_TIMEOUT_S: Final = 15.0
 OBS_LAUNCH_TIMEOUT_S: Final = 30.0
 """Spec 17: Arm launches OBS and waits up to 30 s for it to answer."""
 OBS_SERVER_OFF_TEXT: Final = "OBS's WebSocket server is off. Close OBS and press Set up OBS: the app turns it on."
-"""Banner (key ``obs``) when OBS runs with its WebSocket server off; the window puts Set up OBS… on it (UJ-10)."""
+"""Banner (key ``obs``) in Idle when OBS runs with its WebSocket server off; the window puts Set up OBS…
+on it (UJ-10)."""
+OBS_SERVER_OFF_READY_TEXT: Final = (
+    "OBS's WebSocket server is off. Close OBS and press Start recording: the app turns it on."
+)
+"""The same while a game is ready: Set up OBS refuses until Done playing, and a Start with OBS closed
+turns the server on before it starts OBS (D-04)."""
 OBS_AUTH_TEXT: Final = "OBS rejected the app's password. Press Set up OBS to enter it."
-"""Banner (key ``obs``) when OBS refuses the password (UJ-10)."""
+"""Banner (key ``obs``) in Idle when OBS refuses the password (UJ-10)."""
+OBS_AUTH_READY_TEXT: Final = "OBS rejected the app's password. Press Done playing, then Set up OBS to enter it."
+"""The same while a game is ready, where Set up OBS refuses until Done playing."""
 FREE_SPACE_WARN_BYTES: Final = 5 * 10**9
 """Spec 17: under 5 GB free at Arm, arm anyway with a warning."""
 REANCHOR_S: Final = 10.0
@@ -873,10 +881,11 @@ class SessionActor:
             nonlocal launched
             launched = launched or stage is not ObsStartStage.CONNECTING
 
+        idle = self._state is AppState.IDLE  # else D-04's Start: Set up OBS refuses until Done playing
         try:
             info = await self._starter.start(heard)
         except ObsServerOffError:
-            self._obs_failed(OBS_SERVER_OFF_TEXT, banner=banner_on_failure)
+            self._obs_failed(self._server_off_text(), banner=banner_on_failure)
             return False
         except ObsUnsupportedError as exc:
             self._obs_failed(
@@ -885,12 +894,11 @@ class SessionActor:
             )
             return False
         except ObsAuthError:
-            self._obs_failed(OBS_AUTH_TEXT, banner=banner_on_failure)
+            self._obs_failed(OBS_AUTH_TEXT if idle else OBS_AUTH_READY_TEXT, banner=banner_on_failure)
             return False
         except ObsConfigError as exc:
-            self._obs_failed(
-                f"OBS's WebSocket settings cannot be read ({exc}); press Set up OBS.", banner=banner_on_failure
-            )
+            then = "press Set up OBS" if idle else "press Done playing, then Set up OBS"
+            self._obs_failed(f"OBS's WebSocket settings cannot be read ({exc}); {then}.", banner=banner_on_failure)
             return False
         except ObsError as exc:
             text = await self._connect_failure_text(exc, was_running=not launched)
@@ -904,8 +912,8 @@ class SessionActor:
 
     async def _connect_failure_text(self, exc: ObsError, *, was_running: bool) -> str:
         """S5-3: OBS was already running (this attempt never had to launch it) and refused the
-        connection outright. Point at the WebSocket server being off, which Set up OBS turns on once
-        OBS is closed; otherwise a short Safe-Mode/dialog hint.
+        connection outright. Point at the WebSocket server being off, which Set up OBS (Idle) or Start
+        recording (Ready) turns on once OBS is closed; otherwise a short Safe-Mode/dialog hint.
         """
         if not was_running:
             return f"Cannot connect to OBS: {exc}"
@@ -914,8 +922,11 @@ class SessionActor:
         except ObsConfigError:
             ws = None
         if ws is None or not ws.server_enabled:
-            return OBS_SERVER_OFF_TEXT
+            return self._server_off_text()
         return f"Cannot connect to OBS: {exc} (OBS may be in Safe Mode, or showing a dialog in its window)"
+
+    def _server_off_text(self) -> str:
+        return OBS_SERVER_OFF_TEXT if self._state is AppState.IDLE else OBS_SERVER_OFF_READY_TEXT
 
     def _obs_failed(self, text: str, *, banner: bool = True) -> None:
         self._obs_status(SourceStatus.DISCONNECTED)

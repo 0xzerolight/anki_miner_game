@@ -6,7 +6,7 @@
 2. Game dropdown, **New game…**, **Edit…** (Edit… and the dropdown only in Idle, D-05).
 3. The primary button (**Start recording** / **Stop recording**), **Get ready** (Idle, for a game that
    starts at the first line), **Done playing** (Ready), and one status text (UJ-03).
-4. Banners (``widgets.banner_area``; ``obs`` banners carry **Set up OBS…** in Idle and Ready) and the last
+4. Banners (``widgets.banner_area``; ``obs`` banners carry **Set up OBS…** while Idle) and the last
    session's hand-off, hidden when the next recording starts.
 5. Lines: the last 200 accepted lines (``widgets.live_list``), with a hint while empty.
 6. Recent sessions (``widgets.recent_sessions``), hidden while there is none.
@@ -485,8 +485,8 @@ class MainWindow(QMainWindow):
         self.done_button.setHidden(state is not AppState.ARMED)
         self.done_button.setEnabled(pending is None)
         self.status_row.set_shown(not idle or pending is not None)
-        # Ready too: a Start that relaunched OBS can fail with a banner saying to press Set up OBS (D-04).
-        self.banners.set_actions_shown(state in (AppState.IDLE, AppState.ARMED) and pending is None)
+        # Idle only: Set up OBS refuses while ready, and the actor's texts then say Done playing first.
+        self.banners.set_actions_shown(idle and pending is None)
         self._show_status()
         self._show_placeholder()
         self._show_recent()
