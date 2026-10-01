@@ -8,10 +8,13 @@ cases where OBS never answers or never sends the events. ``FakeDiscovery`` model
 websocket ``config.json`` and the OBS process.
 """
 
+import ast
 import asyncio
+import re
 import threading
 from dataclasses import replace
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 from anki_miner_game.models.config import AppConfig
@@ -201,3 +204,32 @@ class FakeSession:
 
     def subscribe(self, cb: object) -> None:
         raise AssertionError("the wizard never subscribes to the session")
+
+
+def ui_strings(module: ModuleType) -> list[str]:
+    """String literals in ``module`` a user can see: not docstrings, not log messages."""
+    tree = ast.parse(Path(module.__file__ or "").read_text(encoding="utf-8"))
+    skip: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant):
+            skip.add(id(node.value))  # docstrings and attribute docstrings
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "log"
+        ):
+            skip.update(id(child) for child in ast.walk(node))
+    return [
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in skip
+    ]
+
+
+GLOSSARY_MISS = re.compile(r"(?<![-\w])(dis)?arm(ed|ing)?\b|\bcues?\b", re.IGNORECASE)
+"""D-01 and UJ-32: "arm" never reaches the user (the ``--arm`` CLI verb aside); "line", never "cue"."""
+
+
+def glossary_misses(module: ModuleType) -> list[str]:
+    return [text for text in ui_strings(module) if GLOSSARY_MISS.search(text) or "websocket" in text]

@@ -28,7 +28,7 @@ from types import MappingProxyType
 from typing import Any, Final
 from urllib.parse import urlsplit
 
-from PyQt6.QtCore import QDir, QObject, Qt, QUrl, pyqtSignal, pyqtSlot
+from PyQt6.QtCore import QDir, QObject, QSize, Qt, QUrl, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QDesktopServices, QPalette
 from PyQt6.QtWidgets import (
     QFrame,
@@ -54,7 +54,7 @@ from anki_miner_game.gui.strings import (
     WAYLAND_CLIPBOARD_TEXT,
     install_now_text,
 )
-from anki_miner_game.gui.widgets.layout import error_label, show_message
+from anki_miner_game.gui.widgets.layout import error_label, screen_bounded, show_message
 from anki_miner_game.interfaces.addons import AddonService
 from anki_miner_game.interfaces.obs import ObsDiscovery, ObsGateway, ObsStarter, Provisioner
 from anki_miner_game.interfaces.session import SessionControl
@@ -514,6 +514,8 @@ VAD_DESCRIPTION: Final = "After each session, ends every subtitle where the voic
 OCR_DESCRIPTION: Final = "Reads the game's text from the screen, for games no text hooker can read."
 ADDON_GAP_PX: Final = 12
 PROGRESS_STEPS: Final = 1000
+WIZARD_SIZE: Final = QSize(640, 600)
+"""UJ-19: the one size every page opens at, bounded by the screen; long pages scroll."""
 
 
 def is_wayland_session() -> bool:
@@ -621,6 +623,7 @@ class SetupWizard(QWizard):
                 page.setTitle(f"Step {number} of {len(steps)}: {page.title()}")
             self.setPage(step, page)
         self.setStartId(start)
+        self.resize(screen_bounded(self, WIZARD_SIZE))
         self.currentIdChanged.connect(self._page_changed)
 
     @property
@@ -1009,6 +1012,8 @@ class AddonsPage(QWizardPage):
         column.addWidget(self.saved_in)
         column.addStretch(1)
         self.scroll_area = _scrolled(self, self.body)  # not "scroll": QWidget.scroll() is a method
+        for row in self.rows:
+            row.refresh()  # UJ-19: right before the first show, not only when the page is entered
 
     def initializePage(self) -> None:
         self.saved_in.setText(saved_in_text(self._wizard.config))

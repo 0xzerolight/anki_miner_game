@@ -15,10 +15,11 @@ from typing import Any
 import pytest
 from PyQt6.QtCore import Qt, QUrl
 from PyQt6.QtGui import QPalette
-from PyQt6.QtWidgets import QLabel, QWizard
+from PyQt6.QtWidgets import QFrame, QLabel, QWizard
 
 import anki_miner_game.gui.wizard as wizard_module
 from anki_miner_game.gui.strings import WAYLAND_CLIPBOARD_TEXT
+from anki_miner_game.gui.widgets.layout import available_size
 from anki_miner_game.gui.wizard import (
     CLIPBOARD_TEXT,
     CONNECTED_TEXT,
@@ -26,6 +27,7 @@ from anki_miner_game.gui.wizard import (
     NO_SOURCE_TEXT,
     OBS_DOWNLOAD_URL,
     OBS_SUMMARY,
+    WIZARD_SIZE,
     ObsCheck,
     ObsSetup,
     ObsStatus,
@@ -40,7 +42,7 @@ from anki_miner_game.models.config import DEFAULT_TEXT_SOURCES, AppConfig, TextS
 from anki_miner_game.models.messages import SourceStatus
 from anki_miner_game.obs.provision import ObsProvisioner
 from anki_miner_game.obs.startup import LocalObsStarter
-from tests.gui.wizard_fakes import FakeDiscovery, WizardObs
+from tests.gui.wizard_fakes import FakeDiscovery, WizardObs, glossary_misses
 from tests.obs.fake_obs import Sleeps
 
 NEXT = QWizard.WizardButton.NextButton
@@ -685,3 +687,31 @@ def test_gui_reaches_the_rest_only_through_interfaces_models_and_gui():
         for name in imported
         if not name.startswith(("anki_miner_game.models.", "anki_miner_game.interfaces.", "anki_miner_game.gui."))
     ] == []
+
+
+def test_every_page_opens_at_one_size_bounded_by_the_screen(qtbot, io_loop):
+    sizes = set()
+    for step in WizardStep:
+        wizard = Harness(qtbot, io_loop, start=step).wizard
+        screen = available_size(wizard)
+        assert wizard.width() <= max(WIZARD_SIZE.width(), wizard.minimumSizeHint().width())
+        assert wizard.height() <= screen.height()
+        sizes.add((wizard.width(), wizard.height()))
+    assert len(sizes) == 1
+
+
+def test_long_pages_scroll_down_never_sideways(qtbot, io_loop):
+    h = Harness(qtbot, io_loop)
+    for page in (h.wizard.obs_page, h.wizard.addons_page):
+        assert page.scroll_area.frameShape() == QFrame.Shape.NoFrame
+        assert page.scroll_area.widgetResizable()
+        assert page.scroll_area.horizontalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+
+
+def test_the_add_on_rows_are_filled_before_their_page_first_shows(qtbot, io_loop):
+    h = Harness(qtbot, io_loop)  # opens on OBS: the add-ons page has never been initialised
+    assert h.wizard.addons_page.rows[0].button.text() == "Install (190 MB)"
+
+
+def test_no_user_facing_wizard_text_uses_words_outside_the_glossary():
+    assert glossary_misses(wizard_module) == []
