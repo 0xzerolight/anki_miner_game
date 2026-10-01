@@ -1,19 +1,23 @@
 """The settings dialog: every ``AppConfig`` field of spec 5 but ``last_game``, which it keeps as it is.
 
-The dialog saves nothing: on Save it emits ``config_saved`` with the new config, and the caller
-stores it. The OBS port and password are read from OBS's own websocket settings unless the user
-types an override; only a typed password is ever stored (spec 11.1). The hotkey is Windows only
-(spec 16); on Linux the dialog says how to bind the CLI verbs instead. Each setup wizard step can be
-run again from here (spec 16): the dialog asks with ``setup_step_requested(WizardStep)``, and
-``take_setup`` shows what such a step saved.
+Two short groups, Recordings and While playing, and a collapsed Advanced part (UJ-21). The dialog saves
+nothing: on Save it emits ``config_saved`` with the new config, and the caller stores it. The OBS port
+and password are read from OBS's own WebSocket settings unless the user types an override; only a typed
+password is ever stored (spec 11.1). ``obs.host`` is not shown: the stored value is kept and still
+checked. The hotkey is Windows only (spec 16); on Linux the dialog says how to bind the CLI verbs.
+Setup jobs sit where they are needed (UJ-22): Set up OBS… and Install…/Repair… ask for one wizard page
+with ``setup_step_requested(WizardStep)``, Test… asks for the Game text page over the table's current
+rows with ``test_sources_requested``; ``take_setup`` shows the OBS password such a step saved.
 """
 
 import os
 import sys
+from collections.abc import Callable
 from dataclasses import replace
 from typing import Final
 
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt, QUrl, pyqtSignal
+from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -31,11 +35,14 @@ from PyQt6.QtWidgets import (
     QSpinBox,
     QTableWidget,
     QTableWidgetItem,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
 from anki_miner_game.gui.hotkey_win import HotkeyError, parse_hotkey
+from anki_miner_game.gui.strings import SET_UP_OBS, install_elsewhere_text, size_mb
+from anki_miner_game.gui.widgets.layout import clear_on_edit, error_label, fit_dialog, message_label, show_message
 from anki_miner_game.gui.wizard import WizardStep
 from anki_miner_game.interfaces.addons import AddonService
 from anki_miner_game.models.addons import AddonStatus
@@ -43,7 +50,6 @@ from anki_miner_game.models.config import (
     AppConfig,
     CueSettings,
     FeedSettings,
-    ObsSettings,
     RecordingSettings,
     TextSourceConfig,
     VadSettings,
@@ -55,26 +61,21 @@ RESERVED_SOURCE_IDS: Final = frozenset({OBS_SOURCE_ID, "clipboard", "ocr"})
 """Source ids the app uses itself: the OBS light, the clipboard source and the OCR source; a text
 source the user adds never gets one."""
 
-OBS_PASSWORD_NOTE: Final = (
-    "Leave the port and password to OBS: the app reads them from OBS's WebSocket settings at each "
-    "connect and stores none. A password typed here is stored in the app's settings."
+VIDEO_PRESETS: Final = (
+    ("1080p, 30 fps", 1080, 30),
+    ("720p, 30 fps (smaller files)", 720, 30),
+    ("1080p, 60 fps", 1080, 60),
+    ("720p, 60 fps", 720, 60),
 )
-MAX_CUE_NOTE: Final = "The longest a cue lasts when the next line is slow to come."
+"""UJ-23: the Video choices (label, max height, fps); a stored pair outside them is an extra item."""
+TRIM_TEXT: Final = "Trim each line's end to where the voice stops"
+FEED_TEXT: Final = "Show the lines on a web page for dictionary lookups"
+FEED_PAGE_URL: Final = "http://127.0.0.1:{port}/"
+"""The feed page's address, as ``FeedServer.page_url`` gives it (the GUI may not import ``feed``)."""
+HOTKEY_LABEL: Final = "Start/stop recording hotkey"
 END_GAP_NOTE: Final = (
-    "Silence between a cue's end and the next cue: Anki Miner's audio padding (0.3 s) plus 50 ms. "
-    "Raise it by as much as you raise that padding."
+    "The gap is Anki Miner's audio padding (0.3 s) plus 50 ms; if you raise that padding, raise the gap as much."
 )
-VAD_NOTE: Final = "After each session, trim every cue's end to where the voice stops."
-FEED_NOTE: Final = (
-    "A page on this machine shows each line as it arrives, for dictionary lookups while playing; "
-    "texthooker pages can connect to the WebSocket port."
-)
-SETUP_STEPS: Final = (
-    (WizardStep.OBS, "OBS"),
-    (WizardStep.SOURCES, "Text sources"),
-    (WizardStep.ADDONS, "Add-ons"),
-)
-SETUP_NOTE: Final = "Run a step of the setup wizard again."
 LINUX_CONTROL_NOTE: Final = (
     "Linux has no global hotkey. In your desktop's keyboard shortcut settings, bind the app's command "
     "followed by --toggle (or --start, --stop, --arm <game>). The command is anki_miner_game for the "
@@ -83,16 +84,14 @@ LINUX_CONTROL_NOTE: Final = (
 )
 """Only the .deb puts ``anki_miner_game`` on PATH (packaging/nfpm.yaml)."""
 
-_VAD_STATUS_TEXT: Final = {
-    AddonStatus.READY: "VAD add-on installed.",
-    AddonStatus.MISSING: "The VAD add-on is not installed: the live subtitle is kept. Install it from the setup wizard.",
-    AddonStatus.INSTALLING: "The VAD add-on is being installed.",
-    AddonStatus.BROKEN: "The VAD add-on is damaged: install it again from the setup wizard.",
-}
-
-_HEIGHTS: Final = (1080, 720)
+_SOURCE_HEADERS: Final = ("On", "Name", "Address (host:port)")
 _ON, _NAME, _ADDRESS = range(3)
 _ID_ROLE: Final = Qt.ItemDataRole.UserRole
+
+
+def vad_install_text(size_bytes: int) -> str:
+    """UJ-21: the line shown instead of the trim check while the voice-trimming add-on is not ready."""
+    return f"Trimming each line to the voice needs the voice-trimming add-on (about {size_mb(size_bytes)} MB)."
 
 
 def _note(text: str) -> QLabel:
@@ -123,12 +122,26 @@ def _address(text: str) -> str:
     return text.removeprefix("ws://")
 
 
+def _hotkey_problem(text: str) -> str | None:
+    """One sentence about a hotkey the app cannot register, or ``None`` (UJ-31: no nested sentence)."""
+    if not text.strip():
+        return "No start/stop recording hotkey is set."
+    try:
+        parse_hotkey(text)
+    except HotkeyError:
+        return f"The hotkey {text} cannot be used: press one key together with Ctrl, Shift, Alt or Win."
+    return None
+
+
 class SettingsDialog(QDialog):
     """Edit the app's settings (spec 5); emits ``config_saved(AppConfig)`` on Save."""
 
     config_saved = pyqtSignal(object)
+    """The new ``AppConfig``, on Save."""
     setup_step_requested = pyqtSignal(object)
-    """A ``WizardStep`` to run again."""
+    """A ``WizardStep`` to open alone: ``OBS`` (Set up OBS…) or ``ADDONS`` (Install…/Repair…)."""
+    test_sources_requested = pyqtSignal(object)
+    """The table's current rows (``tuple[TextSourceConfig, ...]``) for the Game text page (Test…)."""
 
     def __init__(
         self,
@@ -136,65 +149,147 @@ class SettingsDialog(QDialog):
         *,
         vad_addon: AddonService,
         platform: str | None = None,
+        open_url: Callable[[QUrl], object] = QDesktopServices.openUrl,
         parent: QWidget | None = None,
     ) -> None:
-        """``platform`` defaults to ``sys.platform``."""
+        """``platform`` defaults to ``sys.platform``; ``open_url`` opens the feed page's link."""
         super().__init__(parent)
         self._cfg = cfg
+        self._vad_addon = vad_addon
+        self._open_url = open_url
         self._windows = (platform or sys.platform) == "win32"
         self.setWindowTitle("Settings")
         content = QWidget()
         column = QVBoxLayout(content)
         column.addWidget(self._build_recordings(cfg))
-        column.addWidget(self._build_obs(cfg))
-        column.addWidget(self._build_sources(cfg))
-        column.addWidget(self._build_subtitles(cfg, vad_addon))
-        column.addWidget(self._build_feed(cfg))
-        column.addWidget(self._build_control(cfg))
-        column.addWidget(self._build_setup())
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setWidget(content)
-        self.problems_label = _note("")
-        self.problems_label.hide()
+        column.addWidget(self._build_playing(cfg))
+        self.advanced_button = QToolButton()
+        self.advanced_button.setText("Advanced")
+        self.advanced_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.advanced_button.setArrowType(Qt.ArrowType.RightArrow)
+        self.advanced_button.setAutoRaise(True)
+        self.advanced_button.clicked.connect(self._toggle_advanced)
+        column.addWidget(self.advanced_button, 0, Qt.AlignmentFlag.AlignLeft)
+        self.advanced = self._build_advanced(cfg)
+        self.advanced.hide()  # collapsed at every open
+        column.addWidget(self.advanced)
+        column.addStretch(1)
+        self._scroll = QScrollArea()
+        self._scroll.setWidget(content)
+        self.problems_label = error_label()
         self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
         self.buttons.accepted.connect(self.accept)
         self.buttons.rejected.connect(self.reject)
         outer = QVBoxLayout(self)
-        outer.addWidget(scroll)
+        outer.addWidget(self._scroll)
         outer.addWidget(self.problems_label)
         outer.addWidget(self.buttons)
+        self._forms = (self._recordings_form, self._playing_form, self._obs_form, self._timing_form)
+        self.feed_check.toggled.connect(self._feed_changed)
+        self.http_port_spin.valueChanged.connect(self._feed_changed)
+        self._feed_changed()
+        self.refresh_addons()
+        clear_on_edit(self.problems_label, self)  # UJ-31: a stale "Cannot save" goes at the next edit
+        fit_dialog(self, scroll=self._scroll, forms=self._forms)
 
     # Building -------------------------------------------------------------------------------
 
     def _build_recordings(self, cfg: AppConfig) -> QWidget:
         box = QGroupBox("Recordings")
-        form = QFormLayout(box)
+        form = self._recordings_form = QFormLayout(box)
         self.output_edit = QLineEdit(cfg.output_root)
         self.browse_button = QPushButton("Browse…")
         self.browse_button.clicked.connect(self._browse)
         row = QHBoxLayout()
         row.addWidget(self.output_edit, 1)
         row.addWidget(self.browse_button)
-        form.addRow("Output folder", row)
-        self.max_height_combo = QComboBox()
-        heights = _HEIGHTS if cfg.recording.max_height in _HEIGHTS else (*_HEIGHTS, cfg.recording.max_height)
-        for height in heights:
-            self.max_height_combo.addItem(f"{height}p", height)
-        self.max_height_combo.setCurrentIndex(self.max_height_combo.findData(cfg.recording.max_height))
-        form.addRow("Video height at most", self.max_height_combo)
-        self.fps_spin = QSpinBox()
-        self.fps_spin.setRange(1, 120)
-        self.fps_spin.setSuffix(" fps")
-        self.fps_spin.setValue(cfg.recording.fps)
-        form.addRow("Frame rate", self.fps_spin)
+        form.addRow("Save sessions in", row)
+        self.video_combo = QComboBox()
+        stored = (cfg.recording.max_height, cfg.recording.fps)
+        presets = [(label, (height, fps)) for label, height, fps in VIDEO_PRESETS]
+        if stored not in [data for _label, data in presets]:
+            presets.append((f"{stored[0]}p, {stored[1]} fps", stored))  # a hand-edited pair is kept
+        for label, data in presets:
+            self.video_combo.addItem(label, data)
+        # Not findData: PyQt compares Python item data by identity, so an equal tuple is not found.
+        self.video_combo.setCurrentIndex([data for _label, data in presets].index(stored))
+        form.addRow("Video", self.video_combo)
+        self.vad_check = QCheckBox(TRIM_TEXT)
+        self.vad_check.setChecked(cfg.vad.enabled)
+        form.addRow(self.vad_check)
+        self.vad_install_label = message_label()
+        self.vad_install_button = QPushButton()
+        self.vad_install_button.clicked.connect(lambda: self.setup_step_requested.emit(WizardStep.ADDONS))
+        self.vad_install_row = QWidget()
+        line = QHBoxLayout(self.vad_install_row)
+        line.setContentsMargins(0, 0, 0, 0)
+        line.addWidget(self.vad_install_label, 1)
+        line.addWidget(self.vad_install_button, 0, Qt.AlignmentFlag.AlignTop)
+        form.addRow(self.vad_install_row)
+        return box
+
+    def _build_playing(self, cfg: AppConfig) -> QWidget:
+        box = QGroupBox("While playing")
+        form = self._playing_form = QFormLayout(box)
+        self.feed_check = QCheckBox(FEED_TEXT)
+        self.feed_check.setChecked(cfg.feed.enabled)
+        form.addRow(self.feed_check)
+        self.feed_link = QLabel()
+        self.feed_link.setTextFormat(Qt.TextFormat.RichText)
+        self.feed_link.setOpenExternalLinks(False)
+        self.feed_link.linkActivated.connect(lambda href: self._open_url(QUrl(href)))
+        form.addRow(self.feed_link)
+        self.hotkey_edit: QLineEdit | None = None
+        if self._windows:
+            self.hotkey_edit = QLineEdit(cfg.hotkey)
+            form.addRow(HOTKEY_LABEL, self.hotkey_edit)
+        else:
+            self.control_label = _note(LINUX_CONTROL_NOTE)
+            form.addRow(self.control_label)
+        return box
+
+    def _build_advanced(self, cfg: AppConfig) -> QWidget:
+        advanced = QWidget()
+        column = QVBoxLayout(advanced)
+        column.setContentsMargins(0, 0, 0, 0)
+        column.addWidget(self._build_sources(cfg))
+        column.addWidget(self._build_obs(cfg))
+        column.addWidget(self._build_timing(cfg))
+        column.addWidget(self._build_feed_ports(cfg))
+        return advanced
+
+    def _build_sources(self, cfg: AppConfig) -> QWidget:
+        box = QGroupBox("Text hookers")
+        column = QVBoxLayout(box)
+        self.sources_table = QTableWidget(0, len(_SOURCE_HEADERS))
+        self.sources_table.setHorizontalHeaderLabels(list(_SOURCE_HEADERS))
+        self.sources_table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        if (rows := self.sources_table.verticalHeader()) is not None:
+            rows.hide()
+        if (header := self.sources_table.horizontalHeader()) is not None:
+            header.setSectionResizeMode(_ON, QHeaderView.ResizeMode.ResizeToContents)
+            header.setSectionResizeMode(_NAME, QHeaderView.ResizeMode.ResizeToContents)
+            header.setSectionResizeMode(_ADDRESS, QHeaderView.ResizeMode.Stretch)
+        for source in cfg.text_sources:
+            self._add_row(source.id, source.name, source.uri, source.enabled)
+        self._fit_table()
+        column.addWidget(self.sources_table)
+        self.test_sources_button = QPushButton("Test…")
+        self.test_sources_button.clicked.connect(lambda: self.test_sources_requested.emit(self._text_sources()))
+        self.add_source_button = QPushButton("Add")
+        self.add_source_button.clicked.connect(self._add_new_row)
+        self.remove_source_button = QPushButton("Remove")
+        self.remove_source_button.clicked.connect(self._remove_row)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        for button in (self.test_sources_button, self.add_source_button, self.remove_source_button):
+            row.addWidget(button)
+        column.addLayout(row)
         return box
 
     def _build_obs(self, cfg: AppConfig) -> QWidget:
-        box = QGroupBox("OBS")
-        form = QFormLayout(box)
-        self.host_edit = QLineEdit(cfg.obs.host)
-        form.addRow("Host", self.host_edit)
+        box = QGroupBox("OBS connection")
+        form = self._obs_form = QFormLayout(box)
         self.port_spin = QSpinBox()
         self.port_spin.setRange(0, 65535)
         self.port_spin.setSpecialValueText("Read from OBS")
@@ -203,105 +298,78 @@ class SettingsDialog(QDialog):
         self.password_edit = QLineEdit(cfg.obs.password_override or "")
         self.password_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self.password_edit.setPlaceholderText("Read from OBS")
-        form.addRow("Password", self.password_edit)
-        form.addRow(_note(OBS_PASSWORD_NOTE))
-        return box
-
-    def _build_sources(self, cfg: AppConfig) -> QWidget:
-        box = QGroupBox("Text sources")
-        column = QVBoxLayout(box)
-        self.sources_table = QTableWidget(0, 3)
-        self.sources_table.setHorizontalHeaderLabels(["On", "Name", "Address"])
-        if (rows := self.sources_table.verticalHeader()) is not None:
-            rows.hide()
-        if (header := self.sources_table.horizontalHeader()) is not None:
-            header.setSectionResizeMode(_ADDRESS, QHeaderView.ResizeMode.Stretch)
-        for source in cfg.text_sources:
-            self._add_row(source.id, source.name, source.uri, source.enabled)
-        column.addWidget(self.sources_table)
-        self.add_source_button = QPushButton("Add")
-        self.add_source_button.clicked.connect(lambda: self._add_row(None, "New source", "localhost:", True))
-        self.remove_source_button = QPushButton("Remove")
-        self.remove_source_button.clicked.connect(self._remove_row)
+        self.setup_obs_button = QPushButton(SET_UP_OBS)
+        self.setup_obs_button.clicked.connect(lambda: self.setup_step_requested.emit(WizardStep.OBS))
         row = QHBoxLayout()
-        row.addWidget(_note("The address is host:port, as the hooker's WebSocket server listens."), 1)
-        row.addWidget(self.add_source_button)
-        row.addWidget(self.remove_source_button)
-        column.addLayout(row)
+        row.addWidget(self.password_edit, 1)
+        row.addWidget(self.setup_obs_button)
+        form.addRow("Password", row)
         return box
 
-    def _build_subtitles(self, cfg: AppConfig, vad_addon: AddonService) -> QWidget:
-        box = QGroupBox("Subtitles")
-        form = QFormLayout(box)
+    def _build_timing(self, cfg: AppConfig) -> QWidget:
+        box = QGroupBox("Subtitle timing")
+        form = self._timing_form = QFormLayout(box)
         self.max_cue_spin = QSpinBox()
         self.max_cue_spin.setRange(MAX_CUE_SECONDS_MIN, MAX_CUE_SECONDS_MAX)
         self.max_cue_spin.setSuffix(" s")
         self.max_cue_spin.setValue(cfg.cue.max_cue_seconds)
-        form.addRow("Longest cue", self.max_cue_spin)
-        form.addRow(_note(MAX_CUE_NOTE))
+        form.addRow("Longest line", self.max_cue_spin)
         self.end_gap_spin = QSpinBox()
         self.end_gap_spin.setRange(0, 5000)
         self.end_gap_spin.setSingleStep(50)
         self.end_gap_spin.setSuffix(" ms")
         self.end_gap_spin.setValue(cfg.cue.end_gap_ms)
-        form.addRow("Gap before the next cue", self.end_gap_spin)
+        form.addRow("Gap before the next line", self.end_gap_spin)
         form.addRow(_note(END_GAP_NOTE))
-        self.vad_check = QCheckBox("Trim cue ends to the voice (VAD)")
-        self.vad_check.setChecked(cfg.vad.enabled)
-        form.addRow(self.vad_check)
-        form.addRow(_note(VAD_NOTE))
-        status = " ".join(filter(None, (_VAD_STATUS_TEXT[vad_addon.status()], vad_addon.note)))
-        self.vad_status_label = _note(status)
-        form.addRow(self.vad_status_label)
         return box
 
-    def _build_feed(self, cfg: AppConfig) -> QWidget:
-        box = QGroupBox("Text feed")
-        form = QFormLayout(box)
-        self.feed_check = QCheckBox("Serve the text feed")
-        self.feed_check.setChecked(cfg.feed.enabled)
-        form.addRow(self.feed_check)
+    def _build_feed_ports(self, cfg: AppConfig) -> QWidget:
+        self.feed_ports = QGroupBox("Text feed ports")
+        row = QHBoxLayout(self.feed_ports)
         self.http_port_spin = _port_spin(cfg.feed.http_port)
-        form.addRow("Page port", self.http_port_spin)
         self.ws_port_spin = _port_spin(cfg.feed.ws_port)
-        form.addRow("WebSocket port", self.ws_port_spin)
-        form.addRow(_note(FEED_NOTE))
-        return box
+        row.addWidget(QLabel("Page"))
+        row.addWidget(self.http_port_spin)
+        row.addSpacing(16)
+        row.addWidget(QLabel("WebSocket"))
+        row.addWidget(self.ws_port_spin)
+        row.addStretch(1)
+        return self.feed_ports
 
-    def _build_control(self, cfg: AppConfig) -> QWidget:
-        box = QGroupBox("Start and stop")
-        form = QFormLayout(box)
-        self.hotkey_edit: QLineEdit | None = None
-        if self._windows:
-            self.hotkey_edit = QLineEdit(cfg.hotkey)
-            form.addRow("Hotkey (Start/Stop while armed)", self.hotkey_edit)
-        else:
-            form.addRow(_note(LINUX_CONTROL_NOTE))
-        return box
+    # Reacting -------------------------------------------------------------------------------
 
-    def _build_setup(self) -> QWidget:
-        box = QGroupBox("Setup wizard")
-        row = QHBoxLayout(box)
-        row.addWidget(_note(SETUP_NOTE), 1)
-        self.setup_buttons: dict[WizardStep, QPushButton] = {}
-        for step, label in SETUP_STEPS:
-            button = QPushButton(label)
-            button.clicked.connect(lambda _checked=False, step=step: self.setup_step_requested.emit(step))
-            row.addWidget(button)
-            self.setup_buttons[step] = button
-        return box
+    def refresh_addons(self) -> None:
+        """Read the voice-trimming add-on's status again (after an install the wizard ran over this dialog)."""
+        status = self._vad_addon.status()
+        ready = status is AddonStatus.READY
+        self.vad_check.setVisible(ready)  # hidden, it keeps the stored vad.enabled
+        self.vad_install_row.setVisible(not ready)
+        show_message(self.vad_install_label, "" if ready else vad_install_text(self._vad_addon.size_bytes))
+        self.vad_install_button.setText(install_elsewhere_text(status))
 
     def take_setup(self, cfg: AppConfig) -> None:
-        """A setup step run from here saved ``cfg``: show its output folder and OBS password.
+        """A setup step run from here saved ``cfg``: show its OBS password.
 
         The other fields keep what the form shows; ``cfg`` becomes the base for the fields the form
         does not show.
         """
         self._cfg = cfg
-        self.output_edit.setText(cfg.output_root)
         self.password_edit.setText(cfg.obs.password_override or "")
 
-    def _add_row(self, source_id: str | None, name: str, uri: str, enabled: bool) -> None:
+    def _feed_changed(self, *_args: object) -> None:
+        on = self.feed_check.isChecked()
+        url = FEED_PAGE_URL.format(port=self.http_port_spin.value())
+        self.feed_link.setText(f'<a href="{url}">{url}</a>')
+        self.feed_link.setVisible(on)
+        self.feed_ports.setEnabled(on)
+
+    def _toggle_advanced(self) -> None:
+        opened = self.advanced.isHidden()
+        self.advanced.setVisible(opened)
+        self.advanced_button.setArrowType(Qt.ArrowType.DownArrow if opened else Qt.ArrowType.RightArrow)
+        fit_dialog(self, scroll=self._scroll, forms=self._forms)
+
+    def _add_row(self, source_id: str | None, name: str, uri: str, enabled: bool) -> int:
         row = self.sources_table.rowCount()
         self.sources_table.insertRow(row)
         on = QTableWidgetItem()
@@ -312,11 +380,27 @@ class SettingsDialog(QDialog):
         name_item.setData(_ID_ROLE, source_id)
         self.sources_table.setItem(row, _NAME, name_item)
         self.sources_table.setItem(row, _ADDRESS, QTableWidgetItem(uri))
+        return row
+
+    def _add_new_row(self) -> None:
+        row = self._add_row(None, "New source", "localhost:", True)
+        self._fit_table()
+        self.sources_table.setCurrentCell(row, _NAME)
+        self.sources_table.editItem(self._cell(row, _NAME))
 
     def _remove_row(self) -> None:
         row = self.sources_table.currentRow()
         if row >= 0:
             self.sources_table.removeRow(row)
+            self._fit_table()
+
+    def _fit_table(self) -> None:
+        """UJ-21: the table is as tall as its rows, so the dialog, not the table, scrolls."""
+        table = self.sources_table
+        header = table.horizontalHeader()
+        header_height = header.sizeHint().height() if header is not None else 0
+        rows = sum(table.rowHeight(row) for row in range(table.rowCount()))
+        table.setFixedHeight(2 * table.frameWidth() + header_height + rows)
 
     def _browse(self) -> None:
         start = os.path.expanduser(self.output_edit.text().strip())
@@ -358,13 +442,12 @@ class SettingsDialog(QDialog):
     def config(self) -> AppConfig:
         """The config as the form stands; ``problems`` says whether it can be saved."""
         cfg = self._cfg
+        max_height, fps = self.video_combo.currentData()
         return replace(
             cfg,
             output_root=self.output_edit.text().strip(),
-            obs=ObsSettings(
-                host=self.host_edit.text().strip(),
-                port=self.port_spin.value() or None,
-                password_override=self.password_edit.text() or None,
+            obs=replace(
+                cfg.obs, port=self.port_spin.value() or None, password_override=self.password_edit.text() or None
             ),
             text_sources=self._text_sources(),
             feed=FeedSettings(
@@ -373,40 +456,35 @@ class SettingsDialog(QDialog):
                 http_port=self.http_port_spin.value(),
             ),
             hotkey=cfg.hotkey if self.hotkey_edit is None else self.hotkey_edit.text().strip(),
-            recording=RecordingSettings(max_height=self.max_height_combo.currentData(), fps=self.fps_spin.value()),
+            recording=RecordingSettings(max_height=max_height, fps=fps),
             cue=CueSettings(max_cue_seconds=self.max_cue_spin.value(), end_gap_ms=self.end_gap_spin.value()),
             vad=VadSettings(enabled=self.vad_check.isChecked()),
         )
 
     def problems(self, cfg: AppConfig) -> list[str]:
-        """Why ``cfg`` cannot be saved; empty when it can."""
+        """Why ``cfg`` cannot be saved, one sentence each; empty when it can."""
         problems: list[str] = []
         if not cfg.output_root:
-            problems.append("the output folder is empty")
+            problems.append("The output folder is empty.")
         if not cfg.obs.host:
-            problems.append("the OBS host is empty")
+            problems.append("The OBS host in the settings file is empty.")
         for number, source in enumerate(cfg.text_sources, start=1):
             if not source.name:
-                problems.append(f"text source {number} has no name")
+                problems.append(f"Text source {number} has no name.")
             if not source.uri:
-                problems.append(f"text source {number} ({source.name}) has no address")
+                problems.append(f"Text source {number} ({source.name}) has no address.")
         if cfg.feed.ws_port == cfg.feed.http_port:
-            problems.append("the text feed needs two different ports")
-        if self.hotkey_edit is not None:
-            try:
-                parse_hotkey(cfg.hotkey)
-            except HotkeyError as exc:
-                problems.append(f"the hotkey is not valid ({exc})")
+            problems.append("The text feed needs two different ports.")
+        if self.hotkey_edit is not None and (problem := _hotkey_problem(cfg.hotkey)) is not None:
+            problems.append(problem)
         return problems
 
     def accept(self) -> None:
         cfg = self.config()
         problems = self.problems(cfg)
         if problems:
-            text = "; ".join(problems)
-            self.problems_label.setText(f"Cannot save: {text}.")
-            self.problems_label.show()
+            self.problems_label.set_error("Cannot save. " + " ".join(problems))
             return
-        self.problems_label.hide()
+        self.problems_label.clear()
         self.config_saved.emit(cfg)
         super().accept()
