@@ -576,12 +576,11 @@ class SetupWizard(QWizard):
 
     ``save_config(cfg)`` stores ``cfg`` and makes it the app's current config: the OBS gateway reads
     a typed password override through it at its next connect. It is called when a password is typed
-    after OBS refused one. ``source_factory`` builds a text
-    source for one configured source; the wizard starts the enabled ones while step 2 is shown and
-    stops them when it is left. ``run`` puts coroutines on the I/O loop. ``wayland`` defaults to the
-    current session. ``open_url`` opens the OBS-download link (a frozen Linux build passes one that
-    drops the bundle's ``LD_LIBRARY_PATH``, spec: ``app.open_url``); defaults to
-    ``QDesktopServices.openUrl``.
+    after OBS refused one. ``source_factory`` builds a text source for one configured source; the
+    wizard starts the enabled ones while step 2 is shown and stops them when it is left. ``run`` puts
+    coroutines on the I/O loop. ``wayland`` defaults to the current session. ``open_url`` opens the
+    OBS-download link (a frozen Linux build passes one that drops the bundle's ``LD_LIBRARY_PATH``,
+    spec: ``app.open_url``); defaults to ``QDesktopServices.openUrl``.
     """
 
     def __init__(

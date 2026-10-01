@@ -1,4 +1,4 @@
-"""The first-run wizard's pages (spec 16): OBS, text sources, output folder, optional add-ons.
+"""The setup wizard's pages (spec 16 as amended by UJ-17): OBS, game text, optional extras.
 
 Coroutines run on a real asyncio loop in another thread, as on the app's I/O thread, so every result
 crosses back to the Qt main thread the way it does in the app.
