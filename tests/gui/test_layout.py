@@ -9,6 +9,7 @@ from PyQt6.QtWidgets import (
     QDialog,
     QFormLayout,
     QFrame,
+    QGroupBox,
     QKeySequenceEdit,
     QLabel,
     QLineEdit,
@@ -114,6 +115,32 @@ def test_the_dialog_is_as_wide_as_its_content_and_spin_boxes_keep_their_width(qt
     assert dialog.minimumWidth() >= content.minimumSizeHint().width()
     spin = first.itemAt(0, QFormLayout.ItemRole.FieldRole).widget()
     assert spin.width() == spin.sizeHint().width()
+
+
+def test_a_group_whose_labels_the_shared_column_widens_opens_wide_enough(qtbot):
+    """A form in its own group box measures again once its labels widen (P5's request, G9): a group with
+    a short label and a wide field would otherwise open squeezed by the difference."""
+    dialog = QDialog()
+    qtbot.addWidget(dialog)
+    content = QWidget()
+    column = QVBoxLayout(content)
+    narrow_box, wide_box = QGroupBox("Narrow"), QGroupBox("Wide")
+    narrow = QFormLayout(narrow_box)
+    narrow.addRow("Gap before the next line", QSpinBox())
+    wide = QFormLayout(wide_box)
+    field = QLineEdit()
+    field.setMinimumWidth(300)
+    wide.addRow("Port", field)
+    column.addWidget(narrow_box)
+    column.addWidget(wide_box)
+    scroll = QScrollArea()
+    scroll.setWidget(content)
+    QVBoxLayout(dialog).addWidget(scroll)
+    fit_dialog(dialog, scroll=scroll, forms=(narrow, wide))
+    dialog.show()
+    qtbot.waitExposed(dialog)
+    assert scroll.viewport().width() >= content.minimumSizeHint().width()
+    assert dialog.minimumWidth() >= content.minimumSizeHint().width()
 
 
 def test_a_tall_dialog_is_bounded_by_the_screen(qtbot):
