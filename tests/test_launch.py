@@ -253,6 +253,26 @@ def test_a_lock_left_by_a_killed_instance_does_not_stop_the_next_launch(tmp_path
     assert "SHOWN ['Anki Miner Game'" in done.stdout
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32" or os.geteuid() == 0, reason="a read-only folder needs POSIX modes, which root ignores"
+)
+def test_a_lock_file_that_cannot_be_written_does_not_hold_up_the_launch(qapp):
+    """A read-only home, or a full disk, fails ``tryLock`` at once and for good: the launch must not
+    spin until the claim timeout (130 s) and exit unseen, but start as it did before the lock."""
+    home = paths.home()
+    lock = QLockFile(str(home / launch.INSTANCE_LOCK_NAME))
+    home.chmod(0o555)
+    try:
+        started = time.monotonic()
+        assert launch.claim_instance(lock, server_name(home), None, timeout_s=10.0) is None
+        assert lock.error() == QLockFile.LockError.PermissionError
+        with pytest.raises(PermissionError):  # the log cannot open either: a visible failure, as before
+            launch.main([])
+        assert time.monotonic() - started < 5.0
+    finally:
+        home.chmod(0o755)
+
+
 BOOM = textwrap.dedent("""
     import sys
 

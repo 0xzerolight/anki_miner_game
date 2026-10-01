@@ -102,13 +102,17 @@ def claim_instance(
 ) -> bool | None:
     """Become the instance, or hand ``command`` to the one that holds ``lock``.
 
-    ``None`` once ``lock`` is held: this process is the instance. Otherwise the answer of the instance
-    that holds it (``cli_verbs.send``), or ``False`` when none answered within ``timeout_s``.
+    ``None`` once ``lock`` is held: this process is the instance. ``None`` too when the lock file cannot
+    be written (a read-only home, a full disk): ``tryLock`` then fails at once and for good, so this
+    process starts without it, as before the lock. Otherwise the answer of the instance that holds it
+    (``cli_verbs.send``), or ``False`` when none answered within ``timeout_s``.
     """
     deadline = time.monotonic() + timeout_s
     while True:
         if lock.tryLock(CLAIM_TRY_MS):
             return None
+        if lock.error() != QLockFile.LockError.LockFailedError:
+            return None  # not held by another: waiting would only spin until the deadline
         answered = cli_verbs.send(name, command)
         if answered is not None:
             return answered
