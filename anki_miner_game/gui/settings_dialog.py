@@ -18,7 +18,7 @@ from dataclasses import replace
 from pathlib import Path, PurePosixPath
 from typing import Final
 
-from PyQt6.QtCore import Qt, QUrl, pyqtSignal
+from PyQt6.QtCore import QDir, Qt, QUrl, pyqtSignal
 from PyQt6.QtGui import QDesktopServices, QKeySequence
 from PyQt6.QtWidgets import (
     QCheckBox,
@@ -46,7 +46,7 @@ from PyQt6.QtWidgets import (
 from anki_miner_game.gui.hotkey_win import HotkeyError, parse_hotkey
 from anki_miner_game.gui.strings import SET_UP_OBS, install_elsewhere_text, size_mb
 from anki_miner_game.gui.widgets.layout import clear_on_edit, error_label, fit_dialog, message_label, show_message
-from anki_miner_game.gui.wizard import WizardStep
+from anki_miner_game.gui.wizard import WizardStep, native_path
 from anki_miner_game.interfaces.addons import AddonService
 from anki_miner_game.models.addons import AddonStatus
 from anki_miner_game.models.config import (
@@ -91,6 +91,32 @@ DEB_DIR: Final = PurePosixPath("/opt/anki-miner-game")
 COMMAND: Final = "anki_miner_game"
 BIND_TEXT: Final = "Bind this command to a key in your desktop's keyboard settings:"
 _PORTABLE: Final = QKeySequence.SequenceFormat.PortableText
+BUSY_FOLDER_TEXT: Final = "Press Done playing before changing the folder."
+"""D-05: the session being recorded or about to be finishes in the folder it started in."""
+
+
+def same_folder(a: str, b: str) -> bool:
+    """Whether two folder texts name one folder once ``~`` is expanded and the path normalised."""
+
+    def norm(path: str) -> str:
+        return os.path.normcase(os.path.normpath(os.path.expanduser(path)))
+
+    return norm(a) == norm(b)
+
+
+def folder_problem(text: str) -> str | None:
+    """B4-03: the setup wizard's former folder rules; creates the folder when it can."""
+    folder = Path(text).expanduser()
+    if not folder.is_absolute():
+        return "Choose a full path, such as the one Browse gives."
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        return f"This folder cannot be created: {exc.strerror or exc}."
+    if not os.access(folder, os.W_OK):
+        return "This folder is not writable. Choose another one."
+    return None
+
 
 _SOURCE_HEADERS: Final = ("On", "Name", "Address (host:port)")
 _ON, _NAME, _ADDRESS = range(3)
@@ -181,14 +207,17 @@ class SettingsDialog(QDialog):
         cfg: AppConfig,
         *,
         vad_addon: AddonService,
+        busy: Callable[[], bool] = lambda: False,
         platform: str | None = None,
         open_url: Callable[[QUrl], object] = QDesktopServices.openUrl,
         parent: QWidget | None = None,
     ) -> None:
-        """``platform`` defaults to ``sys.platform``; ``open_url`` opens the feed page's link."""
+        """``platform`` defaults to ``sys.platform``; ``open_url`` opens the feed page's link. ``busy`` says
+        whether a game is ready or recording; it is asked at Save (D-05)."""
         super().__init__(parent)
         self._cfg = cfg
         self._vad_addon = vad_addon
+        self._busy = busy
         self._open_url = open_url
         self._windows = (platform or sys.platform) == "win32"
         self.setWindowTitle("Settings")
@@ -230,7 +259,8 @@ class SettingsDialog(QDialog):
     def _build_recordings(self, cfg: AppConfig) -> QWidget:
         box = QGroupBox("Recordings")
         form = self._recordings_form = QFormLayout(box)
-        self.output_edit = QLineEdit(cfg.output_root)
+        self._shown_root = native_path(cfg.output_root)  # UJ-33: the real folder, not "~/..."
+        self.output_edit = QLineEdit(self._shown_root)
         self.browse_button = QPushButton("Browse…")
         self.browse_button.clicked.connect(self._browse)
         row = QHBoxLayout()
@@ -451,8 +481,12 @@ class SettingsDialog(QDialog):
         picker.setFileMode(QFileDialog.FileMode.Directory)
         picker.setOption(QFileDialog.Option.ShowDirsOnly)
         picker.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
-        picker.fileSelected.connect(self.output_edit.setText)
+        picker.fileSelected.connect(self._chosen)
         picker.open()  # Not exec(): a nested event loop in a native picker can block the app.
+
+    def _chosen(self, folder: str) -> None:
+        self.output_edit.setText(QDir.toNativeSeparators(folder))
+        self.problems_label.clear()  # a chosen folder is an edit; setText emits no textEdited
 
     # The config -----------------------------------------------------------------------------
 
@@ -488,7 +522,7 @@ class SettingsDialog(QDialog):
         max_height, fps = self.video_combo.currentData()
         return replace(
             cfg,
-            output_root=self.output_edit.text().strip(),
+            output_root=self._output_root(),
             obs=replace(
                 cfg.obs, port=self.port_spin.value() or None, password_override=self.password_edit.text() or None
             ),
@@ -508,11 +542,21 @@ class SettingsDialog(QDialog):
             vad=VadSettings(enabled=self.vad_check.isChecked()),
         )
 
+    def _output_root(self) -> str:
+        """The field's folder; while it still shows the stored folder, the stored text itself (UJ-33)."""
+        typed = self.output_edit.text().strip()
+        return self._cfg.output_root if typed == self._shown_root else typed
+
     def problems(self, cfg: AppConfig) -> list[str]:
         """Why ``cfg`` cannot be saved, one sentence each; empty when it can."""
         problems: list[str] = []
         if not cfg.output_root:
             problems.append("The output folder is empty.")
+        elif not same_folder(cfg.output_root, self._cfg.output_root):
+            if self._busy():
+                problems.append(BUSY_FOLDER_TEXT)
+            elif (problem := folder_problem(cfg.output_root)) is not None:
+                problems.append(problem)
         if not cfg.obs.host:
             problems.append("The OBS host in the settings file is empty.")
         for number, source in enumerate(cfg.text_sources, start=1):

@@ -1,10 +1,13 @@
 """The settings dialog (spec 5 ``AppConfig``; UJ-21..UJ-24, UJ-30, UJ-31, UJ-33, B4-03, B4-07, B5-02)."""
 
+import os
 import shlex
+import sys
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
-from PyQt6.QtCore import Qt, QUrl
+from PyQt6.QtCore import QDir, Qt, QUrl
 from PyQt6.QtGui import QKeySequence
 from PyQt6.QtWidgets import (
     QFileDialog,
@@ -19,6 +22,7 @@ from PyQt6.QtWidgets import (
 import anki_miner_game.gui.settings_dialog as settings_module
 from anki_miner_game.gui.settings_dialog import (
     BIND_TEXT,
+    BUSY_FOLDER_TEXT,
     END_GAP_NOTE,
     HOTKEY_LABEL,
     LINUX_CONTROL_NOTE,
@@ -540,16 +544,118 @@ def test_the_feed_page_link_and_ports_follow_the_feed_check(qtbot) -> None:
 # Output folder ----------------------------------------------------------------------------------------
 
 
-def test_browse_fills_the_output_folder(qtbot, tmp_path) -> None:
+STORED = "~/Videos/Anki Miner Game"
+
+
+def test_browse_fills_the_output_folder_with_native_separators(qtbot, tmp_path) -> None:
     dialog = open_dialog(qtbot)
 
     dialog.browse_button.click()
     picker = dialog.findChild(QFileDialog)
     assert picker is not None and picker.isVisible()
-    picker.fileSelected.emit(str(tmp_path))
+    picker.fileSelected.emit(tmp_path.as_posix())
     picker.close()
 
-    assert dialog.config().output_root == str(tmp_path)
+    assert dialog.output_edit.text() == QDir.toNativeSeparators(tmp_path.as_posix())
+    assert dialog.config().output_root == QDir.toNativeSeparators(tmp_path.as_posix())
+
+
+def test_the_folder_shows_as_the_real_path_and_an_untouched_field_keeps_the_stored_text(qtbot) -> None:
+    dialog = open_dialog(qtbot, AppConfig())
+    assert dialog.output_edit.text() == QDir.toNativeSeparators(os.path.expanduser(STORED))
+    assert "~" not in dialog.output_edit.text()
+    assert save(qtbot, dialog).output_root == STORED
+
+
+@pytest.mark.parametrize("typed", [False, True], ids=["untouched", "same-folder-typed"])
+def test_a_busy_app_saves_when_the_folder_is_the_same(qtbot, typed: bool) -> None:
+    """Review Focus 2: D-05 refuses only a changed folder."""
+    same = os.path.expanduser(STORED) + os.sep  # here, not in the parametrize: the test's own home
+    dialog = open_dialog(qtbot, AppConfig(), busy=lambda: True)
+    if typed:
+        dialog.output_edit.setText(same)
+    dialog.max_cue_spin.setValue(20)
+
+    cfg = save(qtbot, dialog)
+
+    assert cfg.output_root == (same if typed else STORED)  # untouched: the stored string byte for byte
+    assert cfg.cue.max_cue_seconds == 20
+
+
+def test_a_busy_app_refuses_a_changed_folder(qtbot, tmp_path) -> None:
+    dialog = open_dialog(qtbot, AppConfig(), busy=lambda: True)
+    dialog.output_edit.setText(str(tmp_path / "other"))
+
+    text = refused(qtbot, dialog)
+
+    assert "Press Done playing before changing the folder" in text
+    assert BUSY_FOLDER_TEXT == "Press Done playing before changing the folder."
+    assert not (tmp_path / "other").exists()  # nothing is created while busy
+
+
+def test_busy_is_asked_at_save_time(qtbot, tmp_path) -> None:
+    """A game made ready from the tray or the CLI while the dialog is open counts."""
+    busy = [False]
+    dialog = open_dialog(qtbot, AppConfig(), busy=lambda: busy[0])
+    dialog.output_edit.setText(str(tmp_path / "other"))
+    busy[0] = True
+
+    assert "Press Done playing" in refused(qtbot, dialog)
+
+
+@pytest.mark.parametrize("typed", ["Anki Miner Game", "D:Games"])
+def test_a_folder_that_is_not_a_full_path_is_refused(qtbot, typed: str) -> None:
+    """B4-03: OBS would get a relative record directory."""
+    dialog = open_dialog(qtbot)
+    dialog.output_edit.setText(typed)
+
+    assert "Choose a full path, such as the one Browse gives." in refused(qtbot, dialog)
+
+
+def test_a_full_path_is_created_and_saved(qtbot, tmp_path) -> None:
+    folder = tmp_path / "Game Sessions" / "rec"
+    dialog = open_dialog(qtbot)
+    dialog.output_edit.setText(str(folder))
+
+    assert save(qtbot, dialog).output_root == str(folder)
+    assert folder.is_dir()
+
+
+def test_a_home_relative_folder_saves_as_typed(qtbot) -> None:
+    dialog = open_dialog(qtbot)
+    dialog.output_edit.setText("~/x")
+
+    assert save(qtbot, dialog).output_root == "~/x"
+    assert (Path.home() / "x").is_dir()
+
+
+def test_a_folder_that_cannot_be_created_is_refused(qtbot, tmp_path) -> None:
+    blocker = tmp_path / "file"
+    blocker.write_text("x", encoding="utf-8")
+    dialog = open_dialog(qtbot)
+    dialog.output_edit.setText(str(blocker / "rec"))
+
+    assert "This folder cannot be created" in refused(qtbot, dialog)
+
+
+@pytest.mark.skipif(sys.platform == "win32" or os.geteuid() == 0, reason="POSIX permissions, not as root")
+def test_a_folder_that_is_not_writable_is_refused(qtbot, tmp_path) -> None:
+    folder = tmp_path / "read-only"
+    folder.mkdir()
+    folder.chmod(0o500)
+    try:
+        dialog = open_dialog(qtbot)
+        dialog.output_edit.setText(str(folder))
+        assert "This folder is not writable. Choose another one." in refused(qtbot, dialog)
+    finally:
+        folder.chmod(0o700)
+
+
+def test_an_untouched_stored_folder_is_not_checked(qtbot) -> None:
+    """Settings unrelated to the folder still save while the stored folder is on a drive that is gone."""
+    dialog = open_dialog(qtbot)  # CUSTOM: /data/Game Sessions, which the test machine cannot create
+    dialog.max_cue_spin.setValue(21)
+    assert save(qtbot, dialog).output_root == CUSTOM.output_root
 
 
 # A wizard step run from here ---------------------------------------------------------------------------
