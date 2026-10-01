@@ -76,6 +76,21 @@ def test_the_panel_counts_the_sessions_in_the_game_folder(panel, tmp_path):
     )
 
 
+def test_the_batch_count_leaves_out_sessions_without_a_subtitle(panel, tmp_path):
+    """Batch mines a video with its subtitle: a "No lines" session is not one of them (P8 saw "all 21"
+    with 9 of them empty)."""
+    widget, _ = panel
+    place(tmp_path, manifest(1))
+    place(tmp_path, manifest(2, cues=()))
+    row = read_session(place(tmp_path, manifest(3)))
+    assert row is not None
+    widget.show_session(row)
+    assert "To mine all 2 sessions at once" in widget.label.text()
+    place(tmp_path, manifest(1, cues=()))  # the only other one has no subtitle either now
+    widget.show_session(row)
+    assert widget.label.text() == SINGLE
+
+
 def test_the_panel_lines_up_with_the_banners(panel):
     widget, _ = panel
     assert widget.layout().contentsMargins() == QMargins(6, 4, 4, 4)
