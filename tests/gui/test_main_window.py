@@ -12,6 +12,7 @@ from anki_miner_game.gui import colours
 from anki_miner_game.gui.main_window import MainWindow, Pending, RecordingControls
 from anki_miner_game.gui.presenters.qt_presenter import QtPresenter
 from anki_miner_game.gui.widgets.layout import screen_bounded
+from anki_miner_game.models.addons import AddonStatus
 from anki_miner_game.models.lines import GameLine
 from anki_miner_game.models.messages import (
     OBS_SOURCE_ID,
@@ -543,7 +544,9 @@ def test_settings_is_a_flat_button_and_there_is_no_menu_bar(qtbot, make):
         window.settings_button.click()
 
 
-def test_an_obs_banner_offers_set_up_obs_only_while_idle(qtbot, make):
+def test_an_obs_banner_offers_set_up_obs_until_a_recording_runs(qtbot, make):
+    """The banner says "press Set up OBS", also when a Start while ready relaunched OBS and failed (D-04);
+    while ready the OBS step then says to press Done playing first."""
     w = make()
     w.presenter.banner(Banner("obs", BannerLevel.ERROR, "OBS's WebSocket server is off."))
     w.presenter.banner(Banner("feed", BannerLevel.WARNING, "port 6678 is in use"))
@@ -553,6 +556,8 @@ def test_an_obs_banner_offers_set_up_obs_only_while_idle(qtbot, make):
     with qtbot.waitSignal(w.window.setup_requested):
         button.click()
     w.presenter.state_changed(AppState.ARMED, "steins-gate")
+    assert not button.isHidden()
+    w.presenter.state_changed(AppState.RECORDING, "steins-gate")
     assert button.isHidden()
     w.presenter.state_changed(AppState.IDLE, None)
     w.window.primary_button.click()
@@ -606,3 +611,51 @@ def test_the_window_fits_the_screen_and_lines_and_sessions_share_the_height(make
     column = window.centralWidget().layout()
     assert column.stretch(column.indexOf(window.live_list)) == 1
     assert column.stretch(column.indexOf(window.recent)) == 1
+
+
+# The voice-trimming add-on reaches the recent sessions (UJ-09, master 4.8 G2) ----------------------
+
+
+class _IdleControl:
+    """``SessionControl`` for a window that only lists sessions."""
+
+    state = AppState.IDLE
+
+    def post(self, msg: object) -> None:
+        raise AssertionError("nothing is posted here")
+
+    def subscribe(self, cb: object) -> None:
+        raise AssertionError("the window listens to the presenter")
+
+
+class _ReadyAddon:
+    """``AddonService`` of an installed add-on; the recent sessions read only ``status``."""
+
+    size_bytes = 96_000_000
+    note = None
+
+    def status(self) -> AddonStatus:
+        return AddonStatus.READY
+
+    async def install(self, progress: object) -> None:
+        raise AssertionError("nothing is installed here")
+
+
+def test_the_window_hands_the_voice_trimming_add_on_to_the_recent_sessions(qtbot, tmp_path):
+    root = tmp_path / "out"
+    path = place(root, manifest(3))
+
+    def menu_texts(addon: _ReadyAddon | None) -> list[str]:
+        window = MainWindow(
+            _IdleControl(),
+            QtPresenter().signals,
+            [("steins-gate", "Steins;Gate")],
+            on_quit=lambda: None,
+            output_root=lambda: root,
+            vad_addon=addon,
+        )
+        qtbot.addWidget(window)
+        return [action.text() for action in window.recent.menu_for(path).actions()]
+
+    assert "Trim again" in menu_texts(_ReadyAddon())
+    assert "Trim again" not in menu_texts(None)

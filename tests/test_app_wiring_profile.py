@@ -6,18 +6,22 @@ import sys
 from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 import pytest
 from PyQt6.QtWidgets import QWidget
 
+from anki_miner_game import app as app_mod
 from anki_miner_game import paths, store
 from anki_miner_game.app import App
 from anki_miner_game.gui import game_profile_dialog
-from anki_miner_game.gui.game_profile_dialog import GameProfileDialog
+from anki_miner_game.gui.game_profile_dialog import GameProfileDialog, ProfileDialogServices
+from anki_miner_game.gui.wizard import SetupWizard, WizardStep
 from anki_miner_game.models.messages import AppState, CommandKind, UserCommand
 from anki_miner_game.models.obs import WindowItem
 from anki_miner_game.models.profile import AudioMode, AudioSettings, AutoSettings, GameProfile
 from anki_miner_game.obs.startup import LocalObsStarter
+from anki_miner_game.session import session as session_mod
 from anki_miner_game.session.naming import slugify
 from anki_miner_game.store import StoreWriteError
 from tests.app_rig import SLUG, Rig
@@ -57,8 +61,9 @@ def test_a_new_game_is_saved_listed_selected_and_can_be_armed(rig):
     rig.wait(lambda: rig.state() is AppState.ARMED and last_slug(rig) == slug)
 
 
-def test_an_edit_applies_to_the_next_arm_through_auto_mode(rig):
+def test_an_edit_applies_to_the_next_arm_through_auto_mode(rig, monkeypatch):
     """The profile the actor and auto mode look up is the one just saved: auto-start on the first line."""
+    monkeypatch.setattr(session_mod, "QUIT_START_WAIT_S", 0.05)  # B1-03: the test ends with a start in flight
     app = rig.start()
     app.window.edit_game_requested.emit(SLUG)
     dialog = shown(app, GameProfileDialog)
@@ -138,3 +143,33 @@ def test_a_new_game_lists_its_window_with_obs_closed_at_launch_and_saves_it(rig,
     saved = store.load_profiles().profiles[slugify("Chaos;Head")]
     assert saved.capture.window == game.value
     assert saved.audio.mode is (AudioMode.APP if sys.platform == "win32" else AudioMode.DESKTOP)
+
+
+# Install… in a game profile (UJ-22b, master 4.8 G6) ------------------------------------------------
+
+
+def test_install_in_a_game_profile_opens_the_add_ons_page_alone_over_it(rig, monkeypatch):
+    """UJ-22b: the OCR add-on is installed from where it is needed, then the profile reads it again."""
+    made: list[ProfileDialogServices] = []
+    real = app_mod.ProfileDialogServices
+
+    def capture(**fields: Any) -> ProfileDialogServices:
+        made.append(real(**fields))
+        return made[-1]
+
+    monkeypatch.setattr(app_mod, "ProfileDialogServices", capture)
+    app = rig.start()
+    app.window.new_game_requested.emit()
+    dialog = shown(app, GameProfileDialog)
+    assert dialog is not None and made
+    install = made[-1].install_addons
+    assert install is not None
+    refreshed: list[int] = []
+    monkeypatch.setattr(dialog, "refresh_addons", lambda: refreshed.append(1))
+    install()
+    wizard = shown(app, SetupWizard)
+    assert wizard is not None and wizard.parent() is dialog
+    assert wizard.single_step and wizard.currentId() == WizardStep.ADDONS
+    assert wizard.currentPage().nextId() == -1
+    wizard.reject()
+    assert refreshed == [1]

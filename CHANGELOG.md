@@ -6,6 +6,47 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+### Changed
+
+- **One click records.** In the main window **Start recording** gets OBS ready and starts the recording in one press, and **Stop recording** leaves the game ready for the next session; **Done playing** puts OBS back on your own profile. **Get ready** appears only for a game whose auto mode starts at the first line. While a step runs the button reads **Getting OBS ready…**, **Starting…** or **Stopping…**, so a second click no longer queues a second setup. The word "arm" is gone from the app.
+- **The default Windows hotkey is now `Alt+F9`.** With `Ctrl+Shift+F9` the game saw a held Ctrl, which visual novels such as STEINS;GATE read as skip: every press from inside the game skipped lines and left one merged junk line in the subtitle. Settings that still hold `Ctrl+Shift+F9` change to `Alt+F9` at the next launch; a hotkey you chose yourself is kept.
+- **A simpler main window.** No menu bar: **Settings…** sits at the top right. With no game yet the window shows only **Add your game…**. Lights appear once a game is getting ready: **OBS** and one **Game text** light. One status line ("Ready", "Recording 0:22:05 · 7 lines"), larger text in **Lines**, and banners in the theme's text colour with an icon. OBS banners carry **Set up OBS…**. The window fits the screen.
+- **Recent sessions say what state a session is in.** Four columns and plain words ("Ready", "Trimming 75%", "Trim failed", "Not filed yet"; hover for why). Double-click a row to open its folder; right-click for **Trim again** and **Undo trimming**, offered only while the voice-trimming add-on is installed. The panel after a session is shorter and points at Video -> Batch once the game has two sessions.
+- **The tray follows the window.** It offers the window's buttons and hides what cannot run, its icon shows a state dot, and the first close to the tray says the app is still running.
+- **The app has its own icon everywhere.** The window, the taskbar, the tray, `AnkiMinerGame.exe`, Setup and its shortcuts show the app icon; the Windows build carried PyInstaller's default one.
+- **Setup takes three pages: OBS, Game text and Optional extras.** The output folder page is gone; the last page says where sessions are saved (change it in **Settings…**). **Set up OBS…** on a banner or in Settings, **Test…** and **Install…** open their page alone.
+- **Settings has two groups and Advanced.** **Recordings** and **While playing**, then **Advanced** for the text hookers, the OBS connection, subtitle timing and the text feed ports. One **Video** choice replaces height and frame rate; the hotkey is set by pressing it; Linux shows the exact command to bind. **Test…** checks the hookers as they are in the table, before saving.
+- **The game profile asks less.** **Text from** is one choice (a text hooker, copied text, or reading the screen); one **Game window** dropdown sets the window and which sound is recorded; the OCR language is chosen by name; **Auto mode** shows its options only while it is on; the rest is under **Advanced**. A new Windows game can be saved with only its title.
+- **`--arm` takes the game's title.** `--arm "Steins;Gate"` works as well as the slug, which no screen shows.
+
+### Fixed
+
+- **The game dialog lists windows when OBS was closed at start.** Opening **Game window** starts OBS minimised and connects ("Starting OBS… (up to 30 s)", then "Looking for windows…"). Before, the list said OBS was not connected, so a new Windows game could not be given its window.
+- **Start recording relaunches OBS.** With OBS closed or crashed while a game was ready, every Start failed with "not connected to OBS", and in auto mode every line repeated it. Start now starts OBS and reconnects first; if that fails, the start-failed banner shows and auto mode tries again at the next line.
+- **A manual Stop is no longer undone by auto mode.** With auto mode starting at the first line, the next line started a new session right after you pressed Stop. A Stop from the window, the tray, the hotkey or OBS now pauses auto-start until you press **Start recording** or **Get ready**; auto mode's own stops and OBS closing do not.
+- **Changes are no longer half-applied while a game is ready.** **Edit…** is off from **Start recording** until **Done playing**, and Settings refuses a new output folder then ("Press Done playing before changing the folder"). Profile edits saved while ready were ignored until the next session although the window already showed them, and a finishing session went to the old folder and never appeared in Recent sessions.
+- **OCR lines are no longer lost when owocr starts.** The OCR source now retries every 0.25 s instead of backing off for up to 10 s, during which the line on screen when owocr came up, or came back after a minimise, was dropped.
+- **Trim again no longer undoes a good trim.** A re-run that cannot finish, because the add-on is damaged or the trim fails, keeps the session's trimmed subtitle.
+- **Installing or repairing the OCR add-on no longer freezes the lights and lines.** Removing the old install ran on the app's I/O thread.
+- **A second launch no longer becomes a second app.** Two launches close together (a double-click on a pinned icon) started two full instances, and a launch during a quit re-showed a window that then vanished. The second launch now waits for the first and hands it its command.
+- **A command such as `--toggle` from a desktop shortcut is no longer dropped now and then.** The running app could lose a command it had just accepted, and the shortcut did nothing.
+- **A failed write to the session's line journal no longer leaves the app stuck in Recording.**
+- **Done playing or Quit while a recording is starting no longer leaves OBS recording on its own.**
+- **Warnings about one session clear when the next recording starts.**
+- **Auto-start keeps the newest line** when several arrive at once, instead of starting with a stale one and losing the newer.
+- **A failed auto-stop is tried again** at the next check.
+- **Installing OBS while the app runs is seen without a restart.**
+- **Settings check the output folder and hooker addresses before saving.** A relative folder, one that cannot be created or written, `localhost:` or an `http://` address was saved and then failed.
+- **Saving Settings while an OCR or clipboard game is ready keeps its light.**
+- **Trim again or Undo trimming on a session moved or deleted meanwhile reloads the list** instead of leaving the row busy.
+- **An error during start-up is written to the log.**
+- **The uninstaller names the real settings folder** instead of a literal `%USERPROFILE%`.
+- **Windows: another user's OBS is not taken for yours.**
+
+### Security
+
+- **The text feed's WebSocket accepts only this machine's pages and the hosted texthooker-ui.** Any web page open in your browser could read the feed, which in clipboard mode carries everything you copy while a game is ready. Apps and scripts (no Origin), pages from `http://127.0.0.1` or `http://localhost`, and `https://renji-xd.github.io` still connect; any other page, and a texthooker page opened as a file, is refused (HTTP 403).
+
 ## [1.0.1] - 2026-09-25
 
 Fixes from the Windows release QA on STEINS;GATE: add-on installs on a new PC and from Setup's last page, the opening words and long pauses of voiced cards, windowed capture, OCR text and focus, Agent's lines, Steam's OBS, and two hangs.

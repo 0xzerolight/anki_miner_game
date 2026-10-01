@@ -91,7 +91,7 @@ class BannerArea(QWidget):
             frame.deleteLater()
 
     def set_actions_shown(self, shown: bool) -> None:
-        """Show or hide every action button (the window shows Set up OBS… only while Idle)."""
+        """Show or hide every action button (the window shows Set up OBS… in Idle and Ready)."""
         self._actions_shown = shown
         for frame in self._banners.values():
             if frame.action_button is not None:

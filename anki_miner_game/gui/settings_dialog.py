@@ -283,11 +283,6 @@ class SettingsDialog(QDialog):
         self.refresh_addons()
         clear_on_edit(self.problems_label, self)  # UJ-31: a stale "Cannot save" goes at the next edit
         fit_dialog(self, scroll=self._scroll, forms=self._forms)
-        # That first call widened the label column after the groups had measured themselves: let each group
-        # measure again and fit once more, so nothing opens squeezed under its minimum.
-        for form in self._forms:
-            form.activate()
-        fit_dialog(self, scroll=self._scroll, forms=self._forms)
 
     # Building -------------------------------------------------------------------------------
 

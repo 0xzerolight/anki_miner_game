@@ -6,7 +6,7 @@
 2. Game dropdown, **New game…**, **Edit…** (Edit… and the dropdown only in Idle, D-05).
 3. The primary button (**Start recording** / **Stop recording**), **Get ready** (Idle, for a game that
    starts at the first line), **Done playing** (Ready), and one status text (UJ-03).
-4. Banners (``widgets.banner_area``; ``obs`` banners carry **Set up OBS…** while Idle) and the last
+4. Banners (``widgets.banner_area``; ``obs`` banners carry **Set up OBS…** in Idle and Ready) and the last
    session's hand-off, hidden when the next recording starts.
 5. Lines: the last 200 accepted lines (``widgets.live_list``), with a hint while empty.
 6. Recent sessions (``widgets.recent_sessions``), hidden while there is none.
@@ -55,7 +55,7 @@ from anki_miner_game.gui.widgets.layout import screen_bounded
 from anki_miner_game.gui.widgets.live_list import JournalCounter, LiveList
 from anki_miner_game.gui.widgets.recent_sessions import RecentSessions, UrlOpener, read_session
 from anki_miner_game.gui.widgets.status_row import StatusRow
-from anki_miner_game.interfaces.addons import VadJobs
+from anki_miner_game.interfaces.addons import AddonService, VadJobs
 from anki_miner_game.interfaces.session import SessionControl
 from anki_miner_game.models.lines import GameLine
 from anki_miner_game.models.messages import (
@@ -239,7 +239,9 @@ class MainWindow(QMainWindow):
     """``games`` lists ``(slug, title)`` and ``text_sources`` the configured sources' ``(id, name)``.
 
     ``on_quit`` is called instead of closing (the app quits). ``output_root()`` is the recordings
-    folder the recent sessions list; without it the list stays empty. ``auto_start_game(slug)`` says
+    folder the recent sessions list; without it the list stays empty. ``vad_addon`` is the
+    voice-trimming add-on: the recent sessions offer Trim again and Undo trimming only while it is
+    installed (UJ-09); without it they never do. ``auto_start_game(slug)`` says
     whether that game's profile has auto mode with start at the first line (Get ready);
     ``auto_start_pending()`` whether, while Ready, the next line starts a recording (D-06).
     """
@@ -264,6 +266,7 @@ class MainWindow(QMainWindow):
         text_sources: Sequence[tuple[str, str]] = (),
         output_root: Callable[[], Path] | None = None,
         vad_jobs: VadJobs | None = None,
+        vad_addon: AddonService | None = None,
         open_url: UrlOpener = QDesktopServices.openUrl,
         auto_start_game: Callable[[str], bool] = lambda _slug: False,
         auto_start_pending: Callable[[], bool] = lambda: False,
@@ -313,7 +316,7 @@ class MainWindow(QMainWindow):
         self.lines_label = QLabel(LINES_TITLE)
         self.live_list = LiveList()
         self.recent_label = QLabel(RECENT_TITLE)
-        self.recent = RecentSessions(vad_jobs=vad_jobs, open_url=open_url)
+        self.recent = RecentSessions(vad_jobs=vad_jobs, vad_addon=vad_addon, open_url=open_url)
 
         top = QHBoxLayout()
         top.addWidget(self.status_row)
@@ -482,7 +485,8 @@ class MainWindow(QMainWindow):
         self.done_button.setHidden(state is not AppState.ARMED)
         self.done_button.setEnabled(pending is None)
         self.status_row.set_shown(not idle or pending is not None)
-        self.banners.set_actions_shown(idle and pending is None)
+        # Ready too: a Start that relaunched OBS can fail with a banner saying to press Set up OBS (D-04).
+        self.banners.set_actions_shown(state in (AppState.IDLE, AppState.ARMED) and pending is None)
         self._show_status()
         self._show_placeholder()
         self._show_recent()

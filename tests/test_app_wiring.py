@@ -17,13 +17,16 @@ from anki_miner_game import app as app_mod
 from anki_miner_game import paths, store
 from anki_miner_game.addons.ocr_addon import NOT_INSTALLED
 from anki_miner_game.app import App, game_sources, open_url
+from anki_miner_game.gui import strings
 from anki_miner_game.gui.hotkey_win import ERROR_HOTKEY_ALREADY_REGISTERED, MOD_NOREPEAT, GlobalHotkey, parse_hotkey
 from anki_miner_game.gui.settings_dialog import SettingsDialog
+from anki_miner_game.models.addons import AddonStatus
 from anki_miner_game.models.config import AppConfig, TextSourceConfig
 from anki_miner_game.models.manifest import ManifestState, VadState
 from anki_miner_game.models.messages import AppState, CommandKind, SourceStatus, UserCommand
 from anki_miner_game.models.obs import OutputState
 from anki_miner_game.models.profile import AutoSettings, GameProfile, OcrSettings, TextMode
+from anki_miner_game.session import session as session_mod
 from anki_miner_game.session.manifest import load_manifest
 from anki_miner_game.text.sources.clipboard_source import CLIPBOARD_SOURCE_ID, ClipboardSource
 from anki_miner_game.text.sources.ocr_source import OCR_SOURCE_ID
@@ -216,7 +219,8 @@ def registered(text: str) -> tuple[int, int]:
     return hotkey.modifiers | MOD_NOREPEAT, hotkey.vk
 
 
-def test_the_hotkey_is_registered_and_toggles_start_and_stop(rig):
+def test_the_hotkey_is_registered_and_toggles_start_and_stop(rig, monkeypatch):
+    monkeypatch.setattr(session_mod, "QUIT_START_WAIT_S", 0.05)  # B1-03: the test ends with a start in flight
     api = HotkeyApi()
     made = with_hotkey(rig, api)
     rig.start()
@@ -352,3 +356,32 @@ def test_get_ready_follows_the_games_auto_start_setting(rig):
     rig.wait(lambda: rig.state() is AppState.ARMED)
     rig.wait(lambda: not app.window.done_button.isHidden() and app.window.done_button.isEnabled())
     assert "StartRecord" not in rig.gateway.names()  # ready, waiting for the first line
+
+
+# The window learns what auto mode and the add-ons know (master 4.8 G1, G2) -----------------------
+
+
+def test_the_window_says_auto_start_only_while_it_is_pending(rig):
+    """D-06: a manual Stop pauses auto-start, and the status stops promising it."""
+    rig.profile = replace(PROFILE, auto=AutoSettings(enabled=True, start_on_first_line=True))
+    app = rig.start()
+    rig.arm()
+    rig.wait(lambda: app.window.status_label.text() == strings.READY_AUTO_START)
+    record(rig)  # STARTED at the fake OBS clock's T0, as if started from OBS
+    rig.gateway.clock.t = T0 + 5.0
+    app.post(UserCommand(CommandKind.STOP))
+    rig.wait(lambda: rig.state() is AppState.ARMED and app.window.status_label.text() == strings.READY)
+    running = app._running
+    assert running is not None and running.auto.auto_start_pending() is False
+
+
+def test_the_recent_sessions_offer_trimming_only_while_the_add_on_is_ready(rig, monkeypatch):
+    path = place(rig.output_root, manifest(3))
+    app = rig.start()
+
+    def texts() -> list[str]:
+        return [action.text() for action in app.window.recent.menu_for(path).actions()]
+
+    assert "Trim again" not in texts()  # the add-on is not installed in the isolated home
+    monkeypatch.setattr(app._vad_addon, "status", lambda: AddonStatus.READY)
+    assert "Trim again" in texts()

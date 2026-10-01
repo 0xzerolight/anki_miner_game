@@ -5,8 +5,10 @@ server live on the Qt main thread; the session actor, OBS, the text sources, aut
 feed's websocket live on the I/O loop (``runtime.io_thread.IoThread``); VAD passes run on the
 trimmer's job thread. The actor is built on the loop and publishes every ``SessionEvent`` there;
 ``forward`` turns each into one ``Presenter`` call, whose signals reach the window and the tray on
-the main thread, and every accepted line also goes to the text feed (spec 8.2, 15). Dialogs and the
-wizard hand their coroutines to the loop through ``IoThread.submit``.
+the main thread, and every accepted line also goes to the text feed (spec 8.2, 15). The window asks
+auto mode whether the next line starts a recording (``AutoMode.auto_start_pending``), which auto mode
+settles on the loop before the presenter forwards each state. Dialogs and the wizard hand their
+coroutines to the loop through ``IoThread.submit``.
 
 Launch (spec 17 "Unclean previous exit"): the actor itself restores ``obs_restore.json`` and
 finalises orphans once reconcile allows it (``SessionActor._launch``), on the one ``FinaliseWorker``
@@ -27,10 +29,11 @@ look up (``_profile_for``, no disk read on the loop); settings saved in their di
 wizard go to disk and become the config everything reads, the gateway's password override
 included. The last armed game is remembered in the settings.
 
-Quit (``request_quit`` from the window or the tray, or ``close`` after the Qt loop ends): the dialogs
-close, the actor shuts down (a recording is stopped and finalised, OBS restored, and every started
-text source stopped with its ``wait_closed`` awaited), then auto mode, the finalise worker, the VAD
-jobs, the OBS connection and the feed stop, and only then the I/O loop.
+Quit (``request_quit`` from the window or the tray, or ``close`` after the Qt loop ends): the CLI
+server stops listening, the dialogs close, the actor shuts down (a recording is stopped and
+finalised, OBS restored, and every started text source stopped with its ``wait_closed`` awaited),
+then auto mode, the finalise worker, the VAD jobs, the OBS connection and the feed stop, and only
+then the I/O loop.
 """
 
 import asyncio
@@ -45,7 +48,7 @@ from typing import Final
 
 from PyQt6.QtCore import QObject, Qt, QUrl, pyqtSignal
 from PyQt6.QtGui import QDesktopServices
-from PyQt6.QtWidgets import QDialog
+from PyQt6.QtWidgets import QDialog, QWidget
 
 from anki_miner_game import paths, store
 from anki_miner_game.addons.ocr_addon import OcrAddon
@@ -63,7 +66,7 @@ from anki_miner_game.interfaces.obs import ObsDiscovery, ObsGateway, Provisioner
 from anki_miner_game.interfaces.presenter import Presenter
 from anki_miner_game.interfaces.text_source import TextSource
 from anki_miner_game.lifecycle.auto import AutoMode
-from anki_miner_game.models.config import AppConfig
+from anki_miner_game.models.config import AppConfig, TextSourceConfig
 from anki_miner_game.models.messages import (
     AppState,
     Banner,
@@ -293,10 +296,25 @@ class App(QObject):
         return self._feed
 
     def post(self, command: UserCommand) -> None:
-        """Hand a command to the session actor; safe from any thread once started."""
+        """Hand a command to the session actor; safe from any thread once started.
+
+        An ``ARM`` whose slug is no game's gets the game whose title matches it, ignoring case (B4-09:
+        ``--arm "Steins;Gate"``); any other name goes on as given and the actor banners it. The CLI
+        server posts every verb here, and ``launch.main`` the first instance's own.
+        """
         if self._running is None:
             raise RuntimeError("the app has not started")
-        self._running.actor.post(command)
+        self._running.actor.post(self._with_slug(command))
+
+    def _with_slug(self, command: UserCommand) -> UserCommand:
+        name = command.slug
+        if command.kind is not CommandKind.ARM or name is None or name in self._profiles:
+            return command
+        wanted = name.casefold()
+        for slug, profile in sorted(self._profiles.items()):
+            if profile.title.casefold() == wanted:
+                return replace(command, slug=slug)
+        return command
 
     # --- starting -------------------------------------------------------------------------------
 
@@ -304,6 +322,8 @@ class App(QObject):
         banners = self._load_settings()
         self._io.start_loop()
         actor = self._io.submit(self._build()).result()
+        running = self._running
+        assert running is not None
         window = self._window = MainWindow(
             actor,
             self.presenter.signals,
@@ -313,8 +333,10 @@ class App(QObject):
             text_sources=_enabled_sources(self._config),
             output_root=lambda: paths.output_root(self._config),
             vad_jobs=self._vad_jobs,  # the recent sessions hand interrupted passes on before the actor runs
+            vad_addon=self._vad_addon,  # Trim again / Undo trimming only while it is installed (UJ-09)
             open_url=open_url,
             auto_start_game=self._auto_start_game,
+            auto_start_pending=running.auto.auto_start_pending,  # D-06: paused after a manual Stop
         )
         window.new_game_requested.connect(lambda: self._open_profile_dialog(None))
         window.edit_game_requested.connect(self._open_profile_dialog)
@@ -336,11 +358,11 @@ class App(QObject):
             self.presenter.banner(banner)
         self._io.submit(self._run()).result()
         if self._server_name is not None:
-            self._cli = CliServer(self._server_name, on_command=actor.post, on_show=self._show_window, parent=self)
+            self._cli = CliServer(self._server_name, on_command=self.post, on_show=self._show_window, parent=self)
             self._cli.listen()
         window.show()
         if self._first_run:
-            self._open_wizard(WizardStep.OBS)
+            self._open_wizard(WizardStep.OBS, single_step=False)  # the first run walks every step (UJ-17)
 
     def _load_settings(self) -> list[Banner]:
         banners: list[Banner] = []
@@ -547,12 +569,18 @@ class App(QObject):
         profile = None if slug is None else self._profiles.get(slug)
         if running is None or (slug is not None and profile is None):
             return
+
+        def install_addons() -> None:
+            """Opens over the dialog built below; called only once it exists (UJ-22b)."""
+            self._open_wizard(WizardStep.ADDONS, parent=dialog, on_finished=dialog.refresh_addons)
+
         services = ProfileDialogServices(
             run=self._io.submit,
             capture=running.picker,
             ocr_picker=self._ocr_addon,
             ocr_addon=self._ocr_addon,
             slugify=slugify,
+            install_addons=install_addons,
         )
         dialog = GameProfileDialog(
             services, self._config.text_sources, profile, taken_slugs=tuple(self._profiles), parent=self.window
@@ -574,11 +602,23 @@ class App(QObject):
         idle = self._running is None or self._running.actor.state is AppState.IDLE
         self.window.set_games(self._games(), profile.slug if idle else None)
 
+    def _busy(self) -> bool:
+        """A game is ready or recording (D-05): Settings then refuses a changed output folder."""
+        running = self._running
+        return running is not None and running.actor.state is not AppState.IDLE
+
     def _open_settings(self) -> None:
-        dialog = SettingsDialog(self._config, vad_addon=self._vad_addon, parent=self.window)
+        dialog = SettingsDialog(
+            self._config, vad_addon=self._vad_addon, busy=self._busy, open_url=open_url, parent=self.window
+        )
         dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         dialog.config_saved.connect(self._save_settings)
-        dialog.setup_step_requested.connect(lambda step: self._open_wizard(step, settings=dialog))
+        dialog.setup_step_requested.connect(
+            lambda step: self._open_wizard(step, settings=dialog, on_finished=dialog.refresh_addons)
+        )
+        dialog.test_sources_requested.connect(
+            lambda rows: self._open_wizard(WizardStep.SOURCES, settings=dialog, text_sources=tuple(rows))
+        )
         dialog.open()
 
     def _save_settings(self, cfg: AppConfig) -> None:
@@ -590,8 +630,24 @@ class App(QObject):
             return
         self.presenter.banner_cleared(CONFIG_BANNER_KEY)
 
-    def _open_wizard(self, step: WizardStep, *, settings: SettingsDialog | None = None) -> None:
-        """The setup wizard at ``step``; over ``settings`` when a step is re-run from there (spec 16)."""
+    def _open_wizard(
+        self,
+        step: WizardStep,
+        *,
+        parent: QWidget | None = None,
+        settings: SettingsDialog | None = None,
+        single_step: bool = True,
+        text_sources: tuple[TextSourceConfig, ...] | None = None,
+        on_finished: Callable[[], None] | None = None,
+    ) -> None:
+        """The setup wizard at ``step`` (spec 16 as amended): every page on a first run
+        (``single_step=False``), that page alone otherwise (UJ-17).
+
+        Over ``parent``, else over ``settings`` when a step is run from there (it then shows what the
+        step saved, ``take_setup``), else over the main window. ``text_sources``: the Game text page
+        checks these rows (Settings' Test…, UJ-22) instead of the saved ones; that page never saves.
+        ``on_finished`` runs once the wizard closes (an add-on line to read again).
+        """
         running = self._running
         if running is None:
             return
@@ -601,19 +657,23 @@ class App(QObject):
             if settings is not None:
                 settings.take_setup(cfg)
 
+        config = self._config if text_sources is None else replace(self._config, text_sources=text_sources)
         wizard = SetupWizard(
             obs=running.obs_setup,
-            config=self._config,
+            config=config,
             save_config=save,
             run=self._io.submit,
             source_factory=lambda source: WebsocketSource(source.id, source.uri),
             vad_addon=self._vad_addon,
             ocr_addon=self._ocr_addon,
             start=step,
+            single_step=single_step,
             open_url=open_url,
-            parent=settings if settings is not None else self.window,
+            parent=parent or settings or self.window,
         )
         wizard.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        if on_finished is not None:
+            wizard.finished.connect(lambda _result: on_finished())
         wizard.open()
 
     def _adopt_config(self, cfg: AppConfig) -> None:
@@ -637,9 +697,15 @@ class App(QObject):
     # --- quitting -------------------------------------------------------------------------------
 
     def request_quit(self) -> None:
-        """Hide the window and quit in the background; ``stopped`` follows. Main thread."""
+        """Hide the window and quit in the background; ``stopped`` follows. Main thread.
+
+        The CLI server closes first (B2-03): a launch from now on finds no instance, waits for this
+        process's instance lock (``launch.main``) and starts afresh once the quit has restored OBS.
+        """
         if self._stopping is not None:
             return
+        if self._cli is not None:
+            self._cli.close()
         self._put_away()
         self._stopping = self._io.submit(self._stop())
         self._stopping.add_done_callback(lambda _done: self.stopped.emit())

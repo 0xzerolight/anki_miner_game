@@ -115,6 +115,13 @@ def test_the_status_is_a_plain_word_and_the_reason_is_its_tooltip(qtbot, root, c
     assert widget.item(0).toolTip(0) == ROW_TOOLTIP
 
 
+def test_a_session_not_filed_yet_says_so_once(recent, root):
+    """The status says "Not filed yet"; the name is the game's title, without a second wording beside it."""
+    place(root, manifest(4, state=ManifestState.FINALISE_PENDING))
+    recent.load(root)
+    assert recent.cells()[0][0] == TITLE and recent.cells()[0][3] == "Not filed yet"
+
+
 def test_long_names_keep_their_number(recent):
     assert recent.tree.textElideMode() is Qt.TextElideMode.ElideMiddle
 

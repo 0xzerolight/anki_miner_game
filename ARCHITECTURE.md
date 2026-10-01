@@ -37,17 +37,18 @@ A recording is a session only if it starts while the app is armed. OBS is then o
 ```
 anki_miner_game/
   models/        frozen dataclasses, no I/O
-  interfaces/    Protocols: TextSource, RecordClock, ObsGateway, ObsDiscovery, Provisioner,
-                 Recorder, Presenter, SessionControl, AddonService, VadJobs, OcrAreaPicker
+  interfaces/    Protocols: TextSource, RecordClock, ObsGateway, ObsDiscovery, ObsStarter,
+                 Provisioner, Recorder, Presenter, SessionControl, AddonService, VadJobs,
+                 OcrAreaPicker
   text/          sources/ (websocket, clipboard, ocr) and pipeline.py
-  obs/           discovery, client, provision, recorder
+  obs/           discovery, startup, client, provision, recorder
   session/       clock, cues, srt_writer, naming, manifest, journal, finalise, restore, session (the actor)
   lifecycle/     auto.py
   vad/           trimmer.py, assign.py, model_pin.py, worker/vad_worker.py
   addons/        bootstrap.py, vad_addon.py, ocr_addon.py
   feed/          ws_server.py, http_server.py, page.html
   gui/           main_window, tray, wizard, game_profile_dialog, settings_dialog, hotkey_win,
-                 cli_verbs, presenters/, widgets/
+                 cli_verbs, strings, colours, banner_keys, icon, presenters/, widgets/
   runtime/       io_thread, child_env, ca_bundle, bundle_smoke
   paths.py, store.py, app.py, launch.py
 ```
@@ -70,6 +71,7 @@ Rules:
 | `RecordClock` | `interfaces/record_clock.py` | `EventClock`, `OutputDurationClock` |
 | `ObsGateway` | `interfaces/obs.py` | `ObsClient` |
 | `ObsDiscovery` | `interfaces/obs.py` | `LocalObsDiscovery` |
+| `ObsStarter` | `interfaces/obs.py` | `LocalObsStarter` |
 | `Provisioner` | `interfaces/obs.py` | `ObsProvisioner` |
 | `Recorder` | `interfaces/obs.py` | `ObsRecorder` |
 | `SessionControl` | `interfaces/session.py` | `SessionActor` |
@@ -160,26 +162,27 @@ While recording, everything lives in `<output root>/_incoming/`, OBS's record fo
 ## OBS
 
 - `obs/discovery.py` `LocalObsDiscovery` - finds OBS (Windows install paths and registry; Linux `obs` on PATH, then the Flathub build), reads obs-websocket's own `config.json` for the port and password at every connect, turns the websocket server on when OBS is closed, and starts OBS minimised. The password is never logged and never stored unless the user types an override.
+- `obs/startup.py` `LocalObsStarter` - the one start-OBS sequence: with OBS closed, turn its WebSocket server on, start it minimised and wait up to 30 s for it to answer; then connect. The session actor (getting ready and starting a recording), the setup wizard's OBS step and the game dialog's window list all use it.
 - `obs/client.py` `ObsClient` - one obs-websocket v5 connection with reconnect. Requests go out from one thread; event callbacks only enqueue onto the actor with their arrival time. It waits out OBS's "not ready" answers and scene-collection changes.
 - `obs/provision.py` `ObsProvisioner` - creates and updates the `Anki Miner Game` profile and scene collection (record folder, `.mkv`, no splitting or remux, separate recording encoder, capture inputs) and lists capturable windows. Idempotent; runs from the wizard and again at each arm, touching only what differs.
 - `obs/recorder.py` `ObsRecorder` - `StartRecord` and `StopRecord`, nothing else. State follows OBS's events, so a recording started from OBS's window behaves identically.
 
-`lifecycle/auto.py` `AutoMode` subscribes to the actor's events and sends it ordinary commands: start at the first line while armed, stop after idle minutes or when the pinned window has been closed for two readings. No other module knows auto mode exists.
+`lifecycle/auto.py` `AutoMode` subscribes to the actor's events and sends it ordinary commands: start at the first line while armed, stop after idle minutes or when the pinned window has been closed for two readings. No other module knows auto mode exists. A Stop the user makes (window, tray, hotkey or OBS's own button) pauses auto-start until the next Start or Get ready; auto mode's own stops and OBS exiting do not.
 
 ## Add-ons
 
 Both add-ons download on demand into `<home>/addons/<name>/`, built with a sha256-pinned `uv` that `addons/bootstrap.py` fetches into `<home>/bin/`. Every uv call keeps its Python, cache and tool folders inside the add-on's own folder.
 
-- **VAD** (`addons/vad_addon.py`, `vad/`) - a uv-built environment with onnxruntime, numpy and PyAV at hash-pinned versions, plus the Silero model pinned in `vad/model_pin.py`. After finalise, `VadTrimmer` runs `vad/worker/vad_worker.py` under that Python, reads the voiced regions it prints, and `vad/assign.py` `assign()` fits the manifest's `live_cues` to them. The subtitle is always rewritten from `live_cues`, so a re-run or a restore never leaves a second `.srt`. If the add-on is missing or fails, the live subtitle stands.
+- **VAD** (`addons/vad_addon.py`, `vad/`) - a uv-built environment with onnxruntime, numpy and PyAV at hash-pinned versions, plus the Silero model pinned in `vad/model_pin.py`. After finalise, `VadTrimmer` runs `vad/worker/vad_worker.py` under that Python, reads the voiced regions it prints, and `vad/assign.py` `assign()` fits the manifest's `live_cues` to them. The subtitle is rewritten from `live_cues`, so a re-run or a restore never leaves a second `.srt`. If the add-on is missing or fails, the live subtitle stands, and a session already trimmed keeps its trim.
 - **OCR** (`addons/ocr_addon.py`) - owocr installed as a uv tool and run as a managed subprocess; `OcrSource` reads its websocket, so OCR is one more text source and none of owocr's code enters the app. Linux OCR is X11-only.
 
 ## Text Feed
 
-`feed/` serves every accepted line to this machine only: `WsFeedServer` sends each line as a plain-text frame (so texthooker pages can connect), and `HttpFeedServer` serves `page.html`, a dependency-free page that shows the lines for Yomitan lookups. Two ports, because `websockets` does not serve HTTP. A port in use turns the feed off for that run with a banner.
+`feed/` serves every accepted line to this machine only: `WsFeedServer` sends each line as a plain-text frame (so texthooker pages can connect), and `HttpFeedServer` serves `page.html`, a dependency-free page that shows the lines for Yomitan lookups. Two ports, because `websockets` does not serve HTTP. A port in use turns the feed off for that run with a banner. The WebSocket accepts clients without an Origin, pages from `http://127.0.0.1` or `http://localhost` on any port, and the hosted texthooker-ui (`https://renji-xd.github.io`); any other Origin gets HTTP 403.
 
 ## Configuration and Entry Point
 
-`launch.py` is the entry point: `anki_miner_game [--arm <slug> | --start | --stop | --toggle]`. With an instance already running, `gui/cli_verbs.py` sends the verb (or "show your window") to it over a `QLocalServer` and exits; otherwise the process becomes the instance, sets up logging and starts `App`. `store.py` loads and saves `config.json` and the game profiles with atomic writes, refusing a file written by a newer schema. `paths.py` resolves every location at call time, so `ANKI_MINER_GAME_HOME` redirects all of it.
+`launch.py` is the entry point: `anki_miner_game [--arm <game> | --start | --stop | --toggle]`. With an instance already running, `gui/cli_verbs.py` sends the verb (or "show your window") to it over a `QLocalServer` and exits. A launch that finds none takes `<home>/instance.lock` (a `QLockFile`, waiting while another instance starts or quits), so two launches never both become the instance; the one that holds it becomes the instance, sets up logging and starts `App`. `store.py` loads and saves `config.json` and the game profiles with atomic writes, refusing a file written by a newer schema. `paths.py` resolves every location at call time, so `ANKI_MINER_GAME_HOME` redirects all of it.
 
 ## Data Storage
 
@@ -188,6 +191,7 @@ Both add-ons download on demand into `<home>/addons/<name>/`, built with a sha25
   config.json                       AppConfig
   games/<slug>.json                 one GameProfile per game
   obs_restore.json                  while armed: the user's OBS profile and scene collection
+  instance.lock                     held by the running instance
   anki_miner_game.log               rotating log (.1 to .3)
   bin/                              the pinned uv
   addons/vad/, addons/ocr/          add-on environments

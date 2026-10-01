@@ -69,6 +69,8 @@ def fit_dialog(dialog: QDialog, *, scroll: QScrollArea | None = None, forms: Seq
     ``available_size``; a later call only grows the dialog, never shrinks it.
     """
     _align_forms(forms)
+    for form in forms:
+        form.activate()  # a form in a group box measures its widened labels only now; the group then asks again
     outer = dialog.layout()
     if outer is not None:
         outer.activate()

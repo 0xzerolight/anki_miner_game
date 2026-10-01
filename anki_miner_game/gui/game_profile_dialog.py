@@ -423,11 +423,6 @@ _ENGINE_LABELS: Final = {
 }
 """Spec 14: the cloud engines say that screenshots leave the machine."""
 
-_PROBLEM_TEXT: Final = {
-    "application audio needs a pinned window": "recording only the game's sound needs a game window",
-}
-"""``validate``'s texts in the dialog's words (UJ-32: no "pinned")."""
-
 
 def window_label(value: str) -> str:
     """A readable name for a stored window string, as OBS names its list item.
@@ -768,7 +763,7 @@ class GameProfileDialog(QDialog):
 
     def problems(self, profile: GameProfile) -> list[str]:
         """Why ``profile`` cannot be saved: ``validate`` plus what only the dialog knows."""
-        problems = [_PROBLEM_TEXT.get(problem, problem) for problem in validate(profile)]
+        problems = validate(profile)
         if self._original is None and profile.slug in self._taken:
             problems.append("a game with this title exists already")
         if profile.text_mode is TextMode.HOOK:

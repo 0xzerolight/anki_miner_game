@@ -69,8 +69,8 @@ For full development setup, see [CONTRIBUTING.md](CONTRIBUTING.md).
 <details>
 <summary><strong>How It Works</strong></summary>
 
-1. **Arm** a game. OBS switches to the app's profile and your text sources connect.
-2. **Start**, play, **Stop**. The lines your hooker sends become the subtitle.
+1. Pick a game and press **Start recording**. OBS switches to the app's profile, your text sources connect and the recording starts.
+2. Play, then press **Stop recording**. The lines your hooker sends become the subtitle.
 3. **The session lands as a same-stem pair**: `<Game>/<Game> - 01.mkv` and `<Game> - 01.srt`.
 4. **Mine it in Anki Miner**: Video -> Single for one session, or Video -> Batch with the game folder for all of them.
 
@@ -81,7 +81,7 @@ For full development setup, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 - On Linux OCR needs an X11 session.
 - In a voiced game, set the game's text speed to instant and turn off any option that shows voiced text in step with the voice (STEINS;GATE: 音声同期). A line that types out slowly reaches the app only once it is fully shown, often after its voice has ended, so the card's audio starts late.
-- Start the game before **Arm**. On Windows owocr reads the first window whose title contains the profile's **Game window title**, so with the game closed it could read another window, such as a browser tab about the game.
+- Start the game before **Start recording**. On Windows owocr reads the first window whose title contains the profile's **OCR window title** (Game profile -> Advanced), so with the game closed it could read another window, such as a browser tab about the game.
 - owocr's websocket server listens on `0.0.0.0`, so other machines on your network can read the OCR text while it runs. You can refuse the Windows firewall prompt.
 - If the app crashes during OCR on Linux, owocr keeps running. End it with `pkill -KILL -f '.anki_miner_game/addons/ocr/'`.
 
@@ -94,7 +94,7 @@ Problems show as banners in the main window.
 | Issue | Solution |
 |-------|----------|
 | Where are the logs? | `~/.anki_miner_game/anki_miner_game.log` (`%USERPROFILE%\.anki_miner_game\` on Windows). |
-| Disk space | About 0.3 GB per hour at 1080p30 for a visual novel; more for games with more motion. **Arm** warns below 5 GB free. |
+| Disk space | About 0.3 GB per hour at 1080p30 for a visual novel; more for games with more motion. **Start recording** warns below 5 GB free. |
 
 ## Contributing
 

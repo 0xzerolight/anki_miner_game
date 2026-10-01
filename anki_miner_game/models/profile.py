@@ -130,7 +130,7 @@ def validate(profile: GameProfile) -> list[str]:
     if profile.text_mode is TextMode.OCR and profile.clipboard:
         problems.append("OCR mode cannot use the clipboard")
     if profile.audio.mode is AudioMode.APP and not profile.capture.window:
-        problems.append("application audio needs a pinned window")
+        problems.append("recording only the game's sound needs a game window")
     if profile.auto.stop_idle_minutes < 0:
         problems.append("auto stop idle minutes cannot be negative")
     return problems

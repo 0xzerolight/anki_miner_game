@@ -1013,6 +1013,27 @@ def test_the_dialog_never_scrolls_sideways(win_rig: Rig):
     assert scroll.horizontalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAlwaysOff
 
 
+@pytest.mark.parametrize("platform", ["linux", "win32"])
+def test_the_dialog_opens_wide_enough_for_its_content(io_loop, qtbot, platform: str):
+    """Nothing is squeezed under its minimum: the shared label column counts when the dialog is sized,
+    also with screen reading chosen and Advanced open."""
+    rig = Rig(io_loop, qtbot, platform=platform)
+    dialog = rig.open(FULL_OCR_WINDOWS if platform == "win32" else None)
+    dialog.show()
+    qtbot.waitExposed(dialog)
+    scroll = dialog.findChild(QScrollArea)
+    assert scroll is not None and scroll.widget() is not None
+
+    def fits() -> bool:
+        return scroll.viewport().width() >= scroll.widget().minimumSizeHint().width()
+
+    assert fits()
+    dialog.text_from_combo.setCurrentIndex(dialog.text_from_combo.findData(TextFrom.OCR))
+    if not dialog.advanced_button.isChecked():
+        dialog.advanced_button.click()
+    qtbot.waitUntil(fits, timeout=1000)
+
+
 def test_the_game_window_dropdown_is_as_wide_as_the_title(win_rig: Rig):
     """The mock's Game window row spans the field, so its first item is not cut."""
     dialog = win_rig.open()
