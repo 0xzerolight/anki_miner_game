@@ -169,9 +169,17 @@ SWITCH_TIMEOUT_S: Final = 15.0
 OBS_LAUNCH_TIMEOUT_S: Final = 30.0
 """Spec 17: Arm launches OBS and waits up to 30 s for it to answer."""
 OBS_SERVER_OFF_TEXT: Final = "OBS's WebSocket server is off. Close OBS and press Set up OBS: the app turns it on."
-"""Banner (key ``obs``) when OBS runs with its WebSocket server off; the window puts Set up OBS… on it (UJ-10)."""
+"""Banner (key ``obs``) in Idle when OBS runs with its WebSocket server off; the window puts Set up OBS…
+on it (UJ-10)."""
+OBS_SERVER_OFF_READY_TEXT: Final = (
+    "OBS's WebSocket server is off. Close OBS and press Start recording: the app turns it on."
+)
+"""The same while a game is ready: Set up OBS refuses until Done playing, and a Start with OBS closed
+turns the server on before it starts OBS (D-04)."""
 OBS_AUTH_TEXT: Final = "OBS rejected the app's password. Press Set up OBS to enter it."
-"""Banner (key ``obs``) when OBS refuses the password (UJ-10)."""
+"""Banner (key ``obs``) in Idle when OBS refuses the password (UJ-10)."""
+OBS_AUTH_READY_TEXT: Final = "OBS rejected the app's password. Press Done playing, then Set up OBS to enter it."
+"""The same while a game is ready, where Set up OBS refuses until Done playing."""
 FREE_SPACE_WARN_BYTES: Final = 5 * 10**9
 """Spec 17: under 5 GB free at Arm, arm anyway with a warning."""
 REANCHOR_S: Final = 10.0
@@ -444,6 +452,9 @@ class SessionActor:
         ``START`` was queued behind newer lines holds this one instead of its stale trigger."""
         self._start_deadline: float | None = None
         """A ``StartRecord`` was answered; ``STARTED`` is due before this ``now()``."""
+        self._quitting = False
+        """``shutdown`` was called. An ``ARM`` or ``START`` still queued, or one waiting for OBS to start,
+        does nothing more: a recording now would be stopped at once and filed as a session of its own."""
 
         self._connected = False
         self._obs_versions = ("unknown", "unknown")
@@ -517,12 +528,15 @@ class SessionActor:
         to the user's profile). While recording it first stops OBS and finalises the session, then
         disarms; if OBS cannot be stopped, the journal is closed and the next launch resumes the
         session (reconcile row 4) or finalises it (last row). While idle and connected with
-        ``obs_restore.json`` still present, it restores once. With a start in flight it first waits up to
-        ``QUIT_START_WAIT_S`` for that recording to start, then stops it. At most about ``QUIT_STOP_TIMEOUT_S``
-        plus one finalise (up to 10 s of rename retries on Windows) plus ``RECORD_INACTIVE_WAIT_S``
-        plus the restore's two switches (up to ``SWITCH_TIMEOUT_S`` each, plus
-        ``RESTART_QUESTION_S`` when OBS asks to restart).
+        ``obs_restore.json`` still present, it restores once. An ``ARM`` or ``START`` queued before the
+        quit, or waiting for OBS to start, does nothing more (``_quitting``); a start whose
+        ``StartRecord`` was sent is waited for up to ``QUIT_START_WAIT_S``, then stopped. After the
+        message being handled now (an OBS start in it: up to ``OBS_LAUNCH_TIMEOUT_S``), at most about
+        ``QUIT_START_WAIT_S`` plus ``QUIT_STOP_TIMEOUT_S`` plus one finalise (up to 10 s of rename
+        retries on Windows) plus ``RECORD_INACTIVE_WAIT_S`` plus the restore's two switches (up to
+        ``SWITCH_TIMEOUT_S`` each, plus ``RESTART_QUESTION_S`` when OBS asks to restart).
         """
+        self._quitting = True
         done: asyncio.Future[None] = self._loop.create_future()
         self._queue.put_nowait(_Shutdown(done))
         await done
@@ -758,6 +772,8 @@ class SessionActor:
     # --- arming (spec 6.2) ----------------------------------------------------------------------
 
     async def _arm(self, slug: str) -> None:
+        if self._quitting:
+            return
         if self._state is AppState.RECORDING:
             self._banner(BannerKey.ARM, BannerLevel.INFO, "Stop the recording before choosing another game.")
             return
@@ -781,7 +797,7 @@ class SessionActor:
 
     async def _arm_obs(self, profile: GameProfile, cfg: AppConfig, incoming: Path) -> None:
         """Spec 6.2 steps 1-3 and the arm itself, under ``_obs_lock`` until the state is ``armed``."""
-        if not await self._ensure_connected():
+        if not await self._ensure_connected() or self._quitting:  # a quit while OBS started: no switch to undo
             return
         try:
             active = await self._active_outputs()
@@ -865,10 +881,11 @@ class SessionActor:
             nonlocal launched
             launched = launched or stage is not ObsStartStage.CONNECTING
 
+        idle = self._state is AppState.IDLE  # else D-04's Start: Set up OBS refuses until Done playing
         try:
             info = await self._starter.start(heard)
         except ObsServerOffError:
-            self._obs_failed(OBS_SERVER_OFF_TEXT, banner=banner_on_failure)
+            self._obs_failed(self._server_off_text(), banner=banner_on_failure)
             return False
         except ObsUnsupportedError as exc:
             self._obs_failed(
@@ -877,12 +894,11 @@ class SessionActor:
             )
             return False
         except ObsAuthError:
-            self._obs_failed(OBS_AUTH_TEXT, banner=banner_on_failure)
+            self._obs_failed(OBS_AUTH_TEXT if idle else OBS_AUTH_READY_TEXT, banner=banner_on_failure)
             return False
         except ObsConfigError as exc:
-            self._obs_failed(
-                f"OBS's WebSocket settings cannot be read ({exc}); press Set up OBS.", banner=banner_on_failure
-            )
+            then = "press Set up OBS" if idle else "press Done playing, then Set up OBS"
+            self._obs_failed(f"OBS's WebSocket settings cannot be read ({exc}); {then}.", banner=banner_on_failure)
             return False
         except ObsError as exc:
             text = await self._connect_failure_text(exc, was_running=not launched)
@@ -896,8 +912,8 @@ class SessionActor:
 
     async def _connect_failure_text(self, exc: ObsError, *, was_running: bool) -> str:
         """S5-3: OBS was already running (this attempt never had to launch it) and refused the
-        connection outright. Point at the WebSocket server being off, which Set up OBS turns on once
-        OBS is closed; otherwise a short Safe-Mode/dialog hint.
+        connection outright. Point at the WebSocket server being off, which Set up OBS (Idle) or Start
+        recording (Ready) turns on once OBS is closed; otherwise a short Safe-Mode/dialog hint.
         """
         if not was_running:
             return f"Cannot connect to OBS: {exc}"
@@ -906,8 +922,11 @@ class SessionActor:
         except ObsConfigError:
             ws = None
         if ws is None or not ws.server_enabled:
-            return OBS_SERVER_OFF_TEXT
+            return self._server_off_text()
         return f"Cannot connect to OBS: {exc} (OBS may be in Safe Mode, or showing a dialog in its window)"
+
+    def _server_off_text(self) -> str:
+        return OBS_SERVER_OFF_TEXT if self._state is AppState.IDLE else OBS_SERVER_OFF_READY_TEXT
 
     def _obs_failed(self, text: str, *, banner: bool = True) -> None:
         self._obs_status(SourceStatus.DISCONNECTED)
@@ -1179,10 +1198,12 @@ class SessionActor:
         that fails the start fails (``START_FAILED_BANNER_KEY``, after the ``obs`` banner) and auto mode
         tries again at its next line.
         """
-        if self._state is not AppState.ARMED or self._start_deadline is not None:
+        if self._quitting or self._state is not AppState.ARMED or self._start_deadline is not None:
             return
         if not await self._ensure_connected():
             self._start_failed("OBS did not start recording: the app could not reach OBS.")
+            return
+        if self._quitting:  # the quit came while OBS was starting
             return
         if line is not None:  # auto mode: the session's counts start with the line that started it
             newer = self._ready_line

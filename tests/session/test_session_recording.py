@@ -28,6 +28,7 @@ from anki_miner_game.models.messages import (
     RecordingStopped,
     SourceStatus,
     StateChanged,
+    UserCommand,
 )
 from anki_miner_game.models.obs import ObsEventName, ObsRequestError, OutputState
 from anki_miner_game.models.profile import AutoSettings
@@ -670,6 +671,76 @@ async def test_a_quit_whose_start_never_reports_quits_after_the_wait(h: Harness)
     await h.actor.shutdown()  # QUIT_START_WAIT_S is 0.05 s here
     assert "StopRecord" not in h.gateway.names()
     assert not restore_path().exists()  # OBS said inactive: the quit restored it
+
+
+def obs_starts_at_once(h: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
+    """OBS answers ``StartRecord`` and sends ``STARTED`` straight after, as a real OBS does within ms."""
+    answer = h.gateway._answer
+
+    def answer_and_start(name: str, fields: dict[str, object]) -> dict[str, object]:
+        if name == "StartRecord":
+            h.gateway.record_event(OutputState.STARTED, _start_obs_recording(h), ZERO)
+        return answer(name, fields)
+
+    monkeypatch.setattr(h.gateway, "_answer", answer_and_start)
+    h.obs.stops_on_request = True
+
+
+async def test_a_quit_behind_the_one_click_records_nothing(h: Harness, monkeypatch):
+    """Start recording in Idle posts ARM then START; closing the window while it reads "Starting…" queues
+    the quit behind them. Recording then only to stop at once filed a numbered "No lines" session."""
+    obs_starts_at_once(h, monkeypatch)
+    h.actor.post(UserCommand(CommandKind.ARM, slug=SLUG))
+    h.actor.post(UserCommand(CommandKind.START))
+    await asyncio.sleep(0)  # both are queued now; the window's quit comes behind them
+    await h.actor.shutdown()
+    assert "StartRecord" not in h.gateway.names()
+    assert h.finalised() == []
+    assert not h.game_dir().exists()
+    assert (h.obs.profile, h.obs.collection) == ("Untitled", "Untitled")
+    assert not restore_path().exists()
+
+
+async def quit_while_obs_starts(h: Harness, monkeypatch: pytest.MonkeyPatch, *commands: UserCommand) -> None:
+    """OBS is closed; ``commands`` are posted, and the quit comes while OBS starts for the first of them."""
+    await lose_obs_while_ready(h)
+    answers = asyncio.Event()
+
+    async def wait_ready(timeout_s: float = 30.0) -> bool:
+        await answers.wait()
+        return True
+
+    monkeypatch.setattr(h.discovery, "wait_ready", wait_ready)
+    for command in commands:
+        h.actor.post(command)
+    async with asyncio.timeout(5):
+        while h.discovery.launches == 0:
+            await asyncio.sleep(0.01)
+    quitting = asyncio.create_task(h.actor.shutdown())
+    await asyncio.sleep(0)
+    answers.set()
+    await asyncio.wait_for(quitting, 5)
+
+
+async def test_a_quit_while_start_relaunches_obs_records_nothing(h: Harness, monkeypatch):
+    """D-04: Start waits up to 30 s for a relaunched OBS; a quit meanwhile sends no ``StartRecord`` once it answers."""
+    obs_starts_at_once(h, monkeypatch)
+    await h.arm()
+    await quit_while_obs_starts(h, monkeypatch, UserCommand(CommandKind.START))
+    assert "StartRecord" not in h.gateway.names()
+    assert h.finalised() == []
+    assert (h.obs.profile, h.obs.collection) == ("Untitled", "Untitled")
+    assert not restore_path().exists()
+
+
+async def test_a_quit_while_the_one_click_starts_obs_leaves_obs_alone(h: Harness, monkeypatch):
+    """The first OBS start of a one-click can take 30 s; a quit meanwhile neither switches OBS nor records."""
+    obs_starts_at_once(h, monkeypatch)
+    await quit_while_obs_starts(h, monkeypatch, UserCommand(CommandKind.ARM, slug=SLUG), UserCommand(CommandKind.START))
+    assert h.gateway.connects == 2  # the launch's, then the one-click's once OBS answered
+    assert [name for name in h.gateway.names() if name.startswith("Set") or name == "StartRecord"] == []
+    assert h.finalised() == []
+    assert not restore_path().exists()
 
 
 def raised_since(h: Harness, mark: int) -> set[str]:

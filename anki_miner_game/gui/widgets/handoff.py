@@ -3,9 +3,9 @@
 Shown for a session placed in its game folder with a subtitle; a session without one (no lines, or
 not filed yet) has its own banner from the session actor, so it hides the last hand-off instead.
 One sentence for this session (Video -> Single), and one for Video -> Batch once the game folder
-holds two or more sessions. The folder's path is the **Open folder** button's tooltip; the margins
-are the banners' (``widgets.banner_area``). The main window hides the panel when the next recording
-starts.
+holds two or more sessions with a subtitle. The folder's path is the **Open folder** button's
+tooltip; the margins are the banners' (``widgets.banner_area``). The main window hides the panel
+when the next recording starts.
 """
 
 from pathlib import Path
@@ -16,14 +16,14 @@ from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import QFrame, QGridLayout, QLabel, QPushButton, QToolButton, QWidget
 
 from anki_miner_game.gui import strings
-from anki_miner_game.gui.widgets.recent_sessions import MANIFEST_SUFFIX, SessionRow, UrlOpener
+from anki_miner_game.gui.widgets.recent_sessions import MANIFEST_SUFFIX, SessionRow, UrlOpener, read_session
 
 MARGINS: Final = (6, 4, 4, 4)
 
 
 def handoff_text(row: SessionRow, sessions: int = 1) -> str | None:
-    """The hand-off for ``row``, ``sessions`` being how many its game folder holds; ``None`` when it
-    has no placed subtitle."""
+    """The hand-off for ``row``, ``sessions`` being how many sessions with a subtitle its game folder
+    holds; ``None`` when it has no placed subtitle."""
     files = row.manifest.files
     if not row.has_subtitle or files is None:
         return None
@@ -39,12 +39,14 @@ def handoff_text(row: SessionRow, sessions: int = 1) -> str | None:
     return text
 
 
-def sessions_in(folder: Path) -> int:
-    """How many session manifests ``folder`` holds (0 when it cannot be read)."""
+def subtitled_sessions_in(folder: Path) -> int:
+    """How many sessions in ``folder`` have a placed subtitle, the ones Video -> Batch mines (0 when it
+    cannot be read)."""
     try:
-        return sum(1 for _ in folder.glob(f"*{MANIFEST_SUFFIX}"))
+        manifests = list(folder.glob(f"*{MANIFEST_SUFFIX}"))
     except OSError:
         return 0
+    return sum(1 for path in manifests if (row := read_session(path)) is not None and row.has_subtitle)
 
 
 class HandoffPanel(QFrame):
@@ -76,7 +78,7 @@ class HandoffPanel(QFrame):
 
     def show_session(self, row: SessionRow) -> None:
         folder = row.manifest_path.parent
-        text = handoff_text(row, sessions_in(folder))
+        text = handoff_text(row, subtitled_sessions_in(folder))
         if text is None:
             self.hide()
             return

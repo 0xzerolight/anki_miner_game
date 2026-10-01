@@ -544,9 +544,8 @@ def test_settings_is_a_flat_button_and_there_is_no_menu_bar(qtbot, make):
         window.settings_button.click()
 
 
-def test_an_obs_banner_offers_set_up_obs_until_a_recording_runs(qtbot, make):
-    """The banner says "press Set up OBS", also when a Start while ready relaunched OBS and failed (D-04);
-    while ready the OBS step then says to press Done playing first."""
+def test_an_obs_banner_offers_set_up_obs_only_while_idle(qtbot, make):
+    """While ready the OBS step refuses (Done playing first), so the actor's banner says so instead (D-04)."""
     w = make()
     w.presenter.banner(Banner("obs", BannerLevel.ERROR, "OBS's WebSocket server is off."))
     w.presenter.banner(Banner("feed", BannerLevel.WARNING, "port 6678 is in use"))
@@ -556,10 +555,9 @@ def test_an_obs_banner_offers_set_up_obs_until_a_recording_runs(qtbot, make):
     with qtbot.waitSignal(w.window.setup_requested):
         button.click()
     w.presenter.state_changed(AppState.ARMED, "steins-gate")
-    assert not button.isHidden()
-    w.presenter.state_changed(AppState.RECORDING, "steins-gate")
     assert button.isHidden()
     w.presenter.state_changed(AppState.IDLE, None)
+    assert not button.isHidden()  # after Done playing the banner's button is back
     w.window.primary_button.click()
     assert button.isHidden()  # not while a click is pending either
 

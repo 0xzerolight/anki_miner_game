@@ -66,7 +66,8 @@ def fit_dialog(dialog: QDialog, *, scroll: QScrollArea | None = None, forms: Seq
     widest label over all ``forms``, set as each label's minimum width); spin boxes and combos keep
     their own width. Minimum width = content minimum + chrome + vertical scroll-bar width. Size =
     content size hint + chrome + scroll-bar width, bounded to ``DIALOG_SCREEN_FRACTION`` of
-    ``available_size``; a later call only grows the dialog, never shrinks it.
+    ``available_size``; a later call only grows the dialog, never shrinks it. A shown dialog that grows
+    moves back inside its screen's available geometry: a resize keeps the top-left.
     """
     _align_forms(forms)
     for form in forms:
@@ -96,6 +97,20 @@ def fit_dialog(dialog: QDialog, *, scroll: QScrollArea | None = None, forms: Seq
         size = size.expandedTo(dialog.size())
     dialog.setProperty(_FITTED, True)
     dialog.resize(size)
+    if dialog.isVisible():
+        _keep_on_screen(dialog)
+
+
+def _keep_on_screen(window: QWidget) -> None:
+    """Move ``window`` so its frame lies inside its screen's available geometry, as far as it fits."""
+    screen = window.screen()
+    if screen is None:
+        return
+    room, frame = screen.availableGeometry(), window.frameGeometry()
+    x = max(room.left(), min(frame.left(), room.left() + room.width() - frame.width()))
+    y = max(room.top(), min(frame.top(), room.top() + room.height() - frame.height()))
+    if (x, y) != (frame.left(), frame.top()):
+        window.move(x, y)  # a window's position is its frame's
 
 
 def _chrome(dialog: QDialog, scroll: QScrollArea) -> QSize:

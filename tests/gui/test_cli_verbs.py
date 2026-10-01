@@ -128,6 +128,31 @@ def test_a_second_launch_without_a_verb_shows_the_running_window(qtbot, instance
     assert (instance.commands, instance.shows) == ([], 1)
 
 
+@pytest.mark.parametrize(
+    ("command", "grants"), [(None, 1), (UserCommand(CommandKind.START), 0), (UserCommand(CommandKind.TOGGLE), 0)]
+)
+def test_only_a_show_lets_the_running_instance_come_to_the_front(qtbot, instance, name, monkeypatch, command, grants):
+    """Windows refuses the foreground to a background process, so the window only flashed in the taskbar
+    (P8 V8): this launch, which may take the foreground, hands that right on before ``show``."""
+    granted: list[None] = []
+    monkeypatch.setattr(cli_verbs, "allow_foreground", lambda: granted.append(None))
+    assert send_from_another_process(qtbot, name, command) is True
+    assert len(granted) == grants
+
+
+def test_nothing_is_granted_when_no_instance_runs(qapp, name, monkeypatch):
+    granted: list[None] = []
+    monkeypatch.setattr(cli_verbs, "allow_foreground", lambda: granted.append(None))
+    assert send(name, None) is None
+    assert granted == []
+
+
+@pytest.mark.windows_only
+def test_the_real_foreground_grant_runs():
+    """``AllowSetForegroundWindow`` itself; it may be refused (a launch without the right), never raise."""
+    cli_verbs.allow_foreground()
+
+
 class EagerSocket(QLocalSocket):
     """A socket whose write is done before ``waitForBytesWritten`` runs, as a Windows pipe's can be."""
 

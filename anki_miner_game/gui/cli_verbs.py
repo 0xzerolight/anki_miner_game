@@ -3,8 +3,9 @@
 ``anki_miner_game --arm <game> | --start | --stop | --toggle`` sends its verb to the running
 instance and exits; users bind that command in their desktop's shortcut settings, which works on
 Wayland, where no application can grab a global key. A launch without a verb while an instance runs
-asks it to show its window instead of starting a second one. ``<game>`` is the game's title or slug;
-the app maps a title to its game.
+asks it to show its window instead of starting a second one; on Windows the launch first lets it
+take the foreground (``allow_foreground``). ``<game>`` is the game's title or slug; the app maps a
+title to its game.
 
 The running instance listens on a ``QLocalServer`` whose name is derived from the app's home folder,
 so two homes (tests, a second user profile) never reach each other, and whose socket only this user
@@ -17,6 +18,7 @@ import hashlib
 import json
 import logging
 import os
+import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Final
@@ -37,6 +39,8 @@ SEND_TIMEOUT_MS: Final = 3000
 """How long ``send`` waits for the running instance to connect, read and answer, each."""
 OK: Final = b"ok"
 ERROR: Final = b"error"
+ASFW_ANY: Final = 0xFFFFFFFF
+"""``AllowSetForegroundWindow``'s "any process": this end does not know the instance's process id."""
 
 
 def parse_verb(args: Sequence[str]) -> tuple[UserCommand | None, list[str]]:
@@ -102,6 +106,8 @@ def send(name: str, command: UserCommand | None, *, timeout_ms: int = SEND_TIMEO
     sock.connectToServer(name)
     if not sock.waitForConnected(timeout_ms):
         return None
+    if command is None:
+        allow_foreground()  # before the instance reads ``show``
     try:
         sock.write(encode(command))
         # False also when the write is done already, as a Windows pipe's can be before this runs.
@@ -113,6 +119,26 @@ def send(name: str, command: UserCommand | None, *, timeout_ms: int = SEND_TIMEO
         return bytes(sock.readLine().data()).strip() == OK
     finally:
         sock.abort()
+
+
+def allow_foreground() -> None:
+    """Windows: let the running instance bring its window to the front.
+
+    Windows gives the foreground only to a process that may take it, such as this launch from the
+    Start menu or a shortcut, and not to the instance running in the background: its
+    ``activateWindow`` only flashed the taskbar button. The grant lasts until the next input. A launch
+    that may not take the foreground itself cannot grant it; the call then does nothing. Off Windows
+    there is nothing to do.
+    """
+    if sys.platform != "win32":
+        return
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    user32.AllowSetForegroundWindow.argtypes = (wintypes.DWORD,)
+    user32.AllowSetForegroundWindow.restype = wintypes.BOOL
+    user32.AllowSetForegroundWindow(ASFW_ANY)
 
 
 class CliServer(QObject):
