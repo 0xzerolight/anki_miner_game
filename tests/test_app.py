@@ -306,6 +306,18 @@ def test_closing_the_window_stops_the_app_in_the_background(rig):
     assert rig.obs.profile == "Untitled"
 
 
+def test_a_quit_stops_answering_cli_verbs_at_once(rig):
+    """B2-03: a launch during the quit must not re-show the quitting window; with the instance lock
+    held until the old process ends (B2-01) it waits and starts afresh."""
+    name = server_name(paths.home())
+    app = rig.start(name=name)
+    rig.arm()  # the quit then has a disarm to do, so it is still running when the verb comes
+    with rig.qtbot.waitSignal(app.stopped, timeout=WAIT_MS):
+        app.request_quit()
+        assert send_from_a_worker(rig, name, None) is None
+    assert not app.window.isVisible()
+
+
 # The OBS password (spec 11.1 item 4, global constraints) ------------------------------------------
 
 PASSWORD = "never-in-the-log-7f3a"

@@ -29,10 +29,11 @@ look up (``_profile_for``, no disk read on the loop); settings saved in their di
 wizard go to disk and become the config everything reads, the gateway's password override
 included. The last armed game is remembered in the settings.
 
-Quit (``request_quit`` from the window or the tray, or ``close`` after the Qt loop ends): the dialogs
-close, the actor shuts down (a recording is stopped and finalised, OBS restored, and every started
-text source stopped with its ``wait_closed`` awaited), then auto mode, the finalise worker, the VAD
-jobs, the OBS connection and the feed stop, and only then the I/O loop.
+Quit (``request_quit`` from the window or the tray, or ``close`` after the Qt loop ends): the CLI
+server stops listening, the dialogs close, the actor shuts down (a recording is stopped and
+finalised, OBS restored, and every started text source stopped with its ``wait_closed`` awaited),
+then auto mode, the finalise worker, the VAD jobs, the OBS connection and the feed stop, and only
+then the I/O loop.
 """
 
 import asyncio
@@ -681,9 +682,15 @@ class App(QObject):
     # --- quitting -------------------------------------------------------------------------------
 
     def request_quit(self) -> None:
-        """Hide the window and quit in the background; ``stopped`` follows. Main thread."""
+        """Hide the window and quit in the background; ``stopped`` follows. Main thread.
+
+        The CLI server closes first (B2-03): a launch from now on finds no instance, waits for this
+        process's instance lock (``launch.main``) and starts afresh once the quit has restored OBS.
+        """
         if self._stopping is not None:
             return
+        if self._cli is not None:
+            self._cli.close()
         self._put_away()
         self._stopping = self._io.submit(self._stop())
         self._stopping.add_done_callback(lambda _done: self.stopped.emit())
