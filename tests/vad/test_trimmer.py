@@ -341,9 +341,9 @@ def trimmed_already(trimmer: VadTrimmer, session: Session) -> None:
 @pytest.mark.parametrize(
     ("status", "message"),
     [
-        (AddonStatus.MISSING, "The VAD add-on is not installed."),
-        (AddonStatus.BROKEN, "The VAD add-on is damaged or out of date; reinstall it."),
-        (AddonStatus.INSTALLING, "The VAD add-on was still installing; re-run VAD once it is ready."),
+        (AddonStatus.MISSING, "The voice-trimming add-on is not installed."),
+        (AddonStatus.BROKEN, "The voice-trimming add-on is damaged or out of date; repair it in Settings."),
+        (AddonStatus.INSTALLING, "The voice-trimming add-on was still installing; choose Trim again once it is ready."),
     ],
 )
 def test_without_a_ready_addon_the_pass_is_unavailable_and_never_runs(
@@ -363,42 +363,90 @@ def test_without_a_ready_addon_the_pass_is_unavailable_and_never_runs(
     assert presenter.finished == [(session.manifest, VadState.UNAVAILABLE)]
 
 
-def test_a_worker_error_fails_the_pass_and_restores_the_live_subtitle(make_trimmer, presenter, session):
-    trimmer = make_trimmer()
-    trimmed_already(trimmer, session)
-    error = json.dumps({"t": "error", "message": "InvalidDataError: [Errno 1094995529] Invalid data"})
-    session.script([region(5310, 8920), error], code=1)
+WORKER_ERROR = json.dumps({"t": "error", "message": "InvalidDataError: [Errno 1094995529] Invalid data"})
 
-    trimmer.rerun(session.manifest)
+
+def test_a_worker_error_on_a_first_pass_fails_it_and_keeps_the_live_subtitle(make_trimmer, presenter, session):
+    session.script([region(5310, 8920), WORKER_ERROR], code=1)
+    trimmer = make_trimmer()
+
+    trimmer.queue(session.manifest)
     run_jobs(trimmer)
 
     assert session.srt() == LIVE_SRT
     assert session.load().vad == VadRecord(
         state=VadState.FAILED,
         model="silero_vad_v6",
-        message="The VAD worker failed: InvalidDataError: [Errno 1094995529] Invalid data",
+        message="The voice-trimming worker failed: InvalidDataError: [Errno 1094995529] Invalid data",
     )
     assert session.load().state is ManifestState.READY
+    assert presenter.finished[-1] == (session.manifest, VadState.FAILED)
+
+
+def test_a_worker_error_on_a_rerun_keeps_a_done_sessions_trimmed_subtitle(make_trimmer, presenter, session):
+    """D-08: a failed retry never makes a good result worse."""
+    trimmer = make_trimmer()
+    trimmed_already(trimmer, session)
+    done = session.load().vad
+    session.script([region(5310, 8920), WORKER_ERROR], code=1)
+
+    trimmer.rerun(session.manifest)
+    run_jobs(trimmer)
+
+    assert session.srt() == TRIMMED_SRT
+    assert session.load().vad == done
+    assert session.load().state is ManifestState.READY
+    assert presenter.finished[-1] == (session.manifest, VadState.FAILED)  # the outcome is still reported
+
+
+@pytest.mark.parametrize("status", [AddonStatus.MISSING, AddonStatus.BROKEN, AddonStatus.INSTALLING])
+def test_a_rerun_without_a_ready_addon_keeps_a_done_sessions_trimmed_subtitle(make_trimmer, presenter, session, status):
+    """B3-04: an app update that changed the VAD pins reads the add-on as broken."""
+    trimmed_already(make_trimmer(), session)
+    done = session.load().vad
+    trimmer = make_trimmer(status)
+
+    trimmer.rerun(session.manifest)
+    run_jobs(trimmer)
+
+    assert session.srt() == TRIMMED_SRT
+    assert session.load().vad == done
+    assert session.load().state is ManifestState.READY
+    assert presenter.finished[-1] == (session.manifest, VadState.UNAVAILABLE)
+
+
+def test_a_rerun_whose_subtitle_cannot_be_written_keeps_the_done_record(make_trimmer, presenter, session):
+    trimmer = make_trimmer()
+    trimmed_already(trimmer, session)
+    done = session.load().vad
+    session.script(worker_lines([(5300, 6000)]))
+    session.subtitle.unlink()
+    session.subtitle.mkdir()  # on Windows a player holding the .srt open does this
+
+    trimmer.rerun(session.manifest)
+    run_jobs(trimmer)
+
+    assert session.load().vad == done
     assert presenter.finished[-1] == (session.manifest, VadState.FAILED)
 
 
 @pytest.mark.parametrize(
     ("lines", "code", "stderr", "message"),
     [
-        ([region(5310, 8920)], 0, "", "The VAD worker stopped before finishing"),
+        ([region(5310, 8920)], 0, "", "The voice-trimming worker stopped before finishing"),
         (
             [region(5310, 8920)],
             3,
             "Traceback ...\nMemoryError\n",
-            "The VAD worker exited with code 3: Traceback ...\nMemoryError",
+            "The voice-trimming worker exited with code 3: Traceback ...\nMemoryError",
         ),
         (
             [region(5310, 8920)],
             3,
             "Traceback ...\r\nMemoryError\r\n",
-            "The VAD worker exited with code 3: Traceback ...\nMemoryError",
+            "The voice-trimming worker exited with code 3: Traceback ...\nMemoryError",
         ),
-        ([DONE], 1, "", "The VAD worker exited with code 1"),
+        ([DONE], 1, "", "The voice-trimming worker exited with code 1"),
     ],
     ids=["no done", "crash", "crash with CRLF", "done then exit 1"],
 )
@@ -431,7 +479,7 @@ def test_an_invalid_region_fails_the_pass(make_trimmer, session, bad):
 
     vad = session.load().vad
     assert vad.state is VadState.FAILED
-    assert vad.message.startswith("The VAD worker sent an invalid region")
+    assert vad.message.startswith("The voice-trimming worker sent an invalid region")
 
 
 def test_lines_outside_the_protocol_are_ignored(make_trimmer, session):
@@ -460,7 +508,7 @@ def test_a_worker_that_cannot_start_fails_the_pass(model, presenter, session):
 
     vad = session.load().vad
     assert vad.state is VadState.FAILED
-    assert vad.message.startswith("The VAD worker could not start:")
+    assert vad.message.startswith("The voice-trimming worker could not start:")
     assert session.srt() == LIVE_SRT
 
 
@@ -484,7 +532,7 @@ def test_an_unexpected_error_mid_pass_fails_it_with_the_reason(model, session):
     manifest = session.load()
     assert manifest.state is ManifestState.READY
     assert manifest.vad == VadRecord(
-        state=VadState.FAILED, model="silero_vad_v6", message="The VAD pass failed: the progress bar is gone"
+        state=VadState.FAILED, model="silero_vad_v6", message="Voice trimming failed: the progress bar is gone"
     )
     assert session.srt() == LIVE_SRT
     assert presenter.finished == [(session.manifest, VadState.FAILED)]
