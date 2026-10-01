@@ -63,6 +63,7 @@ include-package-data = true
 [tool.setuptools.package-data]
 "anki_miner_game.feed" = ["page.html"]
 "anki_miner_game.vad.worker" = ["requirements.txt"]
+"anki_miner_game.gui" = ["anki-miner-game.png"]
 
 [tool.setuptools.dynamic]
 version = {attr = "anki_miner_game.__version__"}

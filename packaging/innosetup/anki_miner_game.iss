@@ -20,6 +20,7 @@ AppPublisherURL=https://github.com/0xzerolight/anki_miner_game
 DefaultDirName={autopf}\AnkiMinerGame
 DefaultGroupName=Anki Miner Game
 UninstallDisplayIcon={app}\AnkiMinerGame.exe
+SetupIconFile=..\icons\anki-miner-game.ico
 OutputDir=..\..\dist
 OutputBaseFilename=AnkiMinerGame-{#AppVersion}-Windows-x86_64-Setup
 LicenseFile=..\..\LICENSE
