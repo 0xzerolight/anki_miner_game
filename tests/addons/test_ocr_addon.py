@@ -8,7 +8,9 @@ import asyncio
 import inspect
 import json
 import os
+import shutil
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -749,3 +751,39 @@ async def test_pick_needs_the_addon_and_an_x11_session(tmp_path):
     _install_fake(tmp_path, "linux")
     with pytest.raises(OcrError, match="X11"):
         await OcrAddon(tmp_path, platform="linux", environ={"XDG_SESSION_TYPE": "wayland"}).pick(None)
+
+
+def _record_rmtree_threads(monkeypatch) -> list[int]:
+    threads: list[int] = []
+    real = shutil.rmtree
+
+    def rmtree(path, *args, **kwargs):
+        threads.append(threading.get_ident())
+        return real(path, *args, **kwargs)
+
+    monkeypatch.setattr(ocr_addon.shutil, "rmtree", rmtree)
+    return threads
+
+
+@posix_only
+async def test_a_repair_removes_the_old_install_off_the_event_loop(tmp_path, monkeypatch):
+    """B3-02: thousands of files under the old install; rmtree on the loop stalls frames and OBS events."""
+    home = tmp_path / "home"
+    _install_fake(home, "linux", version="1.26.7")  # broken: the repair removes it first
+    addon = _addon(home, tmp_path, uv_plan={})
+    threads = _record_rmtree_threads(monkeypatch)
+    await addon.install(Progress())
+    assert addon.status() is AddonStatus.READY
+    assert threads and threading.get_ident() not in threads
+
+
+@posix_only
+async def test_a_failed_repair_cleans_up_off_the_event_loop_too(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    _install_fake(home, "linux", version="1.26.7")
+    addon = _addon(home, tmp_path, uv_plan={"fail": True})
+    threads = _record_rmtree_threads(monkeypatch)
+    with pytest.raises(OcrError):
+        await addon.install(Progress())
+    assert len(threads) >= 4  # tools and bin, before the install and after its failure
+    assert threading.get_ident() not in threads
