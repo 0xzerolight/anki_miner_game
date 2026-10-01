@@ -21,13 +21,15 @@ import logging
 import os
 import sys
 import threading
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Mapping
 from dataclasses import dataclass, replace
 from enum import IntEnum, StrEnum
+from types import MappingProxyType
 from typing import Any, Final
+from urllib.parse import urlsplit
 
 from PyQt6.QtCore import QDir, QObject, Qt, QUrl, pyqtSignal, pyqtSlot
-from PyQt6.QtGui import QDesktopServices
+from PyQt6.QtGui import QDesktopServices, QPalette
 from PyQt6.QtWidgets import (
     QFrame,
     QGridLayout,
@@ -44,6 +46,7 @@ from PyQt6.QtWidgets import (
     QWizardPage,
 )
 
+from anki_miner_game.gui.strings import COPIED_TEXT, WAYLAND_CLIPBOARD_TEXT
 from anki_miner_game.gui.widgets.layout import error_label, show_message
 from anki_miner_game.interfaces.addons import AddonService
 from anki_miner_game.interfaces.obs import ObsDiscovery, ObsGateway, ObsStarter, Provisioner
@@ -459,20 +462,40 @@ class WizardStep(IntEnum):
     ADDONS = 2
 
 
-SOURCE_STATUS_TEXT: Final = {
-    SourceStatus.DISCONNECTED: "not connected",
-    SourceStatus.CONNECTING: "connecting",
-    SourceStatus.CONNECTED: "connected",
-    SourceStatus.RECEIVING: "receiving",
-}
-WAITING_FOR_A_LINE: Final = "waiting for a line"
-
-CLIPBOARD_TEXT: Final = "The clipboard: a game's profile can also take lines copied to the clipboard."
-WAYLAND_CLIPBOARD_TEXT: Final = (
-    "On Wayland the app sees the clipboard only while one of its windows has focus, so lines copied "
-    "while you play are missed there. Use a websocket hooker (Textractor, Agent or LunaTranslator) "
-    "instead."
+SOURCES_SUBTITLE: Final = (
+    "Start your game and your text hooker (Textractor, Agent or LunaTranslator). When a line from the "
+    "game shows here, the app can read it. You can skip this and test later."
 )
+HOOKER_HINTS: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        "textractor": "Not found. In Textractor, add a WebSocket extension (port {port}).",
+        "agent": "Not found. In Agent, turn on its WebSocket server (port {port}).",
+        "luna": "Not found. In LunaTranslator, turn on its network service (port {port}).",
+    }
+)
+"""UJ-16: the one thing to change in each default hooker (``DEFAULT_TEXT_SOURCES`` ids; user guide section 4)."""
+CONNECTED_TEXT: Final = "Connected, waiting for a line"
+NO_SOURCE_TEXT: Final = "No text source is enabled. Turn one on in Settings -> Advanced -> Text hookers."
+CLIPBOARD_TEXT: Final = (
+    f'No text hooker? A game\'s profile can also take copied text: choose "{COPIED_TEXT}" under Text from.'
+)
+
+
+def source_hint(cfg: TextSourceConfig) -> str:
+    """The state of a source that is not connected: what to do in that hooker, or its address."""
+    template = HOOKER_HINTS.get(cfg.id)
+    port = _port(cfg.uri)
+    if template is not None and port is not None:
+        return template.format(port=port)
+    return f"Not found yet ({cfg.uri})"
+
+
+def _port(uri: str) -> int | None:
+    try:
+        return urlsplit(f"ws://{uri}").port
+    except ValueError:
+        return None
+
 
 ADDON_STATUS_TEXT: Final = {
     AddonStatus.MISSING: "Not installed",
@@ -751,12 +774,20 @@ class ObsPage(QWizardPage):
 
 @dataclass
 class _SourceRow:
-    status: QLabel
-    line: QLabel
+    name: QLabel
+    state: QLabel
+    hint: str
+    line: str | None = None
+    """The latest line, once one came."""
+
+
+def _show_state(row: _SourceRow, text: str, *, muted: bool) -> None:
+    row.state.setText(text)
+    row.state.setForegroundRole(QPalette.ColorRole.PlaceholderText if muted else QPalette.ColorRole.WindowText)
 
 
 class SourcesPage(QWizardPage):
-    """Step 2: each enabled text source, "waiting for a line" until one arrives (spec 16)."""
+    """Step 2: each enabled text source and what to do until a line arrives (spec 16, UJ-16)."""
 
     def __init__(self, wizard: SetupWizard, factory: Callable[[TextSourceConfig], TextSource], wayland: bool) -> None:
         super().__init__()
@@ -765,13 +796,12 @@ class SourcesPage(QWizardPage):
         self._sources: list[TextSource] = []
         self._generation = 0
         self.rows: dict[str, _SourceRow] = {}
-        self.setTitle("Text sources")
-        self.setSubTitle(
-            "Start your text hooker and play until a line shows. Each source below says "
-            f'"{WAITING_FOR_A_LINE}" until one arrives.'
-        )
+        self.setTitle("Game text")
+        self.setSubTitle(SOURCES_SUBTITLE)
         self._grid = QGridLayout()
-        self.empty = _plain_label("No text source is enabled. Add one in Settings.")
+        self._grid.setHorizontalSpacing(16)
+        self._grid.setColumnStretch(1, 1)
+        self.empty = _plain_label(NO_SOURCE_TEXT)
         self.empty.hide()
         self.clipboard = _plain_label(f"{CLIPBOARD_TEXT} {WAYLAND_CLIPBOARD_TEXT}" if wayland else CLIPBOARD_TEXT)
         layout = QVBoxLayout(self)
@@ -789,23 +819,22 @@ class SourcesPage(QWizardPage):
         enabled = [cfg for cfg in self._wizard.config.text_sources if cfg.enabled]
         self.empty.setVisible(not enabled)
         post = self._wizard.main_thread.post
+        top = Qt.AlignmentFlag.AlignTop
         started: list[tuple[TextSource, Callable[[str, SourceStatus], None], Callable[[str, float, str], None]]] = []
         for index, cfg in enumerate(enabled):
-            row = _SourceRow(
-                _plain_label(SOURCE_STATUS_TEXT[SourceStatus.DISCONNECTED]), _plain_label(WAITING_FOR_A_LINE)
-            )
+            name = _plain_label(cfg.name)
+            name.setToolTip(cfg.uri)
+            row = _SourceRow(name, _plain_label(), source_hint(cfg))
+            _show_state(row, row.hint, muted=True)
             self.rows[cfg.id] = row
-            self._grid.addWidget(_plain_label(cfg.name), index, 0)
-            self._grid.addWidget(_plain_label(cfg.uri), index, 1)
-            self._grid.addWidget(row.status, index, 2)
-            self._grid.addWidget(row.line, index, 3)
-            self._grid.setColumnStretch(3, 1)
+            self._grid.addWidget(name, index, 0, top)
+            self._grid.addWidget(row.state, index, 1, top)
 
             def on_status(_id: str, status: SourceStatus, row: _SourceRow = row) -> None:
-                post(lambda: self._show(generation, row.status, SOURCE_STATUS_TEXT[status]))
+                post(lambda: self._show_status(generation, row, status))
 
             def on_line(raw: str, _t_mono: float, _id: str, row: _SourceRow = row) -> None:
-                post(lambda: self._show(generation, row.line, raw))
+                post(lambda: self._show_line(generation, row, raw))
 
             started.append((self._factory(cfg), on_status, on_line))
         self._sources = [source for source, _, _ in started]
@@ -823,10 +852,20 @@ class SourcesPage(QWizardPage):
         if sources:
             self._wizard.submit(_stop_sources(sources), _log_failure("stopping the text sources"))
 
-    def _show(self, generation: int, label: QLabel, text: str) -> None:
+    def _show_status(self, generation: int, row: _SourceRow, status: SourceStatus) -> None:
         """Only the sources started last update the rows; older rows are gone or no longer listened to."""
-        if generation == self._generation:
-            label.setText(text)
+        if generation != self._generation:
+            return
+        if status in (SourceStatus.DISCONNECTED, SourceStatus.CONNECTING):
+            _show_state(row, row.hint, muted=True)
+        else:
+            _show_state(row, row.line if row.line is not None else CONNECTED_TEXT, muted=False)
+
+    def _show_line(self, generation: int, row: _SourceRow, raw: str) -> None:
+        if generation != self._generation:
+            return
+        row.line = raw
+        _show_state(row, raw, muted=False)
 
     def _clear_rows(self) -> None:
         while self._grid.count():

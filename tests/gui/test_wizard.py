@@ -14,11 +14,16 @@ from typing import Any
 
 import pytest
 from PyQt6.QtCore import Qt, QUrl
+from PyQt6.QtGui import QPalette
 from PyQt6.QtWidgets import QLabel, QWizard
 
 import anki_miner_game.gui.wizard as wizard_module
+from anki_miner_game.gui.strings import WAYLAND_CLIPBOARD_TEXT
 from anki_miner_game.gui.wizard import (
+    CLIPBOARD_TEXT,
+    CONNECTED_TEXT,
     FIREWALL_TEXT,
+    NO_SOURCE_TEXT,
     OBS_DOWNLOAD_URL,
     OBS_SUMMARY,
     ObsCheck,
@@ -28,6 +33,7 @@ from anki_miner_game.gui.wizard import (
     WizardStep,
     native_path,
     saved_in_text,
+    source_hint,
 )
 from anki_miner_game.models.addons import AddonStatus
 from anki_miner_game.models.config import DEFAULT_TEXT_SOURCES, AppConfig, TextSourceConfig
@@ -423,7 +429,10 @@ def sources_config() -> AppConfig:
     return AppConfig(text_sources=(textractor, agent, TextSourceConfig(luna.id, luna.name, luna.uri, enabled=False)))
 
 
-def test_each_enabled_source_starts_on_the_io_loop_and_waits_for_a_line(qtbot, io_loop):
+MUTED = QPalette.ColorRole.PlaceholderText
+
+
+def test_each_enabled_source_starts_on_the_io_loop_and_says_what_to_do(qtbot, io_loop):
     h = Harness(qtbot, io_loop, config=sources_config(), start=WizardStep.SOURCES)
     page = h.wizard.sources_page
     assert h.wizard.currentId() == WizardStep.SOURCES
@@ -431,23 +440,50 @@ def test_each_enabled_source_starts_on_the_io_loop_and_waits_for_a_line(qtbot, i
     assert [s.id for s in h.sources] == ["textractor", "agent"]
     assert {s.started_on.name for s in h.sources} == {"io-loop"}
     assert set(page.rows) == {"textractor", "agent"}
-    for row in page.rows.values():
-        assert row.line.text() == "waiting for a line"
-    qtbot.waitUntil(lambda: page.rows["agent"].status.text() == "connecting")
+    assert page.rows["textractor"].state.text() == "Not found. In Textractor, add a WebSocket extension (port 6677)."
+    assert page.rows["agent"].state.text() == "Not found. In Agent, turn on its WebSocket server (port 9001)."
+    assert page.rows["agent"].state.foregroundRole() == MUTED
+    assert page.rows["agent"].name.text() == "Agent"
+    assert page.rows["agent"].name.toolTip() == "localhost:9001"
     assert h.next_enabled()  # a hooker that is not running does not block the wizard
 
 
-def test_a_line_and_a_status_change_show_in_their_row(qtbot, io_loop):
+def test_every_default_hooker_and_a_user_added_source_has_its_hint():
+    textractor, agent, luna = DEFAULT_TEXT_SOURCES
+    assert source_hint(luna) == "Not found. In LunaTranslator, turn on its network service (port 2333)."
+    assert source_hint(TextSourceConfig("agent", "Agent", "localhost:9002")) == (
+        "Not found. In Agent, turn on its WebSocket server (port 9002)."
+    )
+    assert (
+        source_hint(TextSourceConfig("my-hooker", "Mine", "127.0.0.1:7000/text"))
+        == "Not found yet (127.0.0.1:7000/text)"
+    )
+
+
+def test_a_connected_source_waits_for_a_line_and_a_line_replaces_its_state(qtbot, io_loop):
     h = Harness(qtbot, io_loop, config=sources_config(), start=WizardStep.SOURCES)
     page = h.wizard.sources_page
     qtbot.waitUntil(lambda: len(h.sources) == 2 and all(s.sink for s in h.sources))
     textractor = h.sources[0]
+    h.on_loop(lambda: textractor._set(SourceStatus.CONNECTED))
+    qtbot.waitUntil(lambda: page.rows["textractor"].state.text() == CONNECTED_TEXT)
+    assert CONNECTED_TEXT == "Connected, waiting for a line"
     h.on_loop(lambda: textractor._set(SourceStatus.RECEIVING))
     h.on_loop(lambda: textractor.sink("<b>お前は誰だ？</b>", 1.0, "textractor"))
-    qtbot.waitUntil(lambda: page.rows["textractor"].line.text() == "<b>お前は誰だ？</b>")
-    assert page.rows["textractor"].line.textFormat() == Qt.TextFormat.PlainText
-    assert page.rows["textractor"].status.text() == "receiving"
-    assert page.rows["agent"].line.text() == "waiting for a line"
+    qtbot.waitUntil(lambda: page.rows["textractor"].state.text() == "<b>お前は誰だ？</b>")
+    assert page.rows["textractor"].state.textFormat() == Qt.TextFormat.PlainText
+    assert page.rows["textractor"].state.foregroundRole() == QPalette.ColorRole.WindowText
+    assert page.rows["agent"].state.text() == source_hint(DEFAULT_TEXT_SOURCES[1])
+
+
+def test_the_rows_are_two_top_aligned_columns(qtbot, io_loop):
+    h = Harness(qtbot, io_loop, config=sources_config(), start=WizardStep.SOURCES)
+    grid = h.wizard.sources_page._grid
+    qtbot.waitUntil(lambda: grid.count() == 4)
+    assert grid.columnCount() == 2
+    assert grid.horizontalSpacing() == 16
+    for index in range(grid.count()):
+        assert grid.itemAt(index).alignment() == Qt.AlignmentFlag.AlignTop
 
 
 @pytest.mark.parametrize("leave", ["next", "back", "close"])
@@ -475,26 +511,37 @@ def test_coming_back_starts_fresh_sources_and_old_ones_no_longer_update_the_rows
     qtbot.waitUntil(lambda: len(h.sources) == 4 and all(s.sink for s in h.sources))
     h.on_loop(lambda: old.sink("stale", 1.0, "textractor"))
     h.on_loop(lambda: h.sources[2].sink("fresh", 2.0, "textractor"))
-    qtbot.waitUntil(lambda: page.rows["textractor"].line.text() == "fresh")
+    qtbot.waitUntil(lambda: page.rows["textractor"].state.text() == "fresh")
     assert [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR] == []  # no call on a gone row
 
 
-def test_no_enabled_source_says_where_to_add_one(qtbot, io_loop):
-    cfg = AppConfig(text_sources=())
-    h = Harness(qtbot, io_loop, config=cfg, start=WizardStep.SOURCES)
-    assert h.wizard.sources_page.rows == {}
-    assert "Settings" in h.wizard.sources_page.empty.text()
-    assert not h.wizard.sources_page.empty.isHidden()
+def test_no_enabled_source_says_where_to_turn_one_on(qtbot, io_loop):
+    h = Harness(qtbot, io_loop, config=AppConfig(text_sources=()), start=WizardStep.SOURCES)
+    page = h.wizard.sources_page
+    assert page.rows == {}
+    assert page.empty.text() == "No text source is enabled. Turn one on in Settings -> Advanced -> Text hookers."
+    assert page.empty.text() == NO_SOURCE_TEXT
+    assert not page.empty.isHidden()
 
 
 @pytest.mark.parametrize("wayland", [True, False])
-def test_the_clipboard_note_warns_about_wayland_only_there(qtbot, io_loop, wayland):
+def test_the_clipboard_line_names_the_profile_option_and_warns_about_wayland_only_there(qtbot, io_loop, wayland):
     h = Harness(qtbot, io_loop, start=WizardStep.SOURCES, wayland=wayland)
     text = h.wizard.sources_page.clipboard.text()
-    assert "clipboard" in text
-    assert ("Wayland" in text) is wayland
-    if wayland:
-        assert "focus" in text and "websocket" in text
+    assert CLIPBOARD_TEXT == (
+        'No text hooker? A game\'s profile can also take copied text: choose "Copied text (clipboard)" under Text from.'
+    )
+    assert text == (f"{CLIPBOARD_TEXT} {WAYLAND_CLIPBOARD_TEXT}" if wayland else CLIPBOARD_TEXT)
+
+
+def test_the_page_is_called_game_text(qtbot, io_loop):
+    h = Harness(qtbot, io_loop, start=WizardStep.SOURCES, single_step=True)
+    page = h.wizard.sources_page
+    assert page.title() == "Game text"
+    assert page.subTitle() == (
+        "Start your game and your text hooker (Textractor, Agent or LunaTranslator). When a line from the "
+        "game shows here, the app can read it. You can skip this and test later."
+    )
 
 
 # The add-ons step ----------------------------------------------------------------------------------
