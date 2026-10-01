@@ -72,7 +72,6 @@ FEED_NOTE: Final = (
 SETUP_STEPS: Final = (
     (WizardStep.OBS, "OBS"),
     (WizardStep.SOURCES, "Text sources"),
-    (WizardStep.FOLDER, "Output folder"),
     (WizardStep.ADDONS, "Add-ons"),
 )
 SETUP_NOTE: Final = "Run a step of the setup wizard again."

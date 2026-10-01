@@ -1,4 +1,4 @@
-"""First-run wizard (spec 16): OBS, text sources, output folder, optional add-ons.
+"""Setup wizard (spec 16): OBS, game text, optional extras.
 
 Step 1 (``ObsSetup``) finds OBS, says how to turn its websocket server on while OBS runs with it off,
 has the shared ``ObsStarter`` turn it on, launch OBS and connect (D-03), checks that no output is
@@ -24,13 +24,11 @@ import threading
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, replace
 from enum import IntEnum, StrEnum
-from pathlib import Path
 from typing import Any, Final
 
 from PyQt6.QtCore import QDir, QObject, Qt, QUrl, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import (
-    QFileDialog,
     QGridLayout,
     QHBoxLayout,
     QLabel,
@@ -437,12 +435,11 @@ Runner = Callable[[Coroutine[Any, Any, Any]], concurrent.futures.Future[Any]]
 
 
 class WizardStep(IntEnum):
-    """The wizard's pages in spec 16's order; ``SetupWizard(start=...)`` re-runs one from Settings."""
+    """The wizard's pages in order (spec 16 as amended by UJ-17); ``SetupWizard(start=...)`` opens one."""
 
     OBS = 0
     SOURCES = 1
-    FOLDER = 2
-    ADDONS = 3
+    ADDONS = 2
 
 
 SOURCE_STATUS_TEXT: Final = {
@@ -504,12 +501,13 @@ class _MainThread(QObject):
 
 
 class SetupWizard(QWizard):
-    """The first-run wizard (spec 16): (1) OBS, (2) text sources, (3) output folder, (4) add-ons.
+    """The setup wizard (spec 16 as amended): (1) OBS, (2) game text, (3) optional extras. A first run
+    walks all three, numbered; ``single_step=True`` shows only the ``start`` page with Finish on it (a
+    banner's Set up OBS…, Settings' Set up OBS…/Test…/Install…, a game profile's Install…).
 
-    Every step can be opened on its own (``start``), which is how Settings re-runs one.
     ``save_config(cfg)`` stores ``cfg`` and makes it the app's current config: the OBS gateway reads
-    a typed password override through it at its next connect. It is called when the output folder is
-    confirmed and when a password is typed after OBS refused one. ``source_factory`` builds a text
+    a typed password override through it at its next connect. It is called when a password is typed
+    after OBS refused one. ``source_factory`` builds a text
     source for one configured source; the wizard starts the enabled ones while step 2 is shown and
     stops them when it is left. ``run`` puts coroutines on the I/O loop. ``wayland`` defaults to the
     current session. ``open_url`` opens the OBS-download link (a frozen Linux build passes one that
@@ -528,11 +526,13 @@ class SetupWizard(QWizard):
         vad_addon: AddonService,
         ocr_addon: AddonService,
         start: WizardStep = WizardStep.OBS,
+        single_step: bool = False,
         wayland: bool | None = None,
         open_url: Callable[[QUrl], object] = QDesktopServices.openUrl,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
+        self.single_step = single_step
         self.setWindowTitle("Anki Miner Game setup")
         self.setTitleFormat(Qt.TextFormat.PlainText)
         self.setSubTitleFormat(Qt.TextFormat.PlainText)
@@ -543,14 +543,15 @@ class SetupWizard(QWizard):
         self.main_thread = _MainThread(self)
         self.obs_page = ObsPage(self, obs)
         self.sources_page = SourcesPage(self, source_factory, is_wayland_session() if wayland is None else wayland)
-        self.folder_page = FolderPage(self)
         self.addons_page = AddonsPage(self, vad_addon, ocr_addon)
-        for step, page in (
+        steps = (
             (WizardStep.OBS, self.obs_page),
             (WizardStep.SOURCES, self.sources_page),
-            (WizardStep.FOLDER, self.folder_page),
             (WizardStep.ADDONS, self.addons_page),
-        ):
+        )
+        for number, (step, page) in enumerate(steps, start=1):
+            if not single_step:
+                page.setTitle(f"Step {number} of {len(steps)}: {page.title()}")
             self.setPage(step, page)
         self.setStartId(start)
         self.currentIdChanged.connect(self._page_changed)
@@ -631,6 +632,10 @@ class ObsPage(QWizardPage):
 
     def isComplete(self) -> bool:
         return not self._running and self._check is not None and self._check.status is ObsStatus.READY
+
+    def nextId(self) -> int:
+        """A single-step run ends on this page (UJ-17)."""
+        return -1 if self._wizard.single_step else super().nextId()
 
     def _start(self) -> None:
         if self._running:
@@ -740,6 +745,10 @@ class SourcesPage(QWizardPage):
         if started:
             self._wizard.submit(_start_sources(started), _log_failure("starting the text sources"))
 
+    def nextId(self) -> int:
+        """A single-step run ends on this page (UJ-17)."""
+        return -1 if self._wizard.single_step else super().nextId()
+
     def stop_sources(self) -> None:
         """Stop what ``start_sources`` started, on the I/O loop, and wait for each to close."""
         sources, self._sources = self._sources, []
@@ -784,63 +793,9 @@ def _log_failure(what: str) -> Callable[[concurrent.futures.Future[Any]], None]:
     return check
 
 
-class FolderPage(QWizardPage):
-    """Step 3: the output folder; created and saved when confirmed."""
-
-    def __init__(self, wizard: SetupWizard) -> None:
-        super().__init__()
-        self._wizard = wizard
-        self.setTitle("Output folder")
-        self.setSubTitle(
-            "Finished sessions go to <folder>/<Game>/<Game> - NN.mkv with the .srt beside it; OBS records "
-            f"into its {INCOMING_DIRNAME} folder first."
-        )
-        self.path = QLineEdit(wizard.config.output_root)
-        self.path.textChanged.connect(self._edited)
-        self.browse = QPushButton("Browse…")
-        self.browse.clicked.connect(self._browse)
-        self.error = _plain_label()
-        self.error.hide()
-        row = QHBoxLayout()
-        row.addWidget(self.path, 1)
-        row.addWidget(self.browse)
-        layout = QVBoxLayout(self)
-        layout.addLayout(row)
-        layout.addWidget(self.error)
-        layout.addStretch(1)
-
-    def isComplete(self) -> bool:
-        return bool(self.path.text())
-
-    def validatePage(self) -> bool:
-        text = self.path.text()
-        folder = Path(text).expanduser()
-        if not folder.is_absolute():
-            return self._refuse("Choose a full path, such as the one Browse gives.")
-        try:
-            folder.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            return self._refuse(f"This folder cannot be created: {exc.strerror or exc}")
-        if not os.access(folder, os.W_OK):
-            return self._refuse("This folder is not writable. Choose another one.")
-        error = self._wizard.store(replace(self._wizard.config, output_root=text))
-        if error is not None:
-            return self._refuse(error)
-        return True
-
-    def _refuse(self, text: str) -> bool:
-        self.error.setText(text)
-        self.error.show()
-        return False
-
-    def _edited(self) -> None:
-        self.error.hide()
-        self.completeChanged.emit()
-
-    def _browse(self) -> None:
-        chosen = QFileDialog.getExistingDirectory(self, "Output folder", str(Path(self.path.text()).expanduser()))
-        if chosen:
-            self.path.setText(chosen)
+def saved_in_text(cfg: AppConfig) -> str:
+    """The last page's line (UJ-17): where sessions go, as the system writes the path (UJ-33)."""
+    return f"Sessions are saved in {native_path(cfg.output_root)} (change it in Settings)."
 
 
 class _AddonRow:
@@ -915,6 +870,7 @@ class AddonsPage(QWizardPage):
 
     def __init__(self, wizard: SetupWizard, vad: AddonService, ocr: AddonService) -> None:
         super().__init__()
+        self._wizard = wizard
         self.setTitle("Optional add-ons")
         self.setSubTitle("Each one downloads only when you install it. You can also install them later from Settings.")
         self.rows = [
@@ -935,8 +891,17 @@ class AddonsPage(QWizardPage):
         for row in self.rows:
             for widget in row.widgets():
                 layout.addWidget(widget)
+        self.saved_in = _plain_label(saved_in_text(wizard.config))
+        self.saved_in.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.saved_in.setVisible(not wizard.single_step)
+        layout.addWidget(self.saved_in)
         layout.addStretch(1)
 
     def initializePage(self) -> None:
+        self.saved_in.setText(saved_in_text(self._wizard.config))
         for row in self.rows:
             row.refresh()
+
+    def nextId(self) -> int:
+        """A single-step run ends on this page (UJ-17)."""
+        return -1 if self._wizard.single_step else super().nextId()

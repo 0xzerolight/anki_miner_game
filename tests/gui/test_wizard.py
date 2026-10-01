@@ -24,6 +24,8 @@ from anki_miner_game.gui.wizard import (
     ObsStatus,
     SetupWizard,
     WizardStep,
+    native_path,
+    saved_in_text,
 )
 from anki_miner_game.models.addons import AddonStatus
 from anki_miner_game.models.config import DEFAULT_TEXT_SOURCES, AppConfig, TextSourceConfig
@@ -439,59 +441,6 @@ def test_the_clipboard_note_warns_about_wayland_only_there(qtbot, io_loop, wayla
         assert "focus" in text and "websocket" in text
 
 
-# The output folder step ----------------------------------------------------------------------------
-
-
-def test_the_folder_step_shows_the_configured_folder(qtbot, io_loop):
-    h = Harness(qtbot, io_loop, config=AppConfig(output_root="/games/rec"), start=WizardStep.FOLDER)
-    assert h.wizard.folder_page.path.text() == "/games/rec"
-
-
-def test_a_relative_folder_is_refused(qtbot, io_loop):
-    h = Harness(qtbot, io_loop, start=WizardStep.FOLDER)
-    h.wizard.folder_page.path.setText("recordings")
-    h.wizard.next()
-    assert h.wizard.currentId() == WizardStep.FOLDER
-    assert "full path" in h.wizard.folder_page.error.text()
-    assert h.saved == []
-
-
-def test_an_empty_folder_cannot_go_on(qtbot, io_loop):
-    h = Harness(qtbot, io_loop, start=WizardStep.FOLDER)
-    h.wizard.folder_page.path.setText("")
-    assert not h.next_enabled()
-
-
-def test_the_chosen_folder_is_created_and_saved(qtbot, io_loop, tmp_path):
-    h = Harness(qtbot, io_loop, start=WizardStep.FOLDER)
-    folder = tmp_path / "Game Sessions" / "rec"
-    h.wizard.folder_page.path.setText(str(folder))
-    h.wizard.next()
-    assert h.wizard.currentId() == WizardStep.ADDONS
-    assert folder.is_dir()
-    assert h.saved[-1].output_root == str(folder)
-    assert h.wizard.config.output_root == str(folder)
-
-
-def test_a_folder_that_cannot_be_created_is_reported(qtbot, io_loop, tmp_path):
-    blocker = tmp_path / "file"
-    blocker.write_text("x")
-    h = Harness(qtbot, io_loop, start=WizardStep.FOLDER)
-    h.wizard.folder_page.path.setText(str(blocker / "rec"))
-    h.wizard.next()
-    assert h.wizard.currentId() == WizardStep.FOLDER
-    assert "cannot be created" in h.wizard.folder_page.error.text()
-
-
-def test_a_config_that_cannot_be_saved_keeps_the_step(qtbot, io_loop, tmp_path):
-    h = Harness(qtbot, io_loop, start=WizardStep.FOLDER, save_error=OSError("read-only"))
-    h.wizard.folder_page.path.setText(str(tmp_path / "rec"))
-    h.wizard.next()
-    assert h.wizard.currentId() == WizardStep.FOLDER
-    assert "read-only" in h.wizard.folder_page.error.text()
-    assert h.wizard.config.output_root == AppConfig().output_root
-
-
 # The add-ons step ----------------------------------------------------------------------------------
 
 
@@ -559,9 +508,36 @@ def test_ready_and_broken_addons(qtbot, io_loop, status, text, button):
 # The wizard as a whole ------------------------------------------------------------------------------
 
 
-def test_the_four_steps_come_in_the_spec_order(qtbot, io_loop):
+def test_a_first_run_has_three_numbered_steps(qtbot, io_loop):
     h = Harness(qtbot, io_loop)
-    assert h.wizard.pageIds() == [WizardStep.OBS, WizardStep.SOURCES, WizardStep.FOLDER, WizardStep.ADDONS]
+    assert h.wizard.pageIds() == [WizardStep.OBS, WizardStep.SOURCES, WizardStep.ADDONS]
+    for number, step in enumerate(WizardStep, start=1):
+        assert h.wizard.page(step).title().startswith(f"Step {number} of 3: ")
+    assert [step.name for step in WizardStep] == ["OBS", "SOURCES", "ADDONS"]
+
+
+@pytest.mark.parametrize("step", list(WizardStep))
+def test_a_single_step_run_shows_only_that_page_with_finish(qtbot, io_loop, step):
+    h = Harness(qtbot, io_loop, start=step, single_step=True)
+    page = h.wizard.currentPage()
+    assert h.wizard.currentId() == step
+    assert page.nextId() == -1
+    assert not page.title().startswith("Step")
+    assert h.wizard.button(QWizard.WizardButton.FinishButton).isVisible()
+    assert not h.wizard.button(NEXT).isVisible()
+
+
+def test_the_last_page_says_where_sessions_are_saved(qtbot, io_loop):
+    h = Harness(qtbot, io_loop, start=WizardStep.ADDONS)
+    saved_in = h.wizard.addons_page.saved_in
+    assert saved_in.text() == f"Sessions are saved in {native_path(AppConfig().output_root)} (change it in Settings)."
+    assert saved_in.text() == saved_in_text(AppConfig())
+    assert not saved_in.isHidden()
+
+
+def test_a_single_step_run_does_not_repeat_where_sessions_are_saved(qtbot, io_loop):
+    h = Harness(qtbot, io_loop, start=WizardStep.ADDONS, single_step=True)
+    assert h.wizard.addons_page.saved_in.isHidden()
 
 
 @pytest.mark.parametrize("step", list(WizardStep))
