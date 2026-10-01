@@ -5,8 +5,9 @@ profile, and the window list the picker offers. ``Provisioner.list_windows`` rea
 scene collection, so the picker never lists the user's collection:
 
 - In any state but ``idle`` OBS is on the app's collection (arming put it there), so it lists at once.
-- While ``idle`` it runs spec 6.2 step 1's output check first (an active output: the picker says
-  which and lists nothing), reads the current collection's name, provisions the app's collection
+- While ``idle`` it first gets OBS running and connected (``ObsStarter``, D-03: OBS is usually
+  closed when the app starts), then runs spec 6.2 step 1's output check (an active output: the
+  picker says which and lists nothing), reads the current collection's name, provisions the app's collection
   for the profile (``ensure_collection``), lists, and switches back through the gateway. The switch
   back is done on ``CurrentSceneCollectionChanged``, never on the answer, whose order against the
   event is not fixed (``docs/m0/obs-behaviour.md`` item 5); there is none when the user's collection
@@ -18,7 +19,8 @@ scene collection, so the picker never lists the user's collection:
 The picker offers enabled items only (``docs/m0/wave-1-amendments.md`` item 11): OBS keeps listing
 the configured window as a disabled item once no live window matches it, and on X11 a retitled
 window is that disabled item plus an enabled one under its new name (R2 item 15). The stored
-``capture.window`` is kept until the user picks another window or unpins it.
+``capture.window`` is kept until the user chooses another window, or none, in the dialog's Game window
+dropdown.
 
 ``CapturePicker`` runs on the I/O loop, the session actor's thread (``SessionControl``). The dialog
 lives on the Qt main thread and hands its coroutines to the loop through ``AsyncRunner`` (in the app
@@ -63,7 +65,17 @@ from anki_miner_game.models.addons import AddonStatus
 from anki_miner_game.models.config import TextSourceConfig
 from anki_miner_game.models.constants import OBS_COLLECTION_NAME
 from anki_miner_game.models.messages import AppState, ObsEvent
-from anki_miner_game.models.obs import ObsError, ObsEventName, ObsRequestError, WindowItem
+from anki_miner_game.models.obs import (
+    ObsAuthError,
+    ObsConnectError,
+    ObsError,
+    ObsEventName,
+    ObsNotReadyError,
+    ObsRequestError,
+    ObsServerOffError,
+    ObsStartStage,
+    WindowItem,
+)
 from anki_miner_game.models.profile import (
     AudioMode,
     AudioSettings,
@@ -98,6 +110,13 @@ OUTPUT_STATUS: Final = (
 """Spec 6.2 step 1: each output's status request and how the picker names it."""
 
 _MAYBE_UNAVAILABLE: Final = frozenset({"GetReplayBufferStatus", "GetVirtualCamStatus"})
+
+LIST_SERVER_OFF_TEXT: Final = "OBS's WebSocket server is off. Close OBS and open this list again: the app turns it on."
+LIST_NOT_READY_TEXT: Final = (
+    "OBS did not answer within 30 s. If OBS shows a dialog, answer it, then open this list again."
+)
+LIST_AUTH_TEXT: Final = "OBS rejected the app's password. Set it in Settings -> Advanced -> Set up OBS…"
+"""Master 4.9: why the window list could not start OBS, and what to do."""
 
 
 class WindowListError(RuntimeError):
@@ -149,12 +168,16 @@ class CapturePicker:
         """
         return await self._to_the_end(self._provisioner.capture_method(profile))
 
-    async def list_windows(self, profile: GameProfile) -> WindowListing:
-        """The windows to pin for ``profile``. Raises ``WindowListError`` or ``ObsError``.
+    async def list_windows(
+        self, profile: GameProfile, report: Callable[[ObsStartStage], None] | None = None
+    ) -> WindowListing:
+        """The windows to offer for ``profile``. Raises ``WindowListError`` or ``ObsError``.
 
-        Runs to its end, switch back included, even when the caller is cancelled (``_to_the_end``).
+        While idle, OBS is started and connected first (``ObsStarter``, D-03); ``report`` hears its stages
+        on the I/O loop (only on that path). Runs to its end, switch back included, even when the caller
+        is cancelled (``_to_the_end``).
         """
-        return await self._to_the_end(self._list_windows(profile))
+        return await self._to_the_end(self._list_windows(profile, report))
 
     async def _to_the_end[T](self, call: Coroutine[Any, Any, T]) -> T:
         """Await ``call`` in a task that a cancelled caller leaves running.
@@ -170,13 +193,42 @@ class CapturePicker:
         task.add_done_callback(self._running.discard)
         return await asyncio.shield(task)
 
-    async def _list_windows(self, profile: GameProfile) -> WindowListing:
+    async def _list_windows(
+        self, profile: GameProfile, report: Callable[[ObsStartStage], None] | None
+    ) -> WindowListing:
         if self._session.state is not AppState.IDLE:
             return WindowListing(_enabled(await self._provisioner.list_windows()))
         async with self._obs_lock:
             if self._session.state is not AppState.IDLE:  # armed while this waited for the lock
                 return WindowListing(_enabled(await self._provisioner.list_windows()))
+            await self._start_obs(report)
             return await self._list_while_idle(profile)
+
+    async def _start_obs(self, report: Callable[[ObsStartStage], None] | None) -> None:
+        """B4-01: OBS running and the gateway connected, as Get ready does; a failure says what to do.
+
+        The gateway's ``CONNECTED`` reaches the actor as after the wizard's connect. A connect failure once
+        OBS runs (``CONNECTING`` heard) passes through unchanged; the dialog shows it as OBS's answer.
+        """
+        heard: list[ObsStartStage] = []
+
+        def tell(stage: ObsStartStage) -> None:
+            heard.append(stage)
+            if report is not None:
+                report(stage)
+
+        try:
+            await self._starter.start(tell)
+        except ObsServerOffError as exc:
+            raise WindowListError(LIST_SERVER_OFF_TEXT) from exc
+        except ObsNotReadyError as exc:
+            raise WindowListError(LIST_NOT_READY_TEXT) from exc
+        except ObsAuthError as exc:
+            raise WindowListError(LIST_AUTH_TEXT) from exc
+        except ObsConnectError as exc:
+            if ObsStartStage.CONNECTING not in heard:  # no install, or OBS could not be started
+                raise WindowListError(f"Cannot start OBS: {exc}") from exc
+            raise
 
     async def _list_while_idle(self, profile: GameProfile) -> WindowListing:
         await self._refuse_active_outputs()

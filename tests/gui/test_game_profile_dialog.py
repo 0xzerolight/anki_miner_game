@@ -24,7 +24,7 @@ from anki_miner_game.models.addons import AddonStatus
 from anki_miner_game.models.config import DEFAULT_TEXT_SOURCES, TextSourceConfig
 from anki_miner_game.models.constants import OBS_COLLECTION_NAME
 from anki_miner_game.models.messages import AppState
-from anki_miner_game.models.obs import WindowItem
+from anki_miner_game.models.obs import ObsStartStage, WindowItem
 from anki_miner_game.models.profile import (
     AudioMode,
     AudioSettings,
@@ -38,11 +38,9 @@ from anki_miner_game.models.profile import (
     TextMode,
 )
 from anki_miner_game.obs.provision import ObsProvisioner
-from anki_miner_game.obs.startup import LocalObsStarter
 from anki_miner_game.session.naming import slugify
-from tests.gui.obs_listing_fake import ListingObs, recorded_window_lists
+from tests.gui.obs_listing_fake import ListingObs, StubStarter, recorded_window_lists
 from tests.obs.fake_obs import LINUX_X11_KINDS, WINDOWS_KINDS
-from tests.session.actor_harness import FakeDiscovery
 
 BEFORE, RETITLED, CLOSED = recorded_window_lists("window_retitle.jsonl")
 STORED = BEFORE[0]["itemValue"]
@@ -116,7 +114,7 @@ class Rig:
         self.session = FakeSession()
         self.provisioner = ObsProvisioner(self.obs, platform=platform)
         self.ocr = FakeOcr()
-        self.starter = LocalObsStarter(FakeDiscovery(), self.obs)  # OBS runs: the starter only connects
+        self.starter = StubStarter(ObsStartStage.CONNECTING)  # OBS runs: the starter only connects
         self.picker = CapturePicker(
             self.obs, self.provisioner, self.session, starter=self.starter, switch_timeout_s=2.0
         )

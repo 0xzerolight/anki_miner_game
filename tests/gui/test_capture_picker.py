@@ -13,14 +13,29 @@ from typing import Any
 
 import pytest
 
-from anki_miner_game.gui.game_profile_dialog import CapturePicker, WindowListError
+from anki_miner_game.gui.game_profile_dialog import (
+    LIST_AUTH_TEXT,
+    LIST_NOT_READY_TEXT,
+    LIST_SERVER_OFF_TEXT,
+    CapturePicker,
+    WindowListError,
+)
 from anki_miner_game.models.constants import OBS_COLLECTION_NAME
 from anki_miner_game.models.messages import AppState
-from anki_miner_game.models.obs import ObsConnectError, ObsError, ObsRequestError, WindowItem
+from anki_miner_game.models.obs import (
+    ObsAuthError,
+    ObsConnectError,
+    ObsError,
+    ObsNotReadyError,
+    ObsRequestError,
+    ObsServerOffError,
+    ObsStartStage,
+    WindowItem,
+)
 from anki_miner_game.models.profile import CaptureKind, CaptureSettings, GameProfile
 from anki_miner_game.obs.provision import ObsProvisioner
 from anki_miner_game.obs.startup import LocalObsStarter
-from tests.gui.obs_listing_fake import STATUS_REQUESTS, ListingObs, recorded_window_lists
+from tests.gui.obs_listing_fake import STATUS_REQUESTS, ListingObs, StartingObs, StubStarter, recorded_window_lists
 from tests.obs.fake_obs import LINUX_X11_KINDS, WINDOWS_KINDS
 from tests.session.actor_harness import FakeDiscovery
 
@@ -49,11 +64,19 @@ def make(
     platform: str = "linux",
     timeout_s: float = 2.0,
     obs_lock: asyncio.Lock | None = None,
+    starter: Any = None,
 ) -> tuple[CapturePicker, FakeSession]:
+    """``starter`` defaults to an OBS that runs already (it reports ``CONNECTING`` only)."""
     session = FakeSession(state)
     provisioner = ObsProvisioner(obs, platform=platform, sleep=_no_sleep)
-    starter = LocalObsStarter(FakeDiscovery(), obs)  # OBS runs: the starter only connects
-    picker = CapturePicker(obs, provisioner, session, starter=starter, switch_timeout_s=timeout_s, obs_lock=obs_lock)
+    picker = CapturePicker(
+        obs,
+        provisioner,
+        session,
+        starter=starter if starter is not None else StubStarter(ObsStartStage.CONNECTING),
+        switch_timeout_s=timeout_s,
+        obs_lock=obs_lock,
+    )
     return picker, session
 
 
@@ -453,3 +476,109 @@ async def test_the_listing_holds_the_obs_lock_until_it_switched_back() -> None:
 
     assert held == [True]
     assert not lock.locked()
+
+
+# Starting OBS for an idle listing (B4-01, D-03) ---------------------------------------------------
+
+
+async def test_an_idle_listing_starts_obs_and_connects_before_the_output_check():
+    """B4-01: OBS was not running when the app started; listing windows starts it, as Get ready does."""
+    obs = StartingObs(input_kinds=LINUX_X11_KINDS, window_lists={"xcomposite_input": RETITLED})
+    discovery = FakeDiscovery()
+    discovery.running = False
+    picker, _ = make(obs, starter=LocalObsStarter(discovery, obs, timeout_s=1.0))
+    stages: list[ObsStartStage] = []
+
+    listing = await picker.list_windows(X11_PROFILE, stages.append)
+
+    assert (discovery.enabled, discovery.launches, obs.connects) == (1, 1, 1)
+    assert stages == [ObsStartStage.ENABLING_SERVER, ObsStartStage.LAUNCHING, ObsStartStage.CONNECTING]
+    assert obs.statuses() == list(STATUS_REQUESTS)  # the fake refuses every request before connect()
+    assert [item.value for item in listing.items] == [i.value for i in items(RETITLED) if i.enabled]
+    assert obs.current_collection == "Untitled"
+
+
+async def test_an_obs_that_runs_already_is_only_connected():
+    starter = StubStarter(ObsStartStage.CONNECTING)
+    obs = x11_obs()
+    picker, _ = make(obs, starter=starter)
+    stages: list[ObsStartStage] = []
+
+    await picker.list_windows(X11_PROFILE, stages.append)
+
+    assert starter.calls == 1
+    assert stages == [ObsStartStage.CONNECTING]
+
+
+async def test_obs_is_started_while_the_listing_holds_the_obs_lock():
+    lock = asyncio.Lock()
+    starter = StubStarter(ObsStartStage.CONNECTING)
+    starter.lock = lock
+    picker, _ = make(x11_obs(), obs_lock=lock, starter=starter)
+
+    await picker.list_windows(X11_PROFILE)
+
+    assert starter.locked_at_call == [True]
+    assert not lock.locked()
+
+
+@pytest.mark.parametrize("state", [AppState.ARMED, AppState.RECORDING])
+async def test_while_ready_or_recording_nothing_is_started(state: AppState):
+    """The actor owns OBS then; the listing reads the app's collection at once."""
+    obs = x11_obs(BEFORE)
+    armed, _ = make(obs)
+    await armed._provisioner.ensure_collection(X11_PROFILE)
+    starter = StubStarter(ObsStartStage.CONNECTING)
+    picker, _ = make(obs, state, starter=starter)
+    stages: list[ObsStartStage] = []
+
+    await picker.list_windows(X11_PROFILE, stages.append)
+
+    assert (starter.calls, stages) == (0, [])
+
+
+@pytest.mark.parametrize(
+    ("stages", "error", "text"),
+    [
+        ((ObsStartStage.ENABLING_SERVER,), ObsServerOffError("OBS started meanwhile"), LIST_SERVER_OFF_TEXT),
+        (
+            (ObsStartStage.ENABLING_SERVER, ObsStartStage.LAUNCHING),
+            ObsNotReadyError("OBS did not answer within 30 s; an OBS dialog may be waiting"),
+            LIST_NOT_READY_TEXT,
+        ),
+        ((ObsStartStage.CONNECTING,), ObsAuthError("authentication failed"), LIST_AUTH_TEXT),
+        (
+            (ObsStartStage.ENABLING_SERVER, ObsStartStage.LAUNCHING),
+            ObsConnectError("no OBS install was found"),
+            "Cannot start OBS: no OBS install was found",
+        ),
+    ],
+    ids=["server-off", "not-ready", "password", "cannot-start"],
+)
+async def test_a_failed_start_says_what_to_do(stages, error: Exception, text: str):
+    obs = x11_obs()
+    picker, _ = make(obs, starter=StubStarter(*stages, error=error))
+
+    with pytest.raises(WindowListError) as caught:
+        await picker.list_windows(X11_PROFILE)
+
+    assert str(caught.value) == text
+    assert obs.names() == []
+
+
+def test_the_failure_texts_are_the_masters():
+    assert LIST_SERVER_OFF_TEXT == (
+        "OBS's WebSocket server is off. Close OBS and open this list again: the app turns it on."
+    )
+    assert LIST_NOT_READY_TEXT == (
+        "OBS did not answer within 30 s. If OBS shows a dialog, answer it, then open this list again."
+    )
+    assert LIST_AUTH_TEXT == "OBS rejected the app's password. Set it in Settings -> Advanced -> Set up OBS…"
+
+
+async def test_a_connect_failure_once_obs_runs_passes_through_unchanged():
+    error = ObsConnectError("cannot connect to OBS at 127.0.0.1:4455: ConnectionRefusedError")
+    picker, _ = make(x11_obs(), starter=StubStarter(ObsStartStage.CONNECTING, error=error))
+
+    with pytest.raises(ObsConnectError, match="127.0.0.1:4455"):
+        await picker.list_windows(X11_PROFILE)

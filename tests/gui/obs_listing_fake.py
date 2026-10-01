@@ -18,7 +18,14 @@ from pathlib import Path
 from typing import Any
 
 from anki_miner_game.models.constants import OBS_COLLECTION_NAME
-from anki_miner_game.models.obs import ObsEventName, ObsRequestError
+from anki_miner_game.models.obs import (
+    REQUIRED_REQUESTS,
+    ObsConnectError,
+    ObsEventName,
+    ObsInfo,
+    ObsRequestError,
+    ObsStartStage,
+)
 from tests.obs.fake_obs import FakeObs
 
 TRANSCRIPTS = Path(__file__).resolve().parents[1] / "fixtures" / "obs_transcripts"
@@ -94,3 +101,45 @@ class ListingObs(FakeObs):
     def _GetInputPropertiesListPropertyItems(self, inputName: str, propertyName: str) -> dict[str, Any]:  # noqa: N803
         self.listed_in.append(self.current_collection)
         return super()._GetInputPropertiesListPropertyItems(inputName=inputName, propertyName=propertyName)
+
+
+class StubStarter:
+    """``ObsStarter`` that reports ``stages`` and then raises ``error``, or answers as a running OBS would."""
+
+    def __init__(self, *stages: ObsStartStage, error: Exception | None = None) -> None:
+        self.stages = stages
+        self.error = error
+        self.calls = 0
+        self.locked_at_call: list[bool] = []
+        self.lock: Any = None
+        """An ``asyncio.Lock`` whose state each call records (the picker's ``obs_lock``)."""
+
+    async def start(self, report: Any = None) -> ObsInfo:
+        self.calls += 1
+        if self.lock is not None:
+            self.locked_at_call.append(self.lock.locked())
+        for stage in self.stages:
+            if report is not None:
+                report(stage)
+        if self.error is not None:
+            raise self.error
+        return ObsInfo("32.2.2", "5.7.4", frozenset(REQUIRED_REQUESTS))
+
+
+class StartingObs(ListingObs):
+    """``ListingObs`` that answers only once connected, as the real gateway does after OBS started (D-03)."""
+
+    def __init__(self, *, connected: bool = False, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.connected = connected
+        self.connects = 0
+
+    async def connect(self) -> ObsInfo:
+        self.connects += 1
+        self.connected = True
+        return ObsInfo("32.2.2", "5.7.4", frozenset(REQUIRED_REQUESTS))
+
+    async def request(self, name: str, **fields: Any) -> dict[str, Any]:
+        if not self.connected:
+            raise ObsConnectError("not connected to OBS")
+        return await super().request(name, **fields)
