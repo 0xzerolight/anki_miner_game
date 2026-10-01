@@ -28,7 +28,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 - **OCR lines are no longer lost when owocr starts.** The OCR source now retries every 0.25 s instead of backing off for up to 10 s, during which the line on screen when owocr came up, or came back after a minimise, was dropped.
 - **Trim again no longer undoes a good trim.** A re-run that cannot finish, because the add-on is damaged or the trim fails, keeps the session's trimmed subtitle.
 - **Installing or repairing the OCR add-on no longer freezes the lights and lines.** Removing the old install ran on the app's I/O thread.
-- **A second launch no longer becomes a second app.** Two launches close together (a double-click on a pinned icon) started two full instances, and a launch during a quit re-showed a window that then vanished. The second launch now waits for the first and hands it its command.
+- **A second launch no longer becomes a second app.** Two launches close together (a double-click on a pinned icon) started two full instances, and a launch during a quit re-showed a window that then vanished. The second launch now hands its command to the running app, or, during a quit, waits for the quit to finish and then starts.
 - **A command such as `--toggle` from a desktop shortcut is no longer dropped now and then.** The running app could lose a command it had just accepted, and the shortcut did nothing.
 - **A failed write to the session's line journal no longer leaves the app stuck in Recording.**
 - **Done playing or Quit while a recording is starting no longer leaves OBS recording on its own.**
