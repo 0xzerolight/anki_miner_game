@@ -19,8 +19,10 @@ from anki_miner_game.models.messages import AppState
 from anki_miner_game.models.obs import ObsConnectError, ObsError, ObsRequestError, WindowItem
 from anki_miner_game.models.profile import CaptureKind, CaptureSettings, GameProfile
 from anki_miner_game.obs.provision import ObsProvisioner
+from anki_miner_game.obs.startup import LocalObsStarter
 from tests.gui.obs_listing_fake import STATUS_REQUESTS, ListingObs, recorded_window_lists
 from tests.obs.fake_obs import LINUX_X11_KINDS, WINDOWS_KINDS
+from tests.session.actor_harness import FakeDiscovery
 
 BEFORE, RETITLED, CLOSED = recorded_window_lists("window_retitle.jsonl")
 STORED = BEFORE[0]["itemValue"]
@@ -50,7 +52,9 @@ def make(
 ) -> tuple[CapturePicker, FakeSession]:
     session = FakeSession(state)
     provisioner = ObsProvisioner(obs, platform=platform, sleep=_no_sleep)
-    return CapturePicker(obs, provisioner, session, switch_timeout_s=timeout_s, obs_lock=obs_lock), session
+    starter = LocalObsStarter(FakeDiscovery(), obs)  # OBS runs: the starter only connects
+    picker = CapturePicker(obs, provisioner, session, starter=starter, switch_timeout_s=timeout_s, obs_lock=obs_lock)
+    return picker, session
 
 
 async def _no_sleep(seconds: float) -> None:

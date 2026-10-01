@@ -14,6 +14,7 @@ from anki_miner_game.app import App
 from anki_miner_game.gui.game_profile_dialog import GameProfileDialog
 from anki_miner_game.models.messages import AppState, CommandKind, UserCommand
 from anki_miner_game.models.profile import AudioMode, AudioSettings, AutoSettings, GameProfile
+from anki_miner_game.obs.startup import LocalObsStarter
 from anki_miner_game.session.naming import slugify
 from anki_miner_game.store import StoreWriteError
 from tests.app_rig import SLUG, Rig
@@ -90,3 +91,14 @@ def test_the_obs_step_the_picker_and_the_actor_share_one_obs_lock(rig):
     assert running is not None
     lock = running.actor._obs_lock
     assert running.picker._obs_lock is lock and running.obs_setup._obs_lock is lock
+
+
+def test_the_obs_step_and_the_picker_start_obs_through_one_starter_over_the_apps_obs(rig):
+    """D-03: one start-OBS sequence, over the app's own discovery and gateway."""
+    app = rig.start()
+    running = app._running
+    assert running is not None
+    starter = running.picker._starter
+    assert isinstance(starter, LocalObsStarter)
+    assert running.obs_setup._starter is starter
+    assert starter._discovery is rig.discovery and starter._gateway is rig.gateway

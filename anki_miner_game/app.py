@@ -20,6 +20,7 @@ A feed port in use turns the feed off with a banner (spec 17).
 OBS: one ``CapturePicker`` and one ``ObsSetup`` per app, since each subscribes to the gateway, which
 has no unsubscribe. They share one ``asyncio.Lock`` with the actor: arming, the restore, the
 picker's idle listing and wizard step 1 each hold it while they switch OBS's profile or collection.
+Both start OBS through one ``LocalObsStarter`` (D-03), the sequence the actor runs too.
 
 Saving: a profile saved in its dialog goes to disk and into the profiles the actor and auto mode
 look up (``_profile_for``, no disk read on the loop); settings saved in their dialog or by the
@@ -83,6 +84,7 @@ from anki_miner_game.obs.client import ObsClient
 from anki_miner_game.obs.discovery import LocalObsDiscovery
 from anki_miner_game.obs.provision import ObsProvisioner
 from anki_miner_game.obs.recorder import ObsRecorder
+from anki_miner_game.obs.startup import LocalObsStarter
 from anki_miner_game.runtime.child_env import child_environ
 from anki_miner_game.runtime.io_thread import IoThread
 from anki_miner_game.session.naming import slugify
@@ -427,9 +429,15 @@ class App(QObject):
         auto = AutoMode(actor, self._profile_for, services.provisioner.list_windows)  # before any StateChanged
         actor.subscribe(lambda event: forward(self.presenter, event))
         actor.subscribe(self._broadcast)
-        picker = CapturePicker(services.gateway, services.provisioner, actor, obs_lock=obs_lock)
+        starter = LocalObsStarter(services.discovery, services.gateway)
+        picker = CapturePicker(services.gateway, services.provisioner, actor, starter=starter, obs_lock=obs_lock)
         obs_setup = ObsSetup(
-            services.discovery, services.gateway, services.provisioner, session=actor, obs_lock=obs_lock
+            services.discovery,
+            services.gateway,
+            services.provisioner,
+            starter=starter,
+            session=actor,
+            obs_lock=obs_lock,
         )
         self._running = _Running(services, finaliser, actor, auto, picker, obs_setup)
         return actor

@@ -38,9 +38,11 @@ from anki_miner_game.models.profile import (
     TextMode,
 )
 from anki_miner_game.obs.provision import ObsProvisioner
+from anki_miner_game.obs.startup import LocalObsStarter
 from anki_miner_game.session.naming import slugify
 from tests.gui.obs_listing_fake import ListingObs, recorded_window_lists
 from tests.obs.fake_obs import LINUX_X11_KINDS, WINDOWS_KINDS
+from tests.session.actor_harness import FakeDiscovery
 
 BEFORE, RETITLED, CLOSED = recorded_window_lists("window_retitle.jsonl")
 STORED = BEFORE[0]["itemValue"]
@@ -114,7 +116,10 @@ class Rig:
         self.session = FakeSession()
         self.provisioner = ObsProvisioner(self.obs, platform=platform)
         self.ocr = FakeOcr()
-        self.picker = CapturePicker(self.obs, self.provisioner, self.session, switch_timeout_s=2.0)
+        self.starter = LocalObsStarter(FakeDiscovery(), self.obs)  # OBS runs: the starter only connects
+        self.picker = CapturePicker(
+            self.obs, self.provisioner, self.session, starter=self.starter, switch_timeout_s=2.0
+        )
 
     def run(self, coro):
         return asyncio.run_coroutine_threadsafe(coro, self.loop)
@@ -431,7 +436,7 @@ def test_a_listing_failure_is_shown(io_loop, qtbot) -> None:
 def test_the_switch_back_warning_is_shown_with_the_windows(io_loop, qtbot) -> None:
     obs = ListingObs(input_kinds=LINUX_X11_KINDS, window_lists={"xcomposite_input": RETITLED}, changed_event="never")
     rig = Rig(io_loop, qtbot, obs=obs)
-    rig.picker = CapturePicker(obs, rig.provisioner, rig.session, switch_timeout_s=0.05)
+    rig.picker = CapturePicker(obs, rig.provisioner, rig.session, starter=rig.starter, switch_timeout_s=0.05)
     dialog = rig.open(FULL_HOOK)
 
     rig.list_windows(dialog)
