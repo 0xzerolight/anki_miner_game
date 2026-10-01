@@ -8,7 +8,7 @@ from anki_miner_game.session import session as session_mod
 from anki_miner_game.session.journal import LineRecord, StopRecord, read_journal
 from anki_miner_game.session.manifest import load_manifest
 from anki_miner_game.session.session import BannerKey
-from tests.session.actor_harness import OBS_STEM, T0, TITLE, Harness
+from tests.session.actor_harness import OBS_STEM, T0, TITLE, Harness, full_disk_handle
 
 ZERO = T0 + 1.0
 SECOND_STEM = "2026-10-02 18-05-00"
@@ -105,3 +105,20 @@ async def test_obs_gone_needs_two_false_answers_in_a_row(h: Harness):
     await h.tick(ZERO + 2.0 + 4 * session_mod.OBS_GONE_CHECK_S)  # the second False in a row
     assert h.actor.state is AppState.ARMED
     assert Flag.OBS_EXITED in load_manifest(h.finalised()[0]).flags
+
+
+async def test_a_journal_that_cannot_be_written_still_ends_the_session(h: Harness):
+    """B1-01: appends fail (disk full, drive gone), then OBS stops: the session still ends and the app is Ready."""
+    await h.arm()
+    await h.started(ZERO)
+    s = h.actor._session
+    assert s is not None
+    s.journal._fh.close()
+    s.journal._fh = full_disk_handle()
+    await h.line("こんにちは", ZERO + 5.0)  # the append fails: the session_files banner
+    await h.stopping(ZERO + 9.0)
+    await h.stopped(ZERO + 10.0)
+    assert h.actor.state is AppState.ARMED
+    assert BannerKey.INTERNAL not in h.banners()
+    assert BannerKey.SESSION_FILES in h.banners()
+    assert len(h.finalised()) == 1

@@ -7,6 +7,8 @@ test's loop, and records every ``SessionEvent``. Ticks come only from the tests 
 """
 
 import asyncio
+import errno
+import io
 import threading
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -62,6 +64,21 @@ class FakeClock:
 
     def __call__(self) -> float:
         return self.t
+
+
+class FullDisk(io.RawIOBase):
+    """A file whose every write fails as on a full disk (``ENOSPC``), on every platform (no ``/dev/full``)."""
+
+    def writable(self) -> bool:
+        return True
+
+    def write(self, b: Any) -> int:
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+
+def full_disk_handle() -> io.TextIOWrapper:
+    """A text handle on ``FullDisk``: writes and flushes fail; ``close`` still closes it, then raises (CPython)."""
+    return io.TextIOWrapper(io.BufferedWriter(FullDisk()), encoding="utf-8", newline="\n")
 
 
 @dataclass

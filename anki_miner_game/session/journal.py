@@ -5,12 +5,15 @@ arrives. Cue ends are never journalled; finalise rebuilds them from the lines (s
 """
 
 import json
+import logging
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import ClassVar
 
 from anki_miner_game.models.lines import TimedLine
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -75,7 +78,16 @@ class Journal:
         self._fh.flush()
 
     def close(self) -> None:
-        self._fh.close()
+        """Close the file. A last flush that fails (a full disk, a drive gone) is logged, not raised.
+
+        The file is closed either way (CPython closes it, then re-raises the flush error), and the actor
+        has already shown its ``session_files`` banner for the write that failed first; raising here would
+        stop the session from ending and leave the app in Recording after OBS stopped (B1-01).
+        """
+        try:
+            self._fh.close()
+        except OSError as exc:
+            log.warning("journal %s: the last write was lost as it closed: %s", self.path.name, exc)
 
 
 def _has_torn_tail(path: Path) -> bool:
