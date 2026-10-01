@@ -160,6 +160,35 @@ def test_a_later_fit_only_grows_the_dialog(qtbot):
     assert dialog.width() >= bigger.width() and dialog.height() >= bigger.height()
 
 
+def test_a_shown_dialog_that_grows_stays_on_the_screen(qtbot):
+    """A resize keeps the top-left: Settings opened at its usual place grew past the taskbar when Advanced
+    opened, and Save was off the screen (P8)."""
+    dialog, scroll, first, second = two_form_dialog(qtbot)
+    advanced = QWidget()
+    more = QFormLayout(advanced)
+    wide = QLineEdit()
+    more.addRow("Wide", wide)
+    for number in range(60):
+        more.addRow(f"More {number}", QLineEdit())
+    advanced.hide()
+    content = scroll.widget()
+    assert content is not None
+    content.layout().addWidget(advanced)
+    fit_dialog(dialog, scroll=scroll, forms=(first, second, more))
+    dialog.show()
+    qtbot.waitExposed(dialog)
+    screen = dialog.screen()
+    assert screen is not None
+    room = screen.availableGeometry()
+    frame, before = dialog.frameGeometry(), dialog.size()
+    dialog.move(room.right() - frame.width() - 10, room.bottom() - frame.height() - 10)
+    wide.setMinimumWidth(room.width() // 2)
+    advanced.show()  # the disclosure opens
+    fit_dialog(dialog, scroll=scroll, forms=(first, second, more))
+    assert dialog.height() > before.height() and dialog.width() > before.width()
+    assert room.contains(dialog.frameGeometry())
+
+
 def test_a_dialog_without_a_scroll_area_is_sized_to_its_hint(qtbot):
     dialog = QDialog()
     qtbot.addWidget(dialog)
