@@ -41,6 +41,7 @@ def test_saved_settings_are_stored_and_used_at_once(rig, tmp_path):
     assert dialog is not None
     dialog.output_edit.setText(str(tmp_path / "elsewhere"))
     dialog.add_source_button.click()
+    dialog.sources_table.item(dialog.sources_table.rowCount() - 1, 2).setText("localhost:7001")
     dialog.feed_check.setChecked(False)  # the dialog's ports start at 1: the rig's feed binds port 0
     dialog.ws_port_spin.setValue(2)
     dialog.accept()
@@ -113,20 +114,18 @@ def test_a_password_the_wizard_saves_is_the_config_at_once(rig):
     assert store.load_config().obs.password_override == "typed"
 
 
-def test_a_step_run_again_from_settings_opens_over_them_and_shows_what_it_saved(rig, tmp_path):
+def test_a_step_run_again_from_settings_opens_over_them_and_shows_the_password_it_saved(rig):
     app = rig.start()
     app.window.settings_requested.emit()
     settings = shown(app, SettingsDialog)
     assert settings is not None
-    settings.setup_buttons[WizardStep.FOLDER].click()
+    settings.setup_step_requested.emit(WizardStep.OBS)
     wizard = shown(app, SetupWizard)
-    assert wizard is not None and wizard.currentId() == WizardStep.FOLDER
+    assert wizard is not None and wizard.currentId() == WizardStep.OBS
     assert wizard.parent() is settings
-    folder = tmp_path / "chosen"
-    wizard.folder_page.path.setText(str(folder))
-    assert wizard.folder_page.validatePage()
-    assert app.config.output_root == str(folder)
-    assert settings.output_edit.text() == str(folder)
+    assert wizard.store(replace(app.config, obs=replace(app.config.obs, password_override="typed"))) is None
+    assert app.config.obs.password_override == "typed"
+    assert settings.password_edit.text() == "typed"
 
 
 # Quitting ------------------------------------------------------------------------------------------

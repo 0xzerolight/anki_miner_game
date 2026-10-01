@@ -1,4 +1,4 @@
-"""First-run wizard (spec 16): OBS, text sources, output folder, optional add-ons.
+"""Setup wizard (spec 16): OBS, game text, optional extras.
 
 Step 1 (``ObsSetup``) finds OBS, says how to turn its websocket server on while OBS runs with it off,
 has the shared ``ObsStarter`` turn it on, launch OBS and connect (D-03), checks that no output is
@@ -21,28 +21,40 @@ import logging
 import os
 import sys
 import threading
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Mapping
 from dataclasses import dataclass, replace
 from enum import IntEnum, StrEnum
-from pathlib import Path, PurePath
+from types import MappingProxyType
 from typing import Any, Final
+from urllib.parse import urlsplit
 
-from PyQt6.QtCore import QObject, Qt, QUrl, pyqtSignal, pyqtSlot
-from PyQt6.QtGui import QDesktopServices
+from PyQt6.QtCore import QDir, QObject, QSize, Qt, QUrl, pyqtSignal, pyqtSlot
+from PyQt6.QtGui import QDesktopServices, QPalette
 from PyQt6.QtWidgets import (
-    QFileDialog,
+    QFrame,
     QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QProgressBar,
     QPushButton,
+    QScrollArea,
+    QToolButton,
     QVBoxLayout,
     QWidget,
     QWizard,
     QWizardPage,
 )
 
+from anki_miner_game.gui.strings import (
+    ADDON_STATUS_TEXT,
+    COPIED_TEXT,
+    SCREEN_READING,
+    VOICE_TRIMMING,
+    WAYLAND_CLIPBOARD_TEXT,
+    install_now_text,
+)
+from anki_miner_game.gui.widgets.layout import error_label, screen_bounded, show_message
 from anki_miner_game.interfaces.addons import AddonService
 from anki_miner_game.interfaces.obs import ObsDiscovery, ObsGateway, ObsStarter, Provisioner
 from anki_miner_game.interfaces.session import SessionControl
@@ -96,23 +108,40 @@ NEEDS_RESTART_TEXT: Final = (
 )
 
 
+OBS_SUBTITLE: Final = "OBS is the free recorder this app uses to record your game."
+OBS_SUMMARY: Final = (
+    f'The app adds its own profile and scene collection, both named "{OBS_PROFILE_NAME}", and uses them '
+    "only while a game is ready or recording. Your own OBS profiles, scenes and stream settings are left alone."
+)
+"""UJ-15; the profile and the collection share one name (``models.constants``)."""
+OBS_DETAILS: Final = "What exactly changes in OBS"
+STARTING_OBS: Final = "Starting OBS…"
+"""The stage ``ObsSetup`` reports while OBS launches (``ObsStartStage.LAUNCHING``)."""
+FIREWALL_TEXT: Final = "If Windows asks whether OBS may use networks, you can press Cancel."
+"""Windows Firewall asks once when OBS first listens (F#3); OBS needs no network beyond this machine."""
+
+
+def native_path(path: str) -> str:
+    """``path`` as the user's system writes it: ``~`` expanded, native separators (UJ-33)."""
+    return QDir.toNativeSeparators(os.path.expanduser(path))
+
+
 def obs_changes_text(cfg: AppConfig) -> str:
-    """What the app changes in OBS, shown before step 1 runs (spec 11.1, 11.3; R2 item 14)."""
-    incoming = PurePath(cfg.output_root) / INCOMING_DIRNAME
+    """What the app changes in OBS (spec 11.1, 11.3; R2 item 14): the OBS page's "What exactly changes in OBS"."""
+    incoming = native_path(os.path.join(os.path.expanduser(cfg.output_root), INCOMING_DIRNAME))
     return "\n".join(
         [
-            "What the app changes in OBS:",
-            "- Turns on OBS's websocket server when it is off, only while OBS is closed. Its port and "
+            "- Turns on OBS's WebSocket server when it is off, only while OBS is closed. Its port and "
             "password stay as they are; a password is created only when OBS requires one and has none.",
             f'- Adds a profile "{OBS_PROFILE_NAME}" that records .mkv files into {incoming}, at most '
             f"{cfg.recording.max_height} lines high at {cfg.recording.fps} fps, without file splitting or "
             "automatic remux, with your profile's audio sample rate and channels.",
-            "- Creating that profile turns off OBS's offer to run its auto-configuration wizard for new " "profiles.",
+            "- Creating that profile turns off OBS's offer to run its auto-configuration wizard for new profiles.",
             f'- Adds a scene collection "{OBS_COLLECTION_NAME}" whose scene "Game" holds the game capture '
             "and audio.",
             "- Your own profiles and scene collections keep their settings. OBS uses the app's profile and "
-            "collection only while a game is armed, and after this step it is switched back to yours. "
-            "The app never restarts OBS.",
+            "collection only while a game is ready or recording, and after this step it is switched back to "
+            "yours. The app never restarts OBS.",
         ]
     )
 
@@ -127,7 +156,7 @@ class ObsStatus(StrEnum):
     UNSUPPORTED = "unsupported"
     OUTPUT_ACTIVE = "output_active"
     BUSY = "busy"
-    """A game is armed or recording; provisioning now would change the armed game's scene."""
+    """A game is ready or recording; provisioning now would change its scene."""
     FAILED = "failed"
 
 
@@ -143,7 +172,7 @@ class ObsCheck:
 
 _STAGE_TEXT: Final = {
     ObsStartStage.ENABLING_SERVER: "Turning on OBS's WebSocket server…",
-    ObsStartStage.LAUNCHING: "Starting OBS…",
+    ObsStartStage.LAUNCHING: STARTING_OBS,
     ObsStartStage.CONNECTING: "Connecting to OBS…",
 }
 """What step 1 says while the starter runs (spec 16: the page shows each stage)."""
@@ -152,7 +181,7 @@ _STAGE_TEXT: Final = {
 def _server_off() -> ObsCheck:
     return ObsCheck(
         ObsStatus.SERVER_OFF,
-        "OBS's websocket server is off. In OBS, tick Tools -> WebSocket Server Settings -> "
+        "OBS's WebSocket server is off. In OBS, tick Tools -> WebSocket Server Settings -> "
         "Enable WebSocket server and press OK, then press Fix. Or close OBS and press Fix: "
         "the app turns it on.",
     )
@@ -188,7 +217,9 @@ _COLLECTION: Final = _Switch(
     ObsEventName.CURRENT_SCENE_COLLECTION_CHANGED,
 )
 _APP_NAMES: Final = {_PROFILE: OBS_PROFILE_NAME, _COLLECTION: OBS_COLLECTION_NAME}
-_BUSY: Final = ObsCheck(ObsStatus.BUSY, "A game is armed. Disarm it first, then run this step again.")
+_BUSY: Final = ObsCheck(
+    ObsStatus.BUSY, "A game is ready or recording. Press Done playing first, then run this step again."
+)
 
 
 @dataclass
@@ -261,9 +292,15 @@ class ObsSetup:
                 f"OBS Studio is not installed. Install it from {OBS_DOWNLOAD_URL}, then check again.",
             )
         try:
-            if await self._server_off_while_running():
-                return _server_off()
-            info = await self._starter.start(lambda stage: report(_STAGE_TEXT[stage]))
+            server_on = await self._server_on()
+            if not server_on and await asyncio.to_thread(self._discovery.is_running):
+                return _server_off()  # spec 11.1 step 3: the app turns the server on only while OBS is closed
+
+            def stage(stage: ObsStartStage) -> None:
+                if not (stage is ObsStartStage.ENABLING_SERVER and server_on):  # nothing to turn on
+                    report(_STAGE_TEXT[stage])
+
+            info = await self._starter.start(stage)
         except ObsServerOffError:  # OBS started while the server was being turned on
             return _server_off()
         except ObsNotReadyError:
@@ -275,7 +312,7 @@ class ObsSetup:
         except ObsAuthError:
             return ObsCheck(
                 ObsStatus.AUTH_FAILED,
-                "OBS rejected the websocket password. Enter the password shown in OBS under "
+                "OBS rejected the WebSocket password. Enter the password shown in OBS under "
                 "Tools -> WebSocket Server Settings -> Show Connect Info, then try again.",
             )
         except ObsUnsupportedError as exc:
@@ -296,12 +333,10 @@ class ObsSetup:
             )
         return await self._provision(cfg, info, report)
 
-    async def _server_off_while_running(self) -> bool:
-        """Spec 11.1 step 3: the app may turn the websocket server on only while OBS is closed."""
+    async def _server_on(self) -> bool:
+        """Whether OBS's config has its WebSocket server on (``False`` without a config yet)."""
         ws = await asyncio.to_thread(self._discovery.read_ws_config)
-        if ws is not None and ws.server_enabled:
-            return False
-        return await asyncio.to_thread(self._discovery.is_running)
+        return ws is not None and ws.server_enabled
 
     async def _active_outputs(self) -> list[str]:
         active: list[str] = []
@@ -427,36 +462,60 @@ Runner = Callable[[Coroutine[Any, Any, Any]], concurrent.futures.Future[Any]]
 
 
 class WizardStep(IntEnum):
-    """The wizard's pages in spec 16's order; ``SetupWizard(start=...)`` re-runs one from Settings."""
+    """The wizard's pages in order (spec 16 as amended by UJ-17); ``SetupWizard(start=...)`` opens one."""
 
     OBS = 0
     SOURCES = 1
-    FOLDER = 2
-    ADDONS = 3
+    ADDONS = 2
 
 
-SOURCE_STATUS_TEXT: Final = {
-    SourceStatus.DISCONNECTED: "not connected",
-    SourceStatus.CONNECTING: "connecting",
-    SourceStatus.CONNECTED: "connected",
-    SourceStatus.RECEIVING: "receiving",
-}
-WAITING_FOR_A_LINE: Final = "waiting for a line"
-
-CLIPBOARD_TEXT: Final = "The clipboard: a game's profile can also take lines copied to the clipboard."
-WAYLAND_CLIPBOARD_TEXT: Final = (
-    "On Wayland the app sees the clipboard only while one of its windows has focus, so lines copied "
-    "while you play are missed there. Use a websocket hooker (Textractor, Agent or LunaTranslator) "
-    "instead."
+SOURCES_SUBTITLE: Final = (
+    "Start your game and your text hooker (Textractor, Agent or LunaTranslator). When a line from the "
+    "game shows here, the app can read it. You can skip this and test later."
+)
+HOOKER_HINTS: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        "textractor": "Not found. In Textractor, add a WebSocket extension (port {port}).",
+        "agent": "Not found. In Agent, turn on its WebSocket server (port {port}).",
+        "luna": "Not found. In LunaTranslator, turn on its network service (port {port}).",
+    }
+)
+"""UJ-16: the one thing to change in each default hooker (``DEFAULT_TEXT_SOURCES`` ids; user guide section 4)."""
+CONNECTED_TEXT: Final = "Connected, waiting for a line"
+NO_SOURCE_TEXT: Final = "No text source is enabled. Turn one on in Settings -> Advanced -> Text hookers."
+CLIPBOARD_TEXT: Final = (
+    f'No text hooker? A game\'s profile can also take copied text: choose "{COPIED_TEXT}" under Text from.'
 )
 
-ADDON_STATUS_TEXT: Final = {
-    AddonStatus.MISSING: "Not installed",
-    AddonStatus.INSTALLING: "Installing…",
-    AddonStatus.READY: "Installed",
-    AddonStatus.BROKEN: "Damaged; install it again to repair it",
-}
+
+def source_hint(cfg: TextSourceConfig) -> str:
+    """The state of a source that is not connected: what to do in that hooker, or its address."""
+    template = HOOKER_HINTS.get(cfg.id)
+    port = _port(cfg.uri)
+    if template is not None and port is not None:
+        return template.format(port=port)
+    return f"Not found yet ({cfg.uri})"
+
+
+def _port(uri: str) -> int | None:
+    try:
+        return urlsplit(f"ws://{uri}").port
+    except ValueError:
+        return None
+
+
+ADDONS_SUBTITLE: Final = (
+    "Each downloads only if you install it. Voice trimming can be installed later in Settings, screen "
+    "reading in a game's profile."
+)
+VAD_TITLE: Final = f"{VOICE_TRIMMING} (recommended)"
+"""The default config trims once the add-on is installed (``VadSettings.enabled``)."""
+VAD_DESCRIPTION: Final = "After each session, ends every subtitle where the voice stops, so cards carry less music."
+OCR_DESCRIPTION: Final = "Reads the game's text from the screen, for games no text hooker can read."
+ADDON_GAP_PX: Final = 12
 PROGRESS_STEPS: Final = 1000
+WIZARD_SIZE: Final = QSize(640, 600)
+"""UJ-19: the one size every page opens at, bounded by the screen; long pages scroll."""
 
 
 def is_wayland_session() -> bool:
@@ -470,6 +529,23 @@ def _plain_label(text: str = "") -> QLabel:
     label.setTextFormat(Qt.TextFormat.PlainText)
     label.setWordWrap(True)
     return label
+
+
+def _on_windows() -> bool:
+    return sys.platform == "win32"
+
+
+def _scrolled(page: QWizardPage, body: QWidget) -> QScrollArea:
+    """UJ-19: ``body`` in a frameless, resizable scroll area filling ``page``, never scrolling sideways."""
+    scroll = QScrollArea()
+    scroll.setFrameShape(QFrame.Shape.NoFrame)
+    scroll.setWidgetResizable(True)
+    scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+    scroll.setWidget(body)
+    layout = QVBoxLayout(page)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.addWidget(scroll)
+    return scroll
 
 
 class _MainThread(QObject):
@@ -494,17 +570,17 @@ class _MainThread(QObject):
 
 
 class SetupWizard(QWizard):
-    """The first-run wizard (spec 16): (1) OBS, (2) text sources, (3) output folder, (4) add-ons.
+    """The setup wizard (spec 16 as amended): (1) OBS, (2) game text, (3) optional extras. A first run
+    walks all three, numbered; ``single_step=True`` shows only the ``start`` page with Finish on it (a
+    banner's Set up OBS…, Settings' Set up OBS…/Test…/Install…, a game profile's Install…).
 
-    Every step can be opened on its own (``start``), which is how Settings re-runs one.
     ``save_config(cfg)`` stores ``cfg`` and makes it the app's current config: the OBS gateway reads
-    a typed password override through it at its next connect. It is called when the output folder is
-    confirmed and when a password is typed after OBS refused one. ``source_factory`` builds a text
-    source for one configured source; the wizard starts the enabled ones while step 2 is shown and
-    stops them when it is left. ``run`` puts coroutines on the I/O loop. ``wayland`` defaults to the
-    current session. ``open_url`` opens the OBS-download link (a frozen Linux build passes one that
-    drops the bundle's ``LD_LIBRARY_PATH``, spec: ``app.open_url``); defaults to
-    ``QDesktopServices.openUrl``.
+    a typed password override through it at its next connect. It is called when a password is typed
+    after OBS refused one. ``source_factory`` builds a text source for one configured source; the
+    wizard starts the enabled ones while step 2 is shown and stops them when it is left. ``run`` puts
+    coroutines on the I/O loop. ``wayland`` defaults to the current session. ``open_url`` opens the
+    OBS-download link (a frozen Linux build passes one that drops the bundle's ``LD_LIBRARY_PATH``,
+    spec: ``app.open_url``); defaults to ``QDesktopServices.openUrl``.
     """
 
     def __init__(
@@ -518,11 +594,13 @@ class SetupWizard(QWizard):
         vad_addon: AddonService,
         ocr_addon: AddonService,
         start: WizardStep = WizardStep.OBS,
+        single_step: bool = False,
         wayland: bool | None = None,
         open_url: Callable[[QUrl], object] = QDesktopServices.openUrl,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
+        self.single_step = single_step
         self.setWindowTitle("Anki Miner Game setup")
         self.setTitleFormat(Qt.TextFormat.PlainText)
         self.setSubTitleFormat(Qt.TextFormat.PlainText)
@@ -533,16 +611,18 @@ class SetupWizard(QWizard):
         self.main_thread = _MainThread(self)
         self.obs_page = ObsPage(self, obs)
         self.sources_page = SourcesPage(self, source_factory, is_wayland_session() if wayland is None else wayland)
-        self.folder_page = FolderPage(self)
         self.addons_page = AddonsPage(self, vad_addon, ocr_addon)
-        for step, page in (
+        steps = (
             (WizardStep.OBS, self.obs_page),
             (WizardStep.SOURCES, self.sources_page),
-            (WizardStep.FOLDER, self.folder_page),
             (WizardStep.ADDONS, self.addons_page),
-        ):
+        )
+        for number, (step, page) in enumerate(steps, start=1):
+            if not single_step:
+                page.setTitle(f"Step {number} of {len(steps)}: {page.title()}")
             self.setPage(step, page)
         self.setStartId(start)
+        self.resize(screen_bounded(self, WIZARD_SIZE))
         self.currentIdChanged.connect(self._page_changed)
 
     @property
@@ -581,7 +661,7 @@ class SetupWizard(QWizard):
 
 
 class ObsPage(QWizardPage):
-    """Step 1: shows what the app changes in OBS, then runs ``ObsSetup`` when the user asks."""
+    """Step 1: what OBS is and what the app does with it, the details one click away; runs ``ObsSetup`` on request."""
 
     def __init__(self, wizard: SetupWizard, obs: ObsSetup) -> None:
         super().__init__()
@@ -590,12 +670,21 @@ class ObsPage(QWizardPage):
         self._check: ObsCheck | None = None
         self._running = False
         self.setTitle("OBS")
-        self.setSubTitle("Find OBS, turn on its websocket server and create the app's profile and scene collection.")
+        self.setSubTitle(OBS_SUBTITLE)
+        self.summary = _plain_label(OBS_SUMMARY)
+        self.details_button = QToolButton()
+        self.details_button.setText(OBS_DETAILS)
+        self.details_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.details_button.setArrowType(Qt.ArrowType.RightArrow)
+        self.details_button.setAutoRaise(True)
+        self.details_button.clicked.connect(self._toggle_details)
         self.changes = _plain_label(obs_changes_text(wizard.config))
-        self.button = QPushButton("Set up OBS")
-        self.button.clicked.connect(self._start)
+        self.changes.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.changes.hide()
         self.status = _plain_label()
         self.status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.status.hide()
+        self.error = error_label()
         self.link = QLabel(f'<a href="{OBS_DOWNLOAD_URL}">{OBS_DOWNLOAD_URL}</a>')
         self.link.setTextFormat(Qt.TextFormat.RichText)
         self.link.setOpenExternalLinks(False)
@@ -603,24 +692,49 @@ class ObsPage(QWizardPage):
         self.link.hide()
         self.password = QLineEdit()
         self.password.setEchoMode(QLineEdit.EchoMode.Password)
-        self.password.setPlaceholderText("OBS websocket password")
+        self.password.setPlaceholderText("OBS WebSocket password")
+        self.password.returnPressed.connect(self._start)  # UJ-20: Enter runs the check
         self.password.hide()
         self.notes = _plain_label()
         self.notes.hide()
-        row = QHBoxLayout()
+        self.button = QPushButton("Set up OBS")
+        self.button.clicked.connect(self._start)
+        self.button_row = QWidget()
+        row = QHBoxLayout(self.button_row)
+        row.setContentsMargins(0, 0, 0, 0)
         row.addWidget(self.button)
         row.addStretch(1)
-        layout = QVBoxLayout(self)
-        for widget in (self.changes, self.status, self.link, self.password, self.notes):
-            layout.addWidget(widget)
-        layout.insertLayout(1, row)
-        layout.addStretch(1)
+        self.body = QWidget()
+        column = QVBoxLayout(self.body)
+        for widget in (
+            self.summary,
+            self.details_button,
+            self.changes,
+            self.status,
+            self.error,
+            self.link,
+            self.password,  # UJ-20: the field comes before the button that uses it
+            self.notes,
+            self.button_row,
+        ):
+            column.addWidget(widget)
+        column.addStretch(1)
+        self.scroll_area = _scrolled(self, self.body)  # not "scroll": QWidget.scroll() is a method
 
     def initializePage(self) -> None:
         self.changes.setText(obs_changes_text(self._wizard.config))
 
     def isComplete(self) -> bool:
         return not self._running and self._check is not None and self._check.status is ObsStatus.READY
+
+    def nextId(self) -> int:
+        """A single-step run ends on this page (UJ-17)."""
+        return -1 if self._wizard.single_step else super().nextId()
+
+    def _toggle_details(self) -> None:
+        opened = self.changes.isHidden()
+        self.changes.setVisible(opened)
+        self.details_button.setArrowType(Qt.ArrowType.DownArrow if opened else Qt.ArrowType.RightArrow)
 
     def _start(self) -> None:
         if self._running:
@@ -630,18 +744,20 @@ class ObsPage(QWizardPage):
             cfg = self._wizard.config
             error = self._wizard.store(replace(cfg, obs=replace(cfg.obs, password_override=typed)))
             if error is not None:
-                self.status.setText(error)
+                self.error.set_error(error)
                 return
         self._running = True
         self.button.setEnabled(False)
         for widget in (self.link, self.password, self.notes):
             widget.hide()
-        self.status.setText("Starting…")
+        self.error.clear()
+        show_message(self.status, "Starting…")
         self.completeChanged.emit()
         post = self._wizard.main_thread.post
 
         def report(stage: str) -> None:
-            post(lambda: self.status.setText(stage))
+            text = f"{stage} {FIREWALL_TEXT}" if stage == STARTING_OBS and _on_windows() else stage
+            post(lambda: show_message(self.status, text))
 
         self._wizard.submit(self._obs.run(self._wizard.config, report), self._finished)
 
@@ -653,28 +769,37 @@ class ObsPage(QWizardPage):
             check = ObsCheck(ObsStatus.FAILED, "Setting up OBS failed unexpectedly; see the log.")
         self._running = False
         self._check = check
-        self.status.setText(check.text)
+        ready = check.status is ObsStatus.READY
+        show_message(self.status, check.text if ready else "")
+        self.error.set_error("" if ready else check.text)  # UJ-31: every failure in the one error style
         self.link.setVisible(check.status is ObsStatus.NOT_INSTALLED)
         self.password.setVisible(check.status is ObsStatus.AUTH_FAILED)
         self.notes.setText("\n".join(check.notes))
         self.notes.setVisible(bool(check.notes))
-        self.button.setText(
-            "Fix"
-            if check.status is ObsStatus.SERVER_OFF
-            else "Run again" if check.status is ObsStatus.READY else "Check again"
-        )
+        self.button.setText("Fix" if check.status is ObsStatus.SERVER_OFF else "Check again")
         self.button.setEnabled(True)
+        self.button.setVisible(not ready)
+        if check.status is ObsStatus.AUTH_FAILED:
+            self.password.setFocus()
         self.completeChanged.emit()
 
 
 @dataclass
 class _SourceRow:
-    status: QLabel
-    line: QLabel
+    name: QLabel
+    state: QLabel
+    hint: str
+    line: str | None = None
+    """The latest line, once one came."""
+
+
+def _show_state(row: _SourceRow, text: str, *, muted: bool) -> None:
+    row.state.setText(text)
+    row.state.setForegroundRole(QPalette.ColorRole.PlaceholderText if muted else QPalette.ColorRole.WindowText)
 
 
 class SourcesPage(QWizardPage):
-    """Step 2: each enabled text source, "waiting for a line" until one arrives (spec 16)."""
+    """Step 2: each enabled text source and what to do until a line arrives (spec 16, UJ-16)."""
 
     def __init__(self, wizard: SetupWizard, factory: Callable[[TextSourceConfig], TextSource], wayland: bool) -> None:
         super().__init__()
@@ -683,13 +808,12 @@ class SourcesPage(QWizardPage):
         self._sources: list[TextSource] = []
         self._generation = 0
         self.rows: dict[str, _SourceRow] = {}
-        self.setTitle("Text sources")
-        self.setSubTitle(
-            "Start your text hooker and play until a line shows. Each source below says "
-            f'"{WAITING_FOR_A_LINE}" until one arrives.'
-        )
+        self.setTitle("Game text")
+        self.setSubTitle(SOURCES_SUBTITLE)
         self._grid = QGridLayout()
-        self.empty = _plain_label("No text source is enabled. Add one in Settings.")
+        self._grid.setHorizontalSpacing(16)
+        self._grid.setColumnStretch(1, 1)
+        self.empty = _plain_label(NO_SOURCE_TEXT)
         self.empty.hide()
         self.clipboard = _plain_label(f"{CLIPBOARD_TEXT} {WAYLAND_CLIPBOARD_TEXT}" if wayland else CLIPBOARD_TEXT)
         layout = QVBoxLayout(self)
@@ -707,28 +831,31 @@ class SourcesPage(QWizardPage):
         enabled = [cfg for cfg in self._wizard.config.text_sources if cfg.enabled]
         self.empty.setVisible(not enabled)
         post = self._wizard.main_thread.post
+        top = Qt.AlignmentFlag.AlignTop
         started: list[tuple[TextSource, Callable[[str, SourceStatus], None], Callable[[str, float, str], None]]] = []
         for index, cfg in enumerate(enabled):
-            row = _SourceRow(
-                _plain_label(SOURCE_STATUS_TEXT[SourceStatus.DISCONNECTED]), _plain_label(WAITING_FOR_A_LINE)
-            )
+            name = _plain_label(cfg.name)
+            name.setToolTip(cfg.uri)
+            row = _SourceRow(name, _plain_label(), source_hint(cfg))
+            _show_state(row, row.hint, muted=True)
             self.rows[cfg.id] = row
-            self._grid.addWidget(_plain_label(cfg.name), index, 0)
-            self._grid.addWidget(_plain_label(cfg.uri), index, 1)
-            self._grid.addWidget(row.status, index, 2)
-            self._grid.addWidget(row.line, index, 3)
-            self._grid.setColumnStretch(3, 1)
+            self._grid.addWidget(name, index, 0, top)
+            self._grid.addWidget(row.state, index, 1, top)
 
             def on_status(_id: str, status: SourceStatus, row: _SourceRow = row) -> None:
-                post(lambda: self._show(generation, row.status, SOURCE_STATUS_TEXT[status]))
+                post(lambda: self._show_status(generation, row, status))
 
             def on_line(raw: str, _t_mono: float, _id: str, row: _SourceRow = row) -> None:
-                post(lambda: self._show(generation, row.line, raw))
+                post(lambda: self._show_line(generation, row, raw))
 
             started.append((self._factory(cfg), on_status, on_line))
         self._sources = [source for source, _, _ in started]
         if started:
             self._wizard.submit(_start_sources(started), _log_failure("starting the text sources"))
+
+    def nextId(self) -> int:
+        """A single-step run ends on this page (UJ-17)."""
+        return -1 if self._wizard.single_step else super().nextId()
 
     def stop_sources(self) -> None:
         """Stop what ``start_sources`` started, on the I/O loop, and wait for each to close."""
@@ -737,10 +864,20 @@ class SourcesPage(QWizardPage):
         if sources:
             self._wizard.submit(_stop_sources(sources), _log_failure("stopping the text sources"))
 
-    def _show(self, generation: int, label: QLabel, text: str) -> None:
+    def _show_status(self, generation: int, row: _SourceRow, status: SourceStatus) -> None:
         """Only the sources started last update the rows; older rows are gone or no longer listened to."""
-        if generation == self._generation:
-            label.setText(text)
+        if generation != self._generation:
+            return
+        if status in (SourceStatus.DISCONNECTED, SourceStatus.CONNECTING):
+            _show_state(row, row.hint, muted=True)
+        else:
+            _show_state(row, row.line if row.line is not None else CONNECTED_TEXT, muted=False)
+
+    def _show_line(self, generation: int, row: _SourceRow, raw: str) -> None:
+        if generation != self._generation:
+            return
+        row.line = raw
+        _show_state(row, raw, muted=False)
 
     def _clear_rows(self) -> None:
         while self._grid.count():
@@ -774,103 +911,55 @@ def _log_failure(what: str) -> Callable[[concurrent.futures.Future[Any]], None]:
     return check
 
 
-class FolderPage(QWizardPage):
-    """Step 3: the output folder; created and saved when confirmed."""
-
-    def __init__(self, wizard: SetupWizard) -> None:
-        super().__init__()
-        self._wizard = wizard
-        self.setTitle("Output folder")
-        self.setSubTitle(
-            "Finished sessions go to <folder>/<Game>/<Game> - NN.mkv with the .srt beside it; OBS records "
-            f"into its {INCOMING_DIRNAME} folder first."
-        )
-        self.path = QLineEdit(wizard.config.output_root)
-        self.path.textChanged.connect(self._edited)
-        self.browse = QPushButton("Browse…")
-        self.browse.clicked.connect(self._browse)
-        self.error = _plain_label()
-        self.error.hide()
-        row = QHBoxLayout()
-        row.addWidget(self.path, 1)
-        row.addWidget(self.browse)
-        layout = QVBoxLayout(self)
-        layout.addLayout(row)
-        layout.addWidget(self.error)
-        layout.addStretch(1)
-
-    def isComplete(self) -> bool:
-        return bool(self.path.text())
-
-    def validatePage(self) -> bool:
-        text = self.path.text()
-        folder = Path(text).expanduser()
-        if not folder.is_absolute():
-            return self._refuse("Choose a full path, such as the one Browse gives.")
-        try:
-            folder.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            return self._refuse(f"This folder cannot be created: {exc.strerror or exc}")
-        if not os.access(folder, os.W_OK):
-            return self._refuse("This folder is not writable. Choose another one.")
-        error = self._wizard.store(replace(self._wizard.config, output_root=text))
-        if error is not None:
-            return self._refuse(error)
-        return True
-
-    def _refuse(self, text: str) -> bool:
-        self.error.setText(text)
-        self.error.show()
-        return False
-
-    def _edited(self) -> None:
-        self.error.hide()
-        self.completeChanged.emit()
-
-    def _browse(self) -> None:
-        chosen = QFileDialog.getExistingDirectory(self, "Output folder", str(Path(self.path.text()).expanduser()))
-        if chosen:
-            self.path.setText(chosen)
+def saved_in_text(cfg: AppConfig) -> str:
+    """The last page's line (UJ-17): where sessions go, as the system writes the path (UJ-33)."""
+    return f"Sessions are saved in {native_path(cfg.output_root)} (change it in Settings)."
 
 
 class _AddonRow:
-    """One add-on on step 4: size, platform note, status, Install, progress, and why an install failed."""
+    """One add-on on the last page (UJ-18): title, description, its note, then one button that becomes the
+    progress bar while installing and then the status."""
 
     def __init__(self, wizard: SetupWizard, service: AddonService, title: str, description: str) -> None:
         self._wizard = wizard
         self._service = service
         self._installing = False
-        self.title = QLabel(f"<b>{title}</b>")
+        self.title = _plain_label(title)
+        font = self.title.font()
+        font.setBold(True)
+        self.title.setFont(font)
         self.description = _plain_label(description)
-        self.size = _plain_label(f"Download: about {round(service.size_bytes / 1_000_000)} MB")
         self.note = _plain_label(service.note or "")
         self.note.setVisible(bool(service.note))
-        self.status = _plain_label()
-        self.button = QPushButton("Install")
+        self.button = QPushButton()
         self.button.clicked.connect(self.install)
         self.progress = QProgressBar()
         self.progress.hide()
-        self.error = _plain_label()
-        self.error.hide()
-
-    def widgets(self) -> list[QWidget]:
-        return [self.title, self.description, self.size, self.note, self.status, self.button, self.progress, self.error]
+        self.status = _plain_label()
+        self.status.hide()
+        self.error = error_label()
+        self.column = QVBoxLayout()
+        for label in (self.title, self.description, self.note):
+            self.column.addWidget(label)
+        self.column.addWidget(self.button, 0, Qt.AlignmentFlag.AlignLeft)
+        for widget in (self.progress, self.status, self.error):
+            self.column.addWidget(widget)
 
     def refresh(self) -> None:
         status = AddonStatus.INSTALLING if self._installing else self._service.status()
-        self.status.setText(ADDON_STATUS_TEXT[status])
-        self.button.setText("Repair" if status is AddonStatus.BROKEN else "Install")
-        self.button.setVisible(status is not AddonStatus.READY)
-        self.button.setEnabled(status in (AddonStatus.MISSING, AddonStatus.BROKEN))
+        self.button.setText(install_now_text(status, self._service.size_bytes))
+        self.button.setVisible(status in (AddonStatus.MISSING, AddonStatus.BROKEN))
+        self.progress.setVisible(self._installing)
+        shown = status in (AddonStatus.READY, AddonStatus.INSTALLING) and not self._installing
+        show_message(self.status, ADDON_STATUS_TEXT[status] if shown else "")
 
     def install(self) -> None:
         if self._installing:
             return
         self._installing = True
-        self.error.hide()
+        self.error.clear()
         self.progress.setRange(0, PROGRESS_STEPS)
         self.progress.setValue(0)
-        self.progress.show()
         self.refresh()
         post = self._wizard.main_thread.post
 
@@ -888,45 +977,48 @@ class _AddonRow:
 
     def _finished(self, future: concurrent.futures.Future[Any]) -> None:
         self._installing = False
-        self.progress.hide()
         exc = future.exception() if not future.cancelled() else None
         if isinstance(exc, RuntimeError):
-            self.error.setText(str(exc))
-            self.error.show()
+            self.error.set_error(str(exc))
         elif exc is not None:
             log.error("an add-on install failed", exc_info=exc)
-            self.error.setText("The install failed; see the log.")
-            self.error.show()
+            self.error.set_error("The install failed; see the log.")
         self.refresh()
 
 
 class AddonsPage(QWizardPage):
-    """Step 4: the optional add-ons with their sizes, installed through ``AddonService`` (spec 13.1, 14)."""
+    """Step 3: the optional add-ons, installed through ``AddonService`` (spec 13.1, 14), and where sessions go."""
 
     def __init__(self, wizard: SetupWizard, vad: AddonService, ocr: AddonService) -> None:
         super().__init__()
-        self.setTitle("Optional add-ons")
-        self.setSubTitle("Each one downloads only when you install it. You can also install them later from Settings.")
+        self._wizard = wizard
+        self.setTitle("Optional extras")
+        self.setSubTitle(ADDONS_SUBTITLE)
         self.rows = [
-            _AddonRow(
-                wizard,
-                vad,
-                "Voice detection (VAD)",
-                "After a session, ends each subtitle where the voice ends, so cards carry less music.",
-            ),
-            _AddonRow(
-                wizard,
-                ocr,
-                "OCR (owocr)",
-                "Reads a game's text from the screen, for games no text hooker can read.",
-            ),
+            _AddonRow(wizard, vad, VAD_TITLE, VAD_DESCRIPTION),
+            _AddonRow(wizard, ocr, SCREEN_READING, OCR_DESCRIPTION),
         ]
-        layout = QVBoxLayout(self)
+        self.saved_in = _plain_label(saved_in_text(wizard.config))
+        self.saved_in.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.saved_in.setVisible(not wizard.single_step)
+        self.body = QWidget()
+        column = QVBoxLayout(self.body)
+        for index, row in enumerate(self.rows):
+            if index:
+                column.addSpacing(ADDON_GAP_PX)
+            column.addLayout(row.column)
+        column.addSpacing(ADDON_GAP_PX)
+        column.addWidget(self.saved_in)
+        column.addStretch(1)
+        self.scroll_area = _scrolled(self, self.body)  # not "scroll": QWidget.scroll() is a method
         for row in self.rows:
-            for widget in row.widgets():
-                layout.addWidget(widget)
-        layout.addStretch(1)
+            row.refresh()  # UJ-19: right before the first show, not only when the page is entered
 
     def initializePage(self) -> None:
+        self.saved_in.setText(saved_in_text(self._wizard.config))
         for row in self.rows:
             row.refresh()
+
+    def nextId(self) -> int:
+        """A single-step run ends on this page (UJ-17)."""
+        return -1 if self._wizard.single_step else super().nextId()

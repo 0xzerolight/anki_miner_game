@@ -6,10 +6,12 @@ back is checked against the provisioner's own switching.
 """
 
 import asyncio
+import os
 from collections.abc import Callable
 from pathlib import Path
 
 import pytest
+from PyQt6.QtCore import QDir
 
 from anki_miner_game.gui.wizard import (
     NEEDS_RESTART_TEXT,
@@ -17,6 +19,7 @@ from anki_miner_game.gui.wizard import (
     OBS_LAUNCH_TIMEOUT_S,
     ObsSetup,
     ObsStatus,
+    native_path,
     obs_changes_text,
 )
 from anki_miner_game.models.config import AppConfig, RecordingSettings
@@ -30,6 +33,7 @@ from anki_miner_game.models.obs import (
     ObsUnsupportedError,
     WsConfig,
 )
+from anki_miner_game.obs import startup
 from anki_miner_game.obs.provision import ObsProvisioner
 from anki_miner_game.obs.startup import LocalObsStarter
 from tests.gui.wizard_fakes import FakeDiscovery, FakeSession, WizardObs
@@ -89,6 +93,7 @@ async def test_server_off_while_obs_runs_asks_the_user_and_leaves_the_file_alone
     setup, discovery = make_setup(obs, FakeDiscovery(ws=off, running=True))
     check = await setup.run(AppConfig())
     assert check.status is ObsStatus.SERVER_OFF
+    assert check.text.startswith("OBS's WebSocket server is off.")
     assert "Tools -> WebSocket Server Settings" in check.text
     assert "close OBS" in check.text
     assert "ensure_server_enabled" not in discovery.calls and "launch" not in discovery.calls
@@ -133,6 +138,48 @@ async def test_obs_running_with_the_server_on_is_not_launched_again():
     assert not any(isinstance(c, tuple) for c in discovery.calls)
 
 
+class StartedMeanwhile(FakeDiscovery):
+    """The user starts OBS, with its server off, while the app turns the server on in OBS's config."""
+
+    def ensure_server_enabled(self) -> bool:
+        self.running = True
+        return super().ensure_server_enabled()
+
+
+async def test_obs_started_while_the_server_was_being_turned_on_asks_the_user():
+    obs = WizardObs()
+    off = WsConfig(server_enabled=False, port=4455, password=None, auth_required=True)
+    setup, discovery = make_setup(obs, StartedMeanwhile(ws=off, running=False))
+    check = await setup.run(AppConfig())
+    assert check.status is ObsStatus.SERVER_OFF  # ObsServerOffError, not a connect failure
+    assert check.text.startswith("OBS's WebSocket server is off.")
+    assert "launch" not in discovery.calls and obs.connects == 0
+
+
+async def test_obs_closed_with_the_server_off_says_it_turns_the_server_on():
+    obs = WizardObs()
+    off = WsConfig(server_enabled=False, port=4455, password=None, auth_required=True)
+    setup, _ = make_setup(obs, FakeDiscovery(ws=off, running=False))
+    stages: list[str] = []
+    assert (await setup.run(AppConfig(), stages.append)).status is ObsStatus.READY
+    starting = stages[stages.index("Turning on OBS's WebSocket server…") :]
+    assert starting[:3] == ["Turning on OBS's WebSocket server…", "Starting OBS…", "Connecting to OBS…"]
+
+
+async def test_obs_closed_with_the_server_on_does_not_claim_to_turn_it_on():
+    obs = WizardObs()
+    setup, _ = make_setup(obs, FakeDiscovery(running=False))
+    stages: list[str] = []
+    assert (await setup.run(AppConfig(), stages.append)).status is ObsStatus.READY
+    assert not [stage for stage in stages if stage.startswith("Turning on")]
+    assert stages.index("Starting OBS…") < stages.index("Connecting to OBS…")
+
+
+def test_the_not_ready_text_names_the_timeout_the_apps_starter_waits():
+    """The GUI may not import ``obs``; the app's ``LocalObsStarter`` waits ``startup.OBS_LAUNCH_TIMEOUT_S``."""
+    assert OBS_LAUNCH_TIMEOUT_S == startup.OBS_LAUNCH_TIMEOUT_S
+
+
 async def test_obs_that_does_not_answer_in_time_names_the_dialog_it_may_be_showing():
     obs = WizardObs()
     setup, _ = make_setup(obs, FakeDiscovery(running=False, ready=False))
@@ -155,6 +202,7 @@ async def test_a_refused_password_asks_for_the_override(where):
     check = await setup.run(AppConfig())
     assert check.status is ObsStatus.AUTH_FAILED
     assert "password" in check.text
+    assert "WebSocket password" in check.text
     assert obs.calls == []
 
 
@@ -191,7 +239,7 @@ async def test_nothing_is_touched_while_a_game_is_armed():
     setup, discovery = make_setup(obs, session=FakeSession(AppState.ARMED))
     check = await setup.run(AppConfig())
     assert check.status is ObsStatus.BUSY
-    assert "Disarm" in check.text
+    assert check.text == "A game is ready or recording. Press Done playing first, then run this step again."
     assert discovery.calls == [] and obs.calls == []
 
 
@@ -426,6 +474,7 @@ async def test_stages_are_reported_while_it_runs():
     assert stages[0].startswith("Looking for OBS")
     assert any(stage.startswith("Starting OBS") for stage in stages)
     assert any("back" in stage for stage in stages)
+    assert not [stage for stage in stages if "websocket" in stage]
 
 
 # The "what the app changes in OBS" text ------------------------------------------------------------
@@ -436,10 +485,23 @@ def test_the_changes_text_names_every_change_including_the_auto_configuration_of
     assert f'"{OBS_PROFILE_NAME}"' in text and f'"{OBS_COLLECTION_NAME}"' in text
     assert str(Path("/games") / INCOMING_DIRNAME) in text
     assert "720" in text and "30 fps" in text and ".mkv" in text
-    assert "websocket server" in text
+    assert "WebSocket server" in text
     assert "auto-configuration wizard" in text  # R2 item 14: CreateProfile sets ConfigOnNewProfile=false
     assert "switched back" in text
     assert "never restarts OBS" in text
+    assert "ready or recording" in text and "armed" not in text
+
+
+def test_the_changes_text_shows_the_real_recording_folder():
+    """UJ-33: a stored ``~/...`` folder is shown expanded, with the system's separators."""
+    text = obs_changes_text(AppConfig())
+    incoming = os.path.join(os.path.expanduser(AppConfig().output_root), INCOMING_DIRNAME)
+    assert native_path(incoming) in text
+    assert "~" not in text
+
+
+def test_native_path_expands_the_home_folder_and_uses_native_separators():
+    assert native_path("~/Videos") == QDir.toNativeSeparators(os.path.expanduser("~/Videos"))
 
 
 async def test_a_failure_before_any_switch_sends_no_switch_back():
