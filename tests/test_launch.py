@@ -251,6 +251,33 @@ def test_a_lock_left_by_a_killed_instance_does_not_stop_the_next_launch(tmp_path
     assert "SHOWN ['Anki Miner Game'" in done.stdout
 
 
+BOOM = textwrap.dedent("""
+    import sys
+
+    from PyQt6.QtWidgets import QApplication
+
+    from anki_miner_game import launch
+
+    def boom(**_kwargs):
+        raise RuntimeError("start-up boom")
+
+    launch.App = boom
+    qapp = QApplication(sys.argv)
+    sys.exit(launch.main([]))
+    """)
+
+
+def test_a_start_up_failure_reaches_the_log():
+    """B2-05: the exception used to unwind past the handler's removal: the log ended "starting ... exited"."""
+    done = run_python("-c", BOOM)
+
+    assert done.returncode != 0
+    log = (paths.home() / launch.LOG_NAME).read_text(encoding="utf-8")
+    assert "start-up failed" in log
+    assert "RuntimeError: start-up boom" in log
+    assert not (paths.home() / launch.INSTANCE_LOCK_NAME).exists()  # released on the way out
+
+
 def test_two_verbs_at_once_are_a_usage_error():
     done = run_python("-m", "anki_miner_game.launch", "--start", "--stop")
     assert done.returncode == 2

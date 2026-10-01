@@ -158,6 +158,9 @@ def _run_instance(qapp: QCoreApplication, home: Path, name: str, command: UserCo
             return code if smoke is None or smoke.exit_code is None else smoke.exit_code
         finally:
             app.close()
+    except Exception:
+        log.critical("start-up failed", exc_info=True)  # before the handler goes (B2-05)
+        raise
     finally:
         log.info("exited")
         restore_hooks()
