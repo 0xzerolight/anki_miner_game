@@ -1,12 +1,17 @@
 """Arming, disarming and the restore file (spec 6.2; 17 rows OBS not running, missing request, active
 output, switch timeout, output folder not writable, free space; R2 items 3-6)."""
 
+import ast
 import asyncio
 import os
+import re
+from collections.abc import Awaitable, Callable
+from pathlib import Path
 from typing import Any
 
 import pytest
 
+from anki_miner_game.gui.banner_keys import ARM_FAILED_KEYS
 from anki_miner_game.models.constants import OBS_COLLECTION_NAME, OBS_PROFILE_NAME
 from anki_miner_game.models.messages import (
     OBS_SOURCE_ID,
@@ -16,11 +21,13 @@ from anki_miner_game.models.messages import (
     ObsEvent,
     SourceStatus,
     SourceStatusChanged,
+    StateChanged,
     UserCommand,
 )
 from anki_miner_game.models.obs import (
     REQUIRED_REQUESTS,
     ObsAuthError,
+    ObsConfigError,
     ObsConnectError,
     ObsError,
     ObsEventName,
@@ -31,7 +38,7 @@ from anki_miner_game.models.obs import (
 from anki_miner_game.obs.provision import ObsProvisioner
 from anki_miner_game.session import session as session_mod
 from anki_miner_game.session.restore import ObsRestore, load_restore, restore_path, save_restore
-from anki_miner_game.session.session import BannerKey
+from anki_miner_game.session.session import OBS_AUTH_TEXT, OBS_SERVER_OFF_TEXT, BannerKey
 from tests.gui.obs_listing_fake import ListingObs
 from tests.obs.fake_obs import LINUX_X11_KINDS
 from tests.session.actor_harness import SLUG, T0, FakeSource, Harness, profile
@@ -224,9 +231,8 @@ async def test_the_idle_restore_retry_shows_its_failure_when_no_obs_banner_is_up
     assert "Cannot connect to OBS" in h.banners()[BannerKey.OBS]
 
 
-async def test_arm_with_the_server_off_points_at_the_wizards_fix(rig: Harness):
-    """S5-3: OBS runs with its websocket server off; Arm's banner gives the wizard's own instructions
-    and points at File -> Setup wizard… -> OBS -> Fix, instead of only the raw connect error."""
+async def test_arm_with_the_server_off_says_how_set_up_obs_turns_it_on(rig: Harness):
+    """S5-3, UJ-10: OBS runs with its WebSocket server off; the banner names Set up OBS (no menu path)."""
     rig.discovery.running = True
     rig.discovery.ws_config = WsConfig(server_enabled=False, port=4455, password=None, auth_required=False)
     rig.gateway.connect_error = ObsConnectError(
@@ -234,9 +240,20 @@ async def test_arm_with_the_server_off_points_at_the_wizards_fix(rig: Harness):
     )
     await rig.start()
     await rig.arm()
-    text = rig.banners()[BannerKey.OBS]
-    assert "websocket server is off" in text
-    assert "Setup wizard" in text and "Fix" in text
+    assert rig.banners()[BannerKey.OBS] == OBS_SERVER_OFF_TEXT
+    assert OBS_SERVER_OFF_TEXT == "OBS's WebSocket server is off. Close OBS and press Set up OBS: the app turns it on."
+    assert rig.actor.state is AppState.IDLE
+
+
+async def test_obs_started_meanwhile_with_its_server_off_is_the_server_off_banner(rig: Harness):
+    """D-03: the shared starter cannot turn the server on once OBS runs (``ObsServerOffError``)."""
+    rig.discovery.running = False
+    await rig.start()  # the launch's own look: not running
+    rig.discovery.answers = [False, True]  # not running, then running once the enable failed
+    rig.discovery.ensure_server_enabled = lambda: False  # type: ignore[method-assign]
+    await rig.arm()
+    assert rig.banners()[BannerKey.OBS] == OBS_SERVER_OFF_TEXT
+    assert rig.discovery.launches == 0
     assert rig.actor.state is AppState.IDLE
 
 
@@ -264,12 +281,22 @@ async def test_missing_request_names_the_request_and_the_version(rig: Harness):
     assert rig.actor.state is AppState.IDLE
 
 
-async def test_authentication_failure_asks_for_the_password(rig: Harness):
+async def test_authentication_failure_points_at_set_up_obs(rig: Harness):
     rig.gateway.connect_error = ObsAuthError("authentication failed")
     await rig.start()
     await rig.arm()
-    assert "password" in rig.banners()[BannerKey.OBS]
+    assert rig.banners()[BannerKey.OBS] == OBS_AUTH_TEXT
+    assert OBS_AUTH_TEXT == "OBS rejected the app's password. Press Set up OBS to enter it."
     assert SourceStatusChanged(OBS_SOURCE_ID, SourceStatus.DISCONNECTED) in rig.events
+
+
+async def test_unreadable_websocket_settings_point_at_set_up_obs(rig: Harness):
+    rig.gateway.connect_error = ObsConfigError("Expecting value: line 1 column 1")
+    await rig.start()
+    await rig.arm()
+    assert rig.banners()[BannerKey.OBS] == (
+        "OBS's WebSocket settings cannot be read (Expecting value: line 1 column 1); press Set up OBS."
+    )
 
 
 @pytest.mark.parametrize(
@@ -412,7 +439,7 @@ async def test_settings_that_apply_at_the_next_arm_are_a_warning(h: Harness):
     await h.arm()
     assert h.actor.state is AppState.ARMED
     text = h.banners()[BannerKey.OBS_RESTART]
-    assert "disarm and arm" in text
+    assert "press Done playing and then Start recording again" in text
     assert h.gateway.names().count("SetCurrentProfile") == 1  # ensure_profile's switch; nothing restarts OBS
 
 
@@ -502,3 +529,123 @@ async def test_quitting_while_armed_disarms(h: Harness):
     await h.stop()
     assert (h.sources[0].stops, h.sources[0].closed) == (1, 1)
     assert (h.obs.profile, h.obs.collection) == ("Untitled", "Untitled")
+
+
+_ARM = re.compile(r"\b(dis)?arm(s|ed|ing)?\b|\bcues?\b", re.IGNORECASE)
+
+
+class _ActorTexts(ast.NodeVisitor):
+    """Every string constant in ``session.py`` that can reach the user: docstrings, ``BannerKey`` values and
+    log calls are left out."""
+
+    def __init__(self) -> None:
+        self.texts: list[str] = []
+
+    def _body(self, node: ast.Module | ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        body = node.body
+        if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
+            body = body[1:]
+        for child in body:
+            self.visit(child)
+
+    def visit_Module(self, node: ast.Module) -> None:
+        self._body(node)
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        if node.name != "BannerKey":
+            self._body(node)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self._body(node)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self._body(node)
+
+    def visit_Expr(self, node: ast.Expr) -> None:
+        if not (isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)):  # attribute docstrings
+            self.generic_visit(node)
+
+    def visit_Call(self, node: ast.Call) -> None:
+        func = node.func
+        if not (isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) and func.value.id == "log"):
+            self.generic_visit(node)
+
+    def visit_Constant(self, node: ast.Constant) -> None:
+        if isinstance(node.value, str):
+            self.texts.append(node.value)
+
+
+def test_no_actor_text_says_arm_cue_websocket_or_a_menu_path():
+    """D-01, UJ-32: the user never meets "arm"; "line" not "cue"; "WebSocket"; no menu that does not exist."""
+    source = Path(session_mod.__file__).read_text(encoding="utf-8")
+    finder = _ActorTexts()
+    finder.visit(ast.parse(source))
+    wrong = [
+        text
+        for text in finder.texts
+        if _ARM.search(text) or "websocket" in text or "Setup wizard" in text or "File ->" in text
+    ]
+    assert wrong == []
+
+
+def raised_since(h: Harness, mark: int) -> set[str]:
+    return {e.banner.key for e in h.events[mark:] if isinstance(e, BannerRaised)}
+
+
+async def _unknown_game(h: Harness) -> str:
+    return "no-such-game"
+
+
+async def _invalid_game(h: Harness) -> str:
+    h.profiles["bad"] = profile(slug="bad", title=" ")
+    return "bad"
+
+
+async def _unwritable_folder(h: Harness) -> str:
+    h.output_root.parent.mkdir(parents=True, exist_ok=True)
+    h.output_root.write_text("a file where the folder should be", encoding="utf-8")
+    return SLUG
+
+
+async def _obs_unreachable(h: Harness) -> str:
+    h.gateway.connected = False
+    await h.emit(ObsEventName.CONNECTION_LOST)
+    h.gateway.connect_error = ObsConnectError("cannot connect to OBS at 127.0.0.1:4455")
+    return SLUG
+
+
+async def _output_active(h: Harness) -> str:
+    h.obs.stream_active = True
+    return SLUG
+
+
+async def _provisioning_fails(h: Harness) -> str:
+    h.provisioner.error = ObsError("CreateInput failed")
+    return SLUG
+
+
+async def _a_bug(h: Harness) -> str:
+    h.provisioner.error = RuntimeError("a bug")
+    return SLUG
+
+
+@pytest.mark.parametrize(
+    "prepare",
+    [_unknown_game, _invalid_game, _unwritable_folder, _obs_unreachable, _output_active, _provisioning_fails, _a_bug],
+)
+async def test_a_get_ready_that_fails_raises_a_key_the_window_waits_for(
+    h: Harness, prepare: Callable[[Harness], Awaitable[str]]
+):
+    """Master 4.6: the window's pending Get ready / Start recording ends on one of ``ARM_FAILED_KEYS``."""
+    slug = await prepare(h)
+    mark = len(h.events)
+    await h.arm(slug)
+    assert h.actor.state is AppState.IDLE
+    assert not [e for e in h.events[mark:] if isinstance(e, StateChanged)]
+    assert raised_since(h, mark) & ARM_FAILED_KEYS
+
+
+async def test_a_get_ready_that_works_ends_in_ready_for_that_game(h: Harness):
+    mark = len(h.events)
+    await h.arm()
+    assert StateChanged(AppState.ARMED, SLUG) in h.events[mark:]

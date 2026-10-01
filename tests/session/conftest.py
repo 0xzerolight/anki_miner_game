@@ -11,9 +11,11 @@ async def rig(tmp_path, monkeypatch):
     """A ``Harness`` that is built but not started: set the fakes up, then ``await rig.start()``.
 
     Teardown quits the actor; a test that ends while recording must not wait the real
-    ``QUIT_STOP_TIMEOUT_S`` for a ``STOPPED`` the fake OBS only sends when ``stops_on_request``.
+    ``QUIT_STOP_TIMEOUT_S`` for a ``STOPPED`` the fake OBS only sends when ``stops_on_request``, nor the
+    real ``QUIT_START_WAIT_S`` for the ``STARTED`` of a start still in flight.
     """
     monkeypatch.setattr(session_mod, "QUIT_STOP_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(session_mod, "QUIT_START_WAIT_S", 0.05)  # a test ending with a start in flight
     harness = Harness(tmp_path)
     yield harness
     await harness.stop()

@@ -10,6 +10,7 @@ from anki_miner_game.lifecycle.auto import POLL_S, AutoMode, window_open
 from anki_miner_game.models.lines import GameLine
 from anki_miner_game.models.messages import (
     START_FAILED_BANNER_KEY,
+    STOP_FAILED_BANNER_KEY,
     AppState,
     Banner,
     BannerLevel,
@@ -21,8 +22,11 @@ from anki_miner_game.models.messages import (
     StateChanged,
     UserCommand,
 )
-from anki_miner_game.models.obs import ObsConnectError
+from anki_miner_game.models.obs import ObsConnectError, ObsEventName
 from anki_miner_game.models.profile import AutoSettings, CaptureKind, CaptureSettings, GameProfile
+from anki_miner_game.session import session as session_mod
+from tests.session.actor_harness import T0, Harness
+from tests.session.actor_harness import profile as actor_profile
 
 WIN_VALUE = "Steins#3AGate 60 FPS:UnityWndClass:SteinsGate.exe"
 X11_VALUE = "0x3a00007\r\nSteins;Gate\r\nsteinsgate"
@@ -169,17 +173,6 @@ def test_lines_while_idle_or_recording_send_nothing() -> None:
     rig.state(AppState.RECORDING)
     rig.line(100)
     assert rig.control.commands() == []
-
-
-def test_first_line_of_each_armed_period_starts_again() -> None:
-    rig = Rig(make_profile())
-    rig.state(AppState.ARMED)
-    rig.line()
-    rig.state(AppState.RECORDING)
-    rig.state(AppState.FINALISING)
-    rig.state(AppState.ARMED)
-    rig.line()
-    assert rig.control.commands() == [CommandKind.START, CommandKind.START]
 
 
 def test_a_repeated_armed_state_does_not_start_twice() -> None:
@@ -546,3 +539,176 @@ def test_profile_replace_keeps_auto_off_by_default() -> None:
     rig.check()
     assert rig.control.commands() == []
     assert rig.windows.calls == 0
+
+
+# Auto-stop retry (B1-08).
+
+
+def test_a_failed_auto_stop_is_posted_again_at_the_next_check() -> None:
+    rig = Rig(make_profile(idle_min=1, window=None, start=False))
+    rig.state(AppState.ARMED)
+    rig.state(AppState.RECORDING)
+    rig.advance(60)
+    rig.check()
+    rig.control.emit(BannerRaised(Banner(STOP_FAILED_BANNER_KEY, BannerLevel.ERROR, "OBS did not stop recording")))
+    rig.check()
+    assert rig.control.commands() == [CommandKind.STOP, CommandKind.STOP]
+
+
+def test_a_stop_that_worked_is_not_posted_again() -> None:
+    rig = Rig(make_profile(idle_min=1, window=None, start=False))
+    rig.state(AppState.ARMED)
+    rig.state(AppState.RECORDING)
+    rig.advance(60)
+    rig.check()
+    rig.state(AppState.FINALISING)
+    rig.check()
+    assert rig.control.commands() == [CommandKind.STOP]
+
+
+def test_a_stop_failure_banner_outside_recording_changes_nothing() -> None:
+    rig = Rig(make_profile(idle_min=1, window=None, start=False))
+    rig.state(AppState.ARMED)
+    rig.control.emit(BannerRaised(Banner(STOP_FAILED_BANNER_KEY, BannerLevel.ERROR, "x")))
+    rig.check()
+    assert rig.control.commands() == []
+
+
+# Manual stops pause auto-start (D-06, B5-04).
+
+OBS_EXITED = Banner("obs_exited", BannerLevel.WARNING, "OBS closed during the recording; the session was saved.")
+
+
+def auto_session(rig: Rig) -> None:
+    """Ready, a line starts the recording (auto mode's START), OBS reports it recording."""
+    rig.state(AppState.ARMED)
+    rig.line()
+    rig.state(AppState.RECORDING)
+
+
+def test_a_manual_stop_pauses_auto_start() -> None:
+    rig = Rig(make_profile(window=None))
+    auto_session(rig)
+    rig.state(AppState.FINALISING)  # the user pressed Stop: auto mode posted nothing
+    rig.state(AppState.ARMED)
+    assert not rig.auto.auto_start_pending()
+    rig.line()
+    assert rig.control.commands() == [CommandKind.START]
+
+
+def test_an_auto_idle_stop_keeps_auto_start() -> None:
+    rig = Rig(make_profile(idle_min=1, window=None))
+    auto_session(rig)
+    rig.advance(60)
+    rig.check()  # auto mode's own STOP
+    rig.state(AppState.FINALISING)
+    rig.state(AppState.ARMED)
+    assert rig.auto.auto_start_pending()
+    rig.line()
+    assert rig.control.commands() == [CommandKind.START, CommandKind.STOP, CommandKind.START]
+
+
+def test_a_manual_start_after_a_pause_and_then_an_auto_stop_keeps_auto_start() -> None:
+    rig = Rig(make_profile(idle_min=1, window=None))
+    auto_session(rig)
+    rig.state(AppState.FINALISING)  # manual stop: paused
+    rig.state(AppState.ARMED)
+    rig.state(AppState.RECORDING)  # the user pressed Start recording: the pause ends
+    rig.advance(60)
+    rig.check()
+    rig.state(AppState.FINALISING)
+    rig.state(AppState.ARMED)
+    rig.line()
+    assert rig.control.commands() == [CommandKind.START, CommandKind.STOP, CommandKind.START]
+
+
+def test_done_playing_or_another_game_ends_the_pause() -> None:
+    rig = Rig(make_profile(window=None))
+    rig.profiles["chaos-head"] = replace(make_profile(window=None), slug="chaos-head")
+    auto_session(rig)
+    rig.state(AppState.FINALISING)
+    rig.state(AppState.ARMED)
+    rig.state(AppState.ARMED, "chaos-head")  # another game readied
+    assert rig.auto.auto_start_pending()
+    rig.state(AppState.RECORDING, "chaos-head")
+    rig.state(AppState.FINALISING, "chaos-head")
+    rig.state(AppState.ARMED, "chaos-head")  # paused again
+    rig.state(AppState.IDLE)
+    rig.state(AppState.ARMED, "chaos-head")  # Done playing, then Get ready
+    assert rig.auto.auto_start_pending()
+
+
+def test_obs_exiting_during_an_auto_recording_is_no_manual_stop() -> None:
+    """Review Focus 1: the actor ends the session (FINALISING, ARMED), then raises obs_exited."""
+    rig = Rig(make_profile(window=None))
+    auto_session(rig)
+    rig.state(AppState.FINALISING)
+    rig.state(AppState.ARMED)
+    rig.control.emit(BannerRaised(OBS_EXITED))
+    assert rig.auto.auto_start_pending()
+    rig.line()
+    assert rig.control.commands() == [CommandKind.START, CommandKind.START]
+
+
+def test_an_obs_exit_banner_from_an_earlier_recording_does_not_lift_a_later_pause() -> None:
+    rig = Rig(make_profile(window=None))
+    auto_session(rig)
+    rig.state(AppState.FINALISING)
+    rig.state(AppState.ARMED)
+    rig.control.emit(BannerRaised(OBS_EXITED))
+    rig.line()  # starts again
+    rig.state(AppState.RECORDING)
+    rig.state(AppState.FINALISING)  # this time a manual stop
+    rig.state(AppState.ARMED)
+    assert not rig.auto.auto_start_pending()
+
+
+@pytest.mark.parametrize(
+    ("profile", "state", "pending"),
+    [
+        (make_profile(), AppState.IDLE, False),
+        (make_profile(), AppState.ARMED, True),
+        (make_profile(start=False), AppState.ARMED, False),
+        (make_profile(enabled=False), AppState.ARMED, False),
+        (make_profile(), AppState.RECORDING, False),
+        (make_profile(), AppState.FINALISING, False),
+    ],
+)
+def test_auto_start_pending_only_while_ready_with_start_at_the_first_line(
+    profile: GameProfile, state: AppState, pending: bool
+) -> None:
+    rig = Rig(profile)
+    rig.state(state)
+    assert rig.auto.auto_start_pending() is pending
+
+
+async def _no_windows() -> list[Item]:
+    return []
+
+
+async def test_obs_exiting_mid_auto_recording_then_a_line_relaunches_obs_and_records(tmp_path, monkeypatch):
+    """Review Focus 1 over the real actor: the next line's START relaunches OBS (D-04) and records."""
+    monkeypatch.setattr(session_mod, "QUIT_STOP_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(session_mod, "QUIT_START_WAIT_S", 0.05)
+    h = Harness(tmp_path)
+    h.profiles[SLUG] = replace(actor_profile(), auto=AutoSettings(enabled=True, start_on_first_line=True))
+    auto = AutoMode(h.actor, h.profiles.get, _no_windows, now=h.clock)
+    await h.start()
+    try:
+        await h.arm()
+        await h.line("はじまり", T0 + 0.2)
+        await h.started(T0 + 1.0)
+        await h.emit(ObsEventName.EXIT_STARTED, {}, T0 + 5.0)
+        h.gateway.connected = False
+        h.discovery.running = False
+        await h.emit(ObsEventName.CONNECTION_LOST, {}, T0 + 5.3)
+        assert h.actor.state is AppState.ARMED
+        assert auto.auto_start_pending()
+        await h.line("つぎ", T0 + 10.0)
+        assert h.discovery.launches == 1
+        assert h.gateway.names().count("StartRecord") == 2
+        await h.started(T0 + 11.0, stem="2026-10-02 18-05-00")
+        assert h.actor.state is AppState.RECORDING
+        h.obs.stops_on_request = True
+    finally:
+        await h.stop()

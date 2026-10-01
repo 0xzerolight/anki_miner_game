@@ -13,6 +13,7 @@ from anki_miner_game.session.journal import (
     read_journal,
     timed_lines,
 )
+from tests.session.actor_harness import full_disk_handle
 
 # One record of each type, and the lines spec 10.2 shows for them.
 RECORDS = [
@@ -130,3 +131,14 @@ def test_a_replace_rewrites_the_line_before_it_and_keeps_its_offset():
 def test_a_replace_with_no_line_before_it_is_ignored():
     records = [ReplaceRecord(text="x"), LineRecord(offset_ms=10, text="y", source="luna")]
     assert timed_lines(records) == [TimedLine(offset_ms=10, text="y", source_id="luna")]
+
+
+def test_close_survives_a_last_flush_that_fails_and_closes_the_file(tmp_path):
+    """B1-01: a drive gone or full makes the last flush fail; ``close`` must not raise, and the file is closed."""
+    journal = Journal(tmp_path / "2026-10-02 18-04-11.lines.jsonl")
+    journal._fh.close()
+    journal._fh = full_disk_handle()
+    with pytest.raises(OSError):
+        journal.append(StopRecord(offset_ms=1))  # the record stays in the buffer
+    journal.close()
+    assert journal._fh.closed

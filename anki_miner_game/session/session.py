@@ -71,6 +71,7 @@ from anki_miner_game.models.manifest import (
 from anki_miner_game.models.messages import (
     OBS_SOURCE_ID,
     START_FAILED_BANNER_KEY,
+    STOP_FAILED_BANNER_KEY,
     AppState,
     Banner,
     BannerCleared,
@@ -94,16 +95,18 @@ from anki_miner_game.models.messages import (
 from anki_miner_game.models.obs import (
     ObsAuthError,
     ObsConfigError,
-    ObsConnectError,
     ObsError,
     ObsEventName,
     ObsRequestError,
+    ObsServerOffError,
+    ObsStartStage,
     ObsUnsupportedError,
     OutputState,
     ProvisionResult,
 )
 from anki_miner_game.models.pipeline import DROP_COUNTER, Accepted, Dropped
 from anki_miner_game.models.profile import GameProfile, validate
+from anki_miner_game.obs.startup import LocalObsStarter
 from anki_miner_game.session.clock import EventClock, OutputDurationClock
 from anki_miner_game.session.finalise import FinaliseError, FinaliseResult, finalise
 from anki_miner_game.session.journal import (
@@ -153,6 +156,8 @@ not at all while OBS's modal restart question is open. No answer this long after
 question."""
 QUIT_STOP_TIMEOUT_S: Final = 5.0
 """Quit while recording: how long to wait for ``STOPPED`` after ``StopRecord`` (R2 item 9: 0.6-1.3 s)."""
+QUIT_START_WAIT_S: Final = START_TIMEOUT_S
+"""Quit with a start in flight (B1-03): how long to wait for its ``STARTED`` before quitting without it."""
 RECORD_INACTIVE_WAIT_S: Final = 1.0
 """Quit, after ``STOPPED``: how long to wait for ``GetRecordStatus`` to say inactive before the restore
 (R2 item 9: it still says active for about 170 ms)."""
@@ -163,6 +168,10 @@ SWITCH_TIMEOUT_S: Final = 15.0
 """Spec 6.2 step 3: one profile or scene collection switch, request to ``...Changed`` event."""
 OBS_LAUNCH_TIMEOUT_S: Final = 30.0
 """Spec 17: Arm launches OBS and waits up to 30 s for it to answer."""
+OBS_SERVER_OFF_TEXT: Final = "OBS's WebSocket server is off. Close OBS and press Set up OBS: the app turns it on."
+"""Banner (key ``obs``) when OBS runs with its WebSocket server off; the window puts Set up OBS… on it (UJ-10)."""
+OBS_AUTH_TEXT: Final = "OBS rejected the app's password. Press Set up OBS to enter it."
+"""Banner (key ``obs``) when OBS refuses the password (UJ-10)."""
 FREE_SPACE_WARN_BYTES: Final = 5 * 10**9
 """Spec 17: under 5 GB free at Arm, arm anyway with a warning."""
 REANCHOR_S: Final = 10.0
@@ -210,7 +219,7 @@ class BannerKey(StrEnum):
     OBS_QUESTION = "obs_question"
     RESTORE = "obs_restore"
     NO_SOURCE = "no_source"
-    STOP_FAILED = "stop_failed"
+    STOP_FAILED = STOP_FAILED_BANNER_KEY  # auto mode listens for it (B1-08)
     FOREIGN_RECORDING = "foreign_recording"
     SESSION_FILES = "session_files"
     SPLIT = "split_unsupported"
@@ -398,6 +407,8 @@ class SessionActor:
         self._loop = loop
         self._gateway = gateway
         self._discovery = discovery
+        self._starter = LocalObsStarter(discovery, gateway, timeout_s=OBS_LAUNCH_TIMEOUT_S)
+        """The one start-OBS sequence the wizard and the window picker use too (D-03)."""
         self._provisioner = provisioner
         self._recorder = recorder
         self._finaliser = finaliser
@@ -428,6 +439,9 @@ class SessionActor:
         self._counts = Counts()
         self._held: list[GameLine] | None = None
         """Auto-start: lines accepted between a ``START`` carrying a line and ``STARTED``."""
+        self._ready_line: GameLine | None = None
+        """The last line accepted or merged while armed without a session (B1-05): an auto start whose
+        ``START`` was queued behind newer lines holds this one instead of its stale trigger."""
         self._start_deadline: float | None = None
         """A ``StartRecord`` was answered; ``STARTED`` is due before this ``now()``."""
 
@@ -503,7 +517,8 @@ class SessionActor:
         to the user's profile). While recording it first stops OBS and finalises the session, then
         disarms; if OBS cannot be stopped, the journal is closed and the next launch resumes the
         session (reconcile row 4) or finalises it (last row). While idle and connected with
-        ``obs_restore.json`` still present, it restores once. At most about ``QUIT_STOP_TIMEOUT_S``
+        ``obs_restore.json`` still present, it restores once. With a start in flight it first waits up to
+        ``QUIT_START_WAIT_S`` for that recording to start, then stops it. At most about ``QUIT_STOP_TIMEOUT_S``
         plus one finalise (up to 10 s of rename retries on Windows) plus ``RECORD_INACTIVE_WAIT_S``
         plus the restore's two switches (up to ``SWITCH_TIMEOUT_S`` each, plus
         ``RESTART_QUESTION_S`` when OBS asks to restart).
@@ -560,6 +575,8 @@ class SessionActor:
             self.post(Tick(self._now()))
 
     async def _shutdown(self) -> None:
+        if self._start_deadline is not None:
+            await self._finish_start_for_quit()
         if self._state is AppState.RECORDING:
             await self._stop_for_quit()
         if self._state is AppState.ARMED:
@@ -576,6 +593,41 @@ class SessionActor:
             # idle tick (R2 item 9); a quit before that tick restores once, when OBS says inactive.
             await self._await_record_inactive()
             await self._restore_obs()
+
+    async def _finish_start_for_quit(self) -> None:
+        """B1-03: a quit with a start in flight (``StartRecord`` answered, ``STARTED`` not handled yet).
+
+        Messages already queued are handled first, a ``STARTED`` among them included (a waiter registered
+        now would never see it); then the quit waits up to ``QUIT_START_WAIT_S`` for ``STARTED`` or the
+        ``STOPPED`` of a failed start. A recording that starts is then stopped and finished like any other
+        (``_stop_for_quit``) instead of running on in ``_incoming/`` with no owner.
+        """
+        while self._start_deadline is not None and not self._queue.empty():
+            msg = self._queue.get_nowait()
+            try:
+                if isinstance(msg, _Shutdown):  # a second quit: it waits behind this one
+                    self._queue.put_nowait(msg)
+                    break
+                await self._guarded(self._handle(msg))
+            finally:
+                self._queue.task_done()
+        if self._start_deadline is None:
+            return
+
+        def ends_the_start(ev: ObsEvent) -> bool:
+            return ev.name == ObsEventName.RECORD_STATE_CHANGED and ev.data.get("outputState") in (
+                OutputState.STARTED,
+                OutputState.STOPPED,
+            )
+
+        with self._expecting(ends_the_start) as ended:
+            try:
+                async with asyncio.timeout(QUIT_START_WAIT_S):
+                    event = await ended
+            except TimeoutError:
+                log.warning("quit with a start in flight: no STARTED within %g s", QUIT_START_WAIT_S)
+                return
+        await self._guarded(self._handle(event))
 
     async def _on_tick(self, t: float) -> None:
         if self._start_deadline is not None and t >= self._start_deadline:
@@ -707,7 +759,7 @@ class SessionActor:
 
     async def _arm(self, slug: str) -> None:
         if self._state is AppState.RECORDING:
-            self._banner(BannerKey.ARM, BannerLevel.INFO, "Stop the recording before arming another game.")
+            self._banner(BannerKey.ARM, BannerLevel.INFO, "Stop the recording before choosing another game.")
             return
         profile = self._get_profile(slug)
         if profile is None:
@@ -715,7 +767,9 @@ class SessionActor:
             return
         problems = validate(profile)
         if problems:
-            self._banner(BannerKey.ARM, BannerLevel.ERROR, f"{profile.title} cannot be armed: {'; '.join(problems)}.")
+            self._banner(
+                BannerKey.ARM, BannerLevel.ERROR, f"{profile.title} cannot be recorded yet: {'; '.join(problems)}."
+            )
             return
         cfg = self._get_config()
         incoming = paths.incoming_dir(cfg)
@@ -757,11 +811,12 @@ class SessionActor:
                 BannerKey.OBS_RESTART,
                 BannerLevel.WARNING,
                 "Some of the app's OBS settings (container, output mode or recording encoder) take effect "
-                "only after you disarm and arm again.",
+                "only after you press Done playing and then Start recording again.",
             )
         self._armed = _Armed(profile=profile, cfg=cfg)
         self._pipeline = TextPipeline(profile.filters)
         self._held = None
+        self._ready_line = None
         self._start_deadline = None
         self._counts = Counts()
         self._start_sources(cfg, profile)
@@ -795,7 +850,8 @@ class SessionActor:
                 self._holding_obs = False
 
     async def _ensure_connected(self, *, banner_on_failure: bool = True) -> bool:
-        """Connect, launching OBS first when it is not running (spec 11.1, 17); a banner on failure.
+        """Connect, starting OBS first when it is not running (spec 11.1, 17; ``LocalObsStarter``, D-03);
+        a banner on failure.
 
         ``banner_on_failure=False`` (the idle restore retry, S5-2): a failure keeps whatever banner
         is already shown instead of replacing it with this attempt's own, usually less specific, text.
@@ -803,16 +859,17 @@ class SessionActor:
         if self._connected:
             return True
         self._obs_status(SourceStatus.CONNECTING)
-        running = await asyncio.to_thread(self._discovery.is_running)
+        launched = False
+
+        def heard(stage: ObsStartStage) -> None:
+            nonlocal launched
+            launched = launched or stage is not ObsStartStage.CONNECTING
+
         try:
-            if not running:
-                await asyncio.to_thread(self._discovery.ensure_server_enabled)
-                await asyncio.to_thread(self._discovery.launch)
-                if not await self._discovery.wait_ready(OBS_LAUNCH_TIMEOUT_S):
-                    raise ObsConnectError(
-                        f"OBS did not answer within {OBS_LAUNCH_TIMEOUT_S:g} s; an OBS dialog may be waiting"
-                    )
-            info = await self._gateway.connect()
+            info = await self._starter.start(heard)
+        except ObsServerOffError:
+            self._obs_failed(OBS_SERVER_OFF_TEXT, banner=banner_on_failure)
+            return False
         except ObsUnsupportedError as exc:
             self._obs_failed(
                 f"OBS {exc.obs_version} lacks {', '.join(exc.missing)}; update OBS to version 30.0 or newer.",
@@ -820,18 +877,15 @@ class SessionActor:
             )
             return False
         except ObsAuthError:
-            self._obs_failed(
-                "OBS rejected the websocket password; enter it in the app's settings.", banner=banner_on_failure
-            )
+            self._obs_failed(OBS_AUTH_TEXT, banner=banner_on_failure)
             return False
         except ObsConfigError as exc:
             self._obs_failed(
-                f"OBS's websocket settings cannot be read ({exc}); run the setup wizard again.",
-                banner=banner_on_failure,
+                f"OBS's WebSocket settings cannot be read ({exc}); press Set up OBS.", banner=banner_on_failure
             )
             return False
         except ObsError as exc:
-            text = await self._connect_failure_text(exc, was_running=running)
+            text = await self._connect_failure_text(exc, was_running=not launched)
             self._obs_failed(text, banner=banner_on_failure)
             return False
         self._obs_versions = (info.obs_version, info.websocket_version)
@@ -842,8 +896,8 @@ class SessionActor:
 
     async def _connect_failure_text(self, exc: ObsError, *, was_running: bool) -> str:
         """S5-3: OBS was already running (this attempt never had to launch it) and refused the
-        connection outright. Point at the websocket server being off, reusing the wizard's own check
-        (``ObsSetup._start_obs``) and instructions; otherwise a short Safe-Mode/dialog hint.
+        connection outright. Point at the WebSocket server being off, which Set up OBS turns on once
+        OBS is closed; otherwise a short Safe-Mode/dialog hint.
         """
         if not was_running:
             return f"Cannot connect to OBS: {exc}"
@@ -852,11 +906,7 @@ class SessionActor:
         except ObsConfigError:
             ws = None
         if ws is None or not ws.server_enabled:
-            return (
-                "Cannot connect to OBS: OBS's websocket server is off. In OBS, tick Tools -> "
-                "WebSocket Server Settings -> Enable WebSocket server and press OK, then arm again. "
-                "Or close OBS and use File -> Setup wizard… -> OBS -> Fix: the app turns it on."
-            )
+            return OBS_SERVER_OFF_TEXT
         return f"Cannot connect to OBS: {exc} (OBS may be in Safe Mode, or showing a dialog in its window)"
 
     def _obs_failed(self, text: str, *, banner: bool = True) -> None:
@@ -928,7 +978,7 @@ class SessionActor:
                         BannerKey.OBS_QUESTION,
                         BannerLevel.WARNING,
                         "OBS is asking to restart: answer it in OBS's window (No keeps OBS running and "
-                        "lets arming go on).",
+                        "lets the app go on).",
                     )
                 try:
                     result = await provisioning
@@ -1056,8 +1106,8 @@ class SessionActor:
         return True
 
     async def _disarm(self) -> None:
-        if self._state is AppState.RECORDING:
-            self._banner(BannerKey.ARM, BannerLevel.INFO, "Stop the recording before disarming.")
+        if self._state is AppState.RECORDING or self._start_deadline is not None:  # B1-03: a start in flight
+            self._banner(BannerKey.ARM, BannerLevel.INFO, "Stop the recording before pressing Done playing.")
             return
         if self._state is AppState.ARMED:
             await self._to_idle()
@@ -1072,6 +1122,7 @@ class SessionActor:
         self._armed = None
         self._pipeline = None
         self._held = None
+        self._ready_line = None
         self._start_deadline = None
         self._clear(BannerKey.NO_SOURCE, BannerKey.LOW_DISK, BannerKey.OBS_RESTART, START_FAILED_BANNER_KEY)
         if self._state is not AppState.IDLE:
@@ -1122,10 +1173,21 @@ class SessionActor:
         self._counts = self._counts.incremented(name)
 
     async def _start(self, line: GameLine | None) -> None:
-        """``StartRecord`` while armed (spec 11.4); the session begins at ``STARTED``, whoever starts it."""
+        """``StartRecord`` while armed (spec 11.4); the session begins at ``STARTED``, whoever starts it.
+
+        D-04: an OBS that went away while ready is started and connected first, as arming does; when
+        that fails the start fails (``START_FAILED_BANNER_KEY``, after the ``obs`` banner) and auto mode
+        tries again at its next line.
+        """
         if self._state is not AppState.ARMED or self._start_deadline is not None:
             return
+        if not await self._ensure_connected():
+            self._start_failed("OBS did not start recording: the app could not reach OBS.")
+            return
         if line is not None:  # auto mode: the session's counts start with the line that started it
+            newer = self._ready_line
+            if newer is not None and (newer.t_mono > line.t_mono or _same_line(newer, line)):
+                line = newer  # B1-05: lines were handled before this START; the screen shows the newest
             self._held = [line]
             self._counts = Counts(received=1, accepted=1)
         try:
@@ -1236,6 +1298,8 @@ class SessionActor:
         if s is not None and not s.stop_journalled:
             self._publish(LineAccepted(line, self._journal_line(s, line)))
             return
+        if s is None and self._state is AppState.ARMED:
+            self._ready_line = line
         if self._held is not None:
             self._held.append(line)
         self._publish(LineAccepted(line, None))
@@ -1252,6 +1316,8 @@ class SessionActor:
                 offset = self._journal_line(s, line)
             self._publish(LineAccepted(line, offset, replaces_previous=True))
             return
+        if s is None and self._state is AppState.ARMED:
+            self._ready_line = line
         if self._held is not None:
             if self._held and _same_line(self._held[-1], line):
                 self._held[-1] = line
@@ -1290,13 +1356,15 @@ class SessionActor:
             return
         self._start_deadline = None
         held, self._held = self._held, None
+        self._ready_line = None
         output_path = ev.data.get("outputPath")
         if not isinstance(output_path, str) or not self._in_incoming(output_path):
             self._banner(
                 BannerKey.FOREIGN_RECORDING,
                 BannerLevel.WARNING,
                 f"OBS is recording to {output_path or 'an unknown file'}, outside the app's folder, so this "
-                "recording gets no subtitle. Arm the game again to put OBS back on the app's profile.",
+                "recording gets no subtitle. Press Done playing, then Start recording, to put OBS back on the "
+                "app's profile.",
             )
             return
         incoming = paths.incoming_dir(armed.cfg)
@@ -1333,7 +1401,15 @@ class SessionActor:
         s = self._session = _Session(
             files.manifest, manifest, files, journal, clock, next_sample=ev.t_mono + DRIFT_SAMPLE_AFTER_S
         )
-        self._clear(START_FAILED_BANNER_KEY, BannerKey.FOREIGN_RECORDING, BannerKey.SESSION_FILES)
+        self._clear(  # B1-04: the last session's warnings; finalise stays (that session is still in _incoming/)
+            START_FAILED_BANNER_KEY,
+            BannerKey.FOREIGN_RECORDING,
+            BannerKey.SESSION_FILES,
+            BannerKey.NO_CUES,
+            BannerKey.CLOCK,
+            BannerKey.SPLIT,
+            BannerKey.OBS_EXITED,
+        )
         journalled: list[LineAccepted] = []
         if held:
             for line in held:
@@ -1445,6 +1521,7 @@ class SessionActor:
         await self._finalise(s.manifest_path, armed.cfg)
         if self._pipeline is not None:
             self._pipeline.reset()
+        self._ready_line = None
         self._counts = Counts()
         self._set_state(AppState.ARMED)
 
@@ -1644,6 +1721,7 @@ class SessionActor:
         self._armed = _Armed(profile=profile, cfg=cfg)
         self._pipeline = TextPipeline(profile.filters)
         self._held = None
+        self._ready_line = None
         self._start_deadline = None
         self._counts = manifest.counts
         await self._mark_degraded(s, mid)
