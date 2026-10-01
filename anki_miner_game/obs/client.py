@@ -196,7 +196,7 @@ class ObsClient:
         try:
             return await self._open()
         except _AuthRefusedError:
-            raise ObsAuthError("OBS refused the websocket password") from None
+            raise ObsAuthError("OBS refused the WebSocket password") from None
 
     async def _open(self) -> "_Link":
         credentials = await self._run(self._credentials)

@@ -204,7 +204,7 @@ def get_version_succeeds(creds: ObsCredentials, timeout_s: float) -> bool:
                 client.authenticate()
             except OBSSDKError as exc:
                 if "authentication" in client.server_hello["d"]:
-                    raise ObsAuthError("OBS rejected the websocket password") from exc
+                    raise ObsAuthError("OBS rejected the WebSocket password") from exc
                 raise
             status = client.req("GetVersion")["requestStatus"]
         finally:
@@ -405,7 +405,7 @@ class LocalObsDiscovery:
         elif ws is not None:
             port = ws.port
         else:
-            where = self._ws_config_path() or "OBS's websocket config.json"
+            where = self._ws_config_path() or "OBS's WebSocket config.json"
             raise ObsConfigError(f"{where}: not found, and no OBS port override is set")
         password: str | None = None
         if override.password_override is not None:

@@ -390,6 +390,11 @@ def test_no_install_reads_as_none(tmp_path):
     assert make(tmp_path).read_ws_config() is None
 
 
+def test_credentials_without_an_install_name_the_websocket_config(tmp_path):
+    with pytest.raises(ObsConfigError, match="OBS's WebSocket config.json: not found"):
+        make(tmp_path).credentials(AppConfig())
+
+
 @pytest.mark.parametrize(
     "raw",
     [
@@ -1060,7 +1065,7 @@ async def test_the_probe_authenticates_with_the_password():
 async def test_the_probe_raises_when_obs_rejects_the_password(password):
     started = time.monotonic()
     async with MiniObs([100], password="s3cretPassw0rd12") as obs:
-        with pytest.raises(ObsAuthError):
+        with pytest.raises(ObsAuthError, match="OBS rejected the WebSocket password"):
             await probe(ObsCredentials("127.0.0.1", obs.port, password))
 
     assert obs.requests == []
