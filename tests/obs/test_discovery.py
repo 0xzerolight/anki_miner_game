@@ -298,17 +298,21 @@ def test_no_install_has_no_config_root(tmp_path):
 
 
 def test_config_root_follows_the_latest_check(tmp_path):
+    """A miss is never cached (B2-02); a hit is, until the next ``find_install``."""
     found: dict[str, str] = {}
     obs = LocalObsDiscovery(
         AppConfig, which=found.get, runner=FakeRunner(flatpak_installed), proc_root=tmp_path, platform="linux"
     )
+    flatpak_root = Path.home() / ".var" / "app" / "com.obsproject.Studio" / "config" / "obs-studio"
     assert obs.config_root() is None
 
     found["flatpak"] = "/usr/bin/flatpak"
-    assert obs.config_root() is None  # no new check yet
-    obs.find_install()
+    assert obs.config_root() == flatpak_root
 
-    assert obs.config_root() == Path.home() / ".var" / "app" / "com.obsproject.Studio" / "config" / "obs-studio"
+    del found["flatpak"]
+    assert obs.config_root() == flatpak_root
+    assert obs.find_install() is None
+    assert obs.config_root() is None
 
 
 # --- read_ws_config ----------------------------------------------------------------------------
@@ -731,6 +735,21 @@ def test_launch_reports_a_program_that_cannot_start(tmp_path):
 
     with pytest.raises(ObsConnectError):
         native_linux(tmp_path, runner=runner).launch()
+
+
+def test_an_install_made_after_a_miss_is_found_by_launch(tmp_path):
+    """B2-02: the wizard found no OBS, the user installed it and armed: ``launch`` must look again."""
+    found: dict[str, str] = {}
+    runner = FakeRunner()
+    obs = LocalObsDiscovery(
+        AppConfig, which=found.get, runner=runner, proc_root=fake_proc(tmp_path / "proc", []), platform="linux"
+    )
+    assert obs.find_install() is None
+
+    found["obs"] = "/usr/bin/obs"
+    obs.launch()
+
+    assert runner.spawned == [(("/usr/bin/obs", "--minimize-to-tray"), None)]
 
 
 # --- the default registry reader ---------------------------------------------------------------

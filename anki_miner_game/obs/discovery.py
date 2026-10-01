@@ -6,9 +6,10 @@
   OBS installer records in the registry, then the folder of Steam's OBS build from Steam's Uninstall
   entry (each in the 64-bit view, then the 32-bit view); Linux ``obs`` on ``PATH``, then the Flatpak
   ``com.obsproject.Studio``. Each call looks again (the wizard's re-check).
-- ``config_root``: the config root of the install the latest ``find_install`` found: Windows
-  ``%APPDATA%\\obs-studio``, native Linux ``$XDG_CONFIG_HOME/obs-studio`` (``~/.config/obs-studio``
-  when unset), Flatpak ``~/.var/app/com.obsproject.Studio/config/obs-studio``.
+- ``config_root``: the config root of the install the latest ``find_install`` found (looking again
+  while none was found): Windows ``%APPDATA%\\obs-studio``, native Linux
+  ``$XDG_CONFIG_HOME/obs-studio`` (``~/.config/obs-studio`` when unset), Flatpak
+  ``~/.var/app/com.obsproject.Studio/config/obs-studio``.
 - ``read_ws_config`` / ``credentials``: ``plugin_config/obs-websocket/config.json`` under that root,
   read at every call. A key that is missing or of the wrong JSON type takes obs-websocket's own
   default, as ``Config::Load`` does (``docs/m0/source-findings.md`` section 5).
@@ -269,13 +270,12 @@ class LocalObsDiscovery:
         self._now = now
         self._sleep = sleep
         self._install: ObsInstall | None = None
-        self._looked = False
 
     # --- install and config root -----------------------------------------------------------
 
     def find_install(self) -> ObsInstall | None:
         install = self._find_windows() if self._windows else self._find_linux()
-        self._install, self._looked = install, True
+        self._install = install
         if install is None:
             log.info("OBS not found")
         else:
@@ -309,11 +309,11 @@ class LocalObsDiscovery:
         return None
 
     def _found(self) -> ObsInstall | None:
-        """What the latest ``find_install`` found, looking once if none ran."""
-        return self._install if self._looked else self.find_install()
+        """What the latest ``find_install`` found; a miss is never kept, so each caller looks again (B2-02)."""
+        return self._install if self._install is not None else self.find_install()
 
     def config_root(self) -> Path | None:
-        """The config root of the install the latest ``find_install`` found (looking once if none ran)."""
+        """The config root of the install the latest ``find_install`` found (looking again while none was found)."""
         install = self._found()
         if install is None:
             return None
