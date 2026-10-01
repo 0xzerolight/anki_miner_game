@@ -13,7 +13,10 @@ is a rewrite from the manifest and no second subtitle file exists (spec 13.3). T
   ``done`` (the trimmed subtitle is written), ``failed`` (the worker failed, or anything else went
   wrong during the pass; the message says how) or ``unavailable`` (the add-on is not ready, so the
   pass never ran). Anything but ``done`` rewrites the subtitle from ``live_cues``: the live
-  subtitle stands (spec 13, 17). A subtitle that cannot be written makes the job ``failed``.
+  subtitle stands (spec 13, 17); a subtitle that cannot be written makes the job ``failed``. The
+  exception (D-08): a pass asked for on a session whose ``vad`` was ``done`` (a re-run) that does
+  not reach ``done`` leaves the trimmed subtitle alone and puts that ``done`` record back;
+  ``vad_finished`` still reports the outcome. A failed retry never makes a good result worse.
 - ``restore``: the subtitle from ``live_cues``, ``vad`` ``restored``; needs no add-on.
 
 A manifest write that Windows refuses because another handle has the file open is retried after
@@ -34,6 +37,7 @@ skipped with a log line and no ``Presenter`` call; so is a job that ``close`` dr
 """
 
 import concurrent.futures
+import functools
 import itertools
 import json
 import logging
@@ -74,9 +78,9 @@ _NO_WINDOW: Final[int] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 """Keeps a console window from flashing up on Windows; 0 elsewhere."""
 
 _UNAVAILABLE: Final = {
-    AddonStatus.MISSING: "The VAD add-on is not installed.",
-    AddonStatus.BROKEN: "The VAD add-on is damaged or out of date; reinstall it.",
-    AddonStatus.INSTALLING: "The VAD add-on was still installing; re-run VAD once it is ready.",
+    AddonStatus.MISSING: "The voice-trimming add-on is not installed.",
+    AddonStatus.BROKEN: "The voice-trimming add-on is damaged or out of date; repair it in Settings.",
+    AddonStatus.INSTALLING: "The voice-trimming add-on was still installing; choose Trim again once it is ready.",
 }
 
 
@@ -172,18 +176,21 @@ class VadTrimmer:
             if self._closed:
                 log.info("VAD pass for %s not queued: shutting down", manifest_path)
                 return
+        kept: VadRecord | None = None
         try:
             with self._manifest_lock:
                 session = self._eligible(manifest_path)
                 if session is None:
                     return
+                vad = session.manifest.vad
+                kept = vad if vad is not None and vad.state is VadState.DONE else None
                 write_manifest_atomic(manifest_path, replace(session.manifest, vad=VadRecord(state=VadState.QUEUED)))
         except StoreWriteError as exc:  # the job thread writes the manifest again, and waits out a lock there
             log.warning("VAD pass for %s queued without the queued marker: %s", manifest_path, exc)
         except StoreError as exc:
             log.warning("VAD pass for %s not queued: %s", manifest_path, exc)
             return
-        self._submit(self._pass, manifest_path)
+        self._submit(functools.partial(self._pass, kept=kept), manifest_path)
 
     def _submit(self, job: Callable[[Path], None], manifest_path: Path) -> None:
         with self._lock:
@@ -206,20 +213,21 @@ class VadTrimmer:
         except Exception:
             log.exception("VAD job for %s ended unexpectedly", manifest_path)
 
-    def _pass(self, manifest_path: Path) -> None:
+    def _pass(self, manifest_path: Path, kept: VadRecord | None = None) -> None:
+        """``kept``: the ``done`` record the session had when the pass was asked for (D-08)."""
         session = self._eligible_or_log(manifest_path)
         if session is None:
             return
         status = self._addon.status()
         if status is not AddonStatus.READY:
             record = VadRecord(state=VadState.UNAVAILABLE, message=_UNAVAILABLE[status])
-            self._settle(manifest_path, session, record, None)
+            self._settle(manifest_path, session, record, None, kept=kept)
             return
         try:
             self._update(manifest_path, lambda m: replace(m, state=ManifestState.VAD_RUNNING))
         except StoreWriteError as exc:
             message = f"The session file could not be written: {exc}"
-            self._settle(manifest_path, session, VadRecord(VadState.FAILED, message=message), None)
+            self._settle(manifest_path, session, VadRecord(VadState.FAILED, message=message), None, kept=kept)
             return
         except (FileNotFoundError, StoreError) as exc:
             log.warning("VAD job for %s skipped: %s", manifest_path, exc)
@@ -238,41 +246,61 @@ class VadTrimmer:
             return
         except _PassFailedError as exc:
             log.warning("VAD pass for %s failed: %s", manifest_path, exc)
-            self._settle(manifest_path, session, VadRecord(VadState.FAILED, model=MODEL_NAME, message=str(exc)), None)
+            self._settle(
+                manifest_path, session, VadRecord(VadState.FAILED, model=MODEL_NAME, message=str(exc)), None, kept=kept
+            )
             return
         except Exception as exc:  # anything else must still end the job, never leave it vad_running
             log.exception("VAD pass for %s failed unexpectedly", manifest_path)
-            message = f"The VAD pass failed: {exc}"
-            self._settle(manifest_path, session, VadRecord(VadState.FAILED, model=MODEL_NAME, message=message), None)
+            message = f"Voice trimming failed: {exc}"
+            self._settle(
+                manifest_path, session, VadRecord(VadState.FAILED, model=MODEL_NAME, message=message), None, kept=kept
+            )
             return
         record = VadRecord(VadState.DONE, model=MODEL_NAME, trimmed=trimmed, no_speech=no_speech)
-        self._settle(manifest_path, session, record, cues)
+        self._settle(manifest_path, session, record, cues, kept=kept)
 
     def _restore(self, manifest_path: Path) -> None:
         session = self._eligible_or_log(manifest_path)
         if session is not None:
             self._settle(manifest_path, session, VadRecord(state=VadState.RESTORED), None)
 
-    def _settle(self, manifest_path: Path, session: _Session, record: VadRecord, cues: Sequence[Cue] | None) -> None:
+    def _settle(
+        self,
+        manifest_path: Path,
+        session: _Session,
+        record: VadRecord,
+        cues: Sequence[Cue] | None,
+        *,
+        kept: VadRecord | None = None,
+    ) -> None:
         """Write the subtitle (``cues``, or the live cues), then ``vad`` and ``ready``; tell the presenter.
 
-        The presenter hears ``record.state`` even when the manifest cannot be written (logged): the job
-        has ended either way.
+        With ``kept`` (a re-run of a done session) a pass that does not reach ``done`` writes no
+        subtitle and puts ``kept`` back (D-08). The presenter hears the outcome even when the
+        manifest cannot be written (logged): the job has ended either way.
         """
-        try:
-            write_srt_atomic(
-                session.subtitle, cues if cues is not None else [c.to_cue() for c in session.manifest.live_cues]
-            )
-        except (OSError, ValueError) as exc:  # ValueError: live cues the writer refuses (a hand-edited manifest)
-            log.warning("VAD job for %s could not write %s: %s", manifest_path, session.subtitle, exc)
-            record = VadRecord(VadState.FAILED, model=record.model, message=f"The subtitle could not be written: {exc}")
+        if kept is None or record.state is VadState.DONE:
+            try:
+                write_srt_atomic(
+                    session.subtitle, cues if cues is not None else [c.to_cue() for c in session.manifest.live_cues]
+                )
+            except (OSError, ValueError) as exc:  # ValueError: live cues the writer refuses (a hand-edited manifest)
+                log.warning("VAD job for %s could not write %s: %s", manifest_path, session.subtitle, exc)
+                record = VadRecord(
+                    VadState.FAILED, model=record.model, message=f"The subtitle could not be written: {exc}"
+                )
+        outcome = record.state
+        if kept is not None and outcome is not VadState.DONE:
+            log.info("VAD re-run of %s ended %s; its trimmed subtitle stays", manifest_path, outcome)
+            record = kept
         try:
             self._update(manifest_path, lambda m: replace(m, state=ManifestState.READY, vad=record))
         except (FileNotFoundError, StoreError) as exc:
-            log.warning("VAD job for %s (%s) could not update the manifest: %s", manifest_path, record.state, exc)
+            log.warning("VAD job for %s (%s) could not update the manifest: %s", manifest_path, outcome, exc)
         else:
-            log.info("VAD job for %s: %s", manifest_path, record.state)
-        self._presenter.vad_finished(manifest_path, record.state)
+            log.info("VAD job for %s: %s", manifest_path, outcome)
+        self._presenter.vad_finished(manifest_path, outcome)
 
     def _update(self, manifest_path: Path, change: Callable[[SessionManifest], SessionManifest]) -> None:
         """Apply ``change`` to the manifest on disk.
@@ -343,7 +371,7 @@ class VadTrimmer:
                     env=child_environ(),
                 )
             except OSError as exc:
-                raise _PassFailedError(f"The VAD worker could not start: {exc}") from exc
+                raise _PassFailedError(f"The voice-trimming worker could not start: {exc}") from exc
             with self._lock:
                 self._process = process
                 if self._closed:
@@ -364,13 +392,15 @@ class VadTrimmer:
             if closed:
                 raise _CancelledError
             if error is not None:
-                raise _PassFailedError(f"The VAD worker failed: {error}")
+                raise _PassFailedError(f"The voice-trimming worker failed: {error}")
             if code != 0:
                 stderr.seek(0)
                 detail = stderr.read().decode("utf-8", "replace").replace("\r\n", "\n").strip()[-600:]
-                raise _PassFailedError(f"The VAD worker exited with code {code}" + (f": {detail}" if detail else ""))
+                raise _PassFailedError(
+                    f"The voice-trimming worker exited with code {code}" + (f": {detail}" if detail else "")
+                )
             if not done:
-                raise _PassFailedError("The VAD worker stopped before finishing")
+                raise _PassFailedError("The voice-trimming worker stopped before finishing")
             return regions
 
     def _read(self, stdout: IO[bytes], manifest_path: Path) -> tuple[list[Region], bool, str | None]:
@@ -407,7 +437,9 @@ def _parse(raw: bytes) -> dict[str, Any]:
 def _region(message: dict[str, Any], raw: bytes) -> Region:
     start, end = message.get("start_ms"), message.get("end_ms")
     if not (_is_int(start) and _is_int(end) and 0 <= start < end):
-        raise _PassFailedError(f"The VAD worker sent an invalid region: {raw.decode('ascii', 'replace').strip()}")
+        raise _PassFailedError(
+            f"The voice-trimming worker sent an invalid region: {raw.decode('ascii', 'replace').strip()}"
+        )
     return Region(start_ms=start, end_ms=end)
 
 

@@ -10,10 +10,15 @@ does, in this order:
   stderr, so it keeps the log pipe open after the fake itself has gone.
 - ``"frames"``: texts sent to every client of a websocket server on ``127.0.0.1:<-wp>``, each client
   getting all of them on connect; the connection then stays open.
+- ``"once"``: owocr's own order (B3-01): bind the websocket server on ``127.0.0.1:<-wp>``
+  ``"serve_after_s"`` seconds after start, then ``"once_after_s"`` seconds later send each text
+  once, to the clients connected at that moment, and never again (no replay on connect). Off
+  unless ``"once"`` is given.
 - ``"log"``: lines written to stderr; ``"log_file"``: a file whose lines follow them.
 - ``"exit"``: exit with this code (absent: run until killed).
 """
 
+import contextlib
 import json
 import os
 import subprocess
@@ -51,6 +56,40 @@ def _serve(port: int, frames: list[str]) -> None:
     threading.Thread(target=server.serve_forever, daemon=True).start()
 
 
+def _serve_once(port: int, texts: list[str], serve_after_s: float, once_after_s: float) -> None:
+    from websockets.exceptions import ConnectionClosed
+    from websockets.sync.server import ServerConnection, serve
+
+    clients: set[ServerConnection] = set()
+    lock = threading.Lock()
+
+    def handler(ws: ServerConnection) -> None:
+        with lock:
+            clients.add(ws)
+        try:
+            for _ in ws:
+                pass
+        except ConnectionClosed:
+            pass
+        finally:
+            with lock:
+                clients.discard(ws)
+
+    def run() -> None:
+        time.sleep(serve_after_s)
+        server = serve(handler, "127.0.0.1", port)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        time.sleep(once_after_s)
+        with lock:
+            connected = list(clients)
+        for ws in connected:
+            for text in texts:
+                with contextlib.suppress(ConnectionClosed):
+                    ws.send(text)
+
+    threading.Thread(target=run, daemon=True).start()
+
+
 def main() -> None:
     plan = json.loads(os.environ.get("FAKE_OWOCR_PLAN", "{}"))
     argv = sys.argv[1:]
@@ -68,6 +107,8 @@ def main() -> None:
         os.replace(tmp, record)
     if "frames" in plan:
         _serve(_port(argv), plan["frames"])
+    if "once" in plan:
+        _serve_once(_port(argv), plan["once"], plan.get("serve_after_s", 0.0), plan.get("once_after_s", 0.0))
     lines = list(plan.get("log", []))
     if "log_file" in plan:
         lines += Path(plan["log_file"]).read_text(encoding="utf-8").splitlines()

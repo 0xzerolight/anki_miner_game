@@ -11,8 +11,11 @@ from pathlib import Path
 
 import pytest
 from websockets.asyncio.client import connect
+from websockets.exceptions import InvalidStatus
+from websockets.typing import Origin
 
 from anki_miner_game.feed import FEED_HOST, FeedPortInUseError, FeedServer, http_server
+from anki_miner_game.gui.colours import GREY
 
 PAGE = Path(__file__).resolve().parents[2] / "anki_miner_game" / "feed" / "page.html"
 
@@ -160,3 +163,50 @@ def test_page_features() -> None:
     assert "new WebSocket(" in html
     assert "textContent" in html and "innerHTML" not in html  # lines never parsed as markup
     assert "__FEED_WS_PORT__" in html  # placeholder the HTTP server fills in
+
+
+# The Origin allow-list (D-07, master Review Focus 4) ------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "https://evil.example",
+        "null",  # any site gets this from a sandboxed iframe
+        "file://",
+        "http://localhost.evil.example",
+        "http://127.0.0.1.evil.example:6679",
+        "https://renji-xd.github.io.evil.example",
+        "http://renji-xd.github.io",  # http, not https
+    ],
+)
+async def test_a_page_from_another_origin_is_refused_with_403(feed: FeedServer, origin: str) -> None:
+    with pytest.raises(InvalidStatus) as refused:
+        async with connect(f"ws://{FEED_HOST}:{feed.ws_port}", origin=Origin(origin)):
+            pass
+    assert refused.value.response.status_code == 403
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        None,  # apps and scripts
+        "http://127.0.0.1",
+        "the app's page",  # http://127.0.0.1:<http_port>
+        "http://localhost:6679",
+        "https://renji-xd.github.io",  # the hosted texthooker-ui (spec 15)
+    ],
+)
+async def test_the_apps_page_local_pages_and_texthooker_ui_receive_lines(feed: FeedServer, origin: str | None) -> None:
+    if origin == "the app's page":
+        origin = f"http://127.0.0.1:{feed.http_port}"
+    async with connect(f"ws://{FEED_HOST}:{feed.ws_port}", origin=None if origin is None else Origin(origin)) as client:
+        await _wait_for_clients(feed, 1)
+        feed.broadcast("こんにちは")
+        assert await asyncio.wait_for(client.recv(), timeout=5) == "こんにちは"
+
+
+def test_the_disconnected_dot_is_the_apps_grey() -> None:
+    """UJ-04: the page's off light matches the window's (``gui/colours.py``), not an error red."""
+    html = PAGE.read_text(encoding="utf-8")
+    assert f"--off: {GREY};" in html

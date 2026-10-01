@@ -653,7 +653,7 @@ class OcrAddon:
                 lambda check: self._ensure_uv(self._home, progress=lambda done, size: check())
             )
             touched = True
-            self._remove_install()
+            await asyncio.to_thread(self._remove_install)  # thousands of files: never on the I/O loop
             self._root.mkdir(parents=True, exist_ok=True)
             overrides = None
             if self._platform != "win32":
@@ -665,7 +665,7 @@ class OcrAddon:
                 raise OcrError("owocr was installed but its files do not check out; install it again.")
         except BaseException as exc:
             if touched:
-                self._remove_install()
+                await asyncio.to_thread(self._remove_install)
             if isinstance(exc, bootstrap.BootstrapError | OSError):
                 raise OcrError(f"The OCR add-on could not be installed: {exc}") from exc
             raise

@@ -1,14 +1,15 @@
 """Text source for OCR mode: owocr's websocket, with owocr run and restarted by a supervisor (spec 8.1, 14).
 
 ``start`` (at arm) launches owocr through the OCR add-on on a free port and listens to it with a
-``WebsocketSource`` on loopback (owocr binds ``0.0.0.0``, spec 3.4); ``stop`` (at disarm) kills
-owocr's whole process tree. When owocr exits on its own, the tree's leftovers are killed and owocr is
-started again after 1, 2 and 5 s; a fourth exit in a row ends OCR for this arm with a banner, and the
-recording goes on (spec 17). An exit on an error that the same command line would hit again (a bad
-area, no engine; ``LogKind.CONFIG_ERROR``) gets the banner at once, as do an add-on that is not
-installed, a Wayland session and a profile with no OCR area. A game window that is not open
-(``LogKind.WINDOW_MISSING``) is restarted like any other exit, and the banner then names it. A run
-that lasted ``STABLE_RUN_S`` counts as healthy, so only exits in a row add up.
+``WebsocketSource`` on loopback (owocr binds ``0.0.0.0``, spec 3.4), retrying its connect every
+0.25 s (``OCR_CONNECT_BACKOFF_S``); ``stop`` (at disarm) kills owocr's whole process tree. When
+owocr exits on its own, the tree's leftovers are killed and owocr is started again after 1, 2 and
+5 s; a fourth exit in a row ends OCR for this arm with a banner, and the recording goes on (spec
+17). An exit on an error that the same command line would hit again (a bad area, no engine;
+``LogKind.CONFIG_ERROR``) gets the banner at once, as do an add-on that is not installed, a Wayland
+session and a profile with no OCR area. A game window that is not open (``LogKind.WINDOW_MISSING``)
+is restarted like any other exit, and the banner then names it. A run that lasted ``STABLE_RUN_S``
+counts as healthy, so only exits in a row add up.
 
 An owocr that dropped its OCR area because the game window changed size, as at a minimise
 (``LogKind.AREA_DISCARDED``), reads the whole window from then on: its frames are dropped, and once
@@ -42,6 +43,10 @@ BACKOFF_S: Final = (1.0, 2.0, 5.0)
 """Waits before the first, second and third restart; there is no fourth (spec 14: three attempts)."""
 STABLE_RUN_S: Final = 60.0
 """A run this long resets the count of exits in a row."""
+OCR_CONNECT_BACKOFF_S: Final = (0.25,)
+"""Waits between connects to owocr's websocket (B3-01). owocr is a local child the supervisor just
+started, and it sends a line only to the clients connected at that moment, never again: a slower
+retry loses the text on screen when owocr comes up. Hookers keep spec 8.1's schedule."""
 
 BannerListener = Callable[[BannerRaised | BannerCleared], None]
 
@@ -177,7 +182,7 @@ class OcrSource:
             if not proc.area_lost:  # whole-window text: scene text and name plates, not a line
                 sink(raw, t_mono, source_id)
 
-        ws = WebsocketSource(self._id, f"127.0.0.1:{port}", now=self._now)
+        ws = WebsocketSource(self._id, f"127.0.0.1:{port}", now=self._now, backoff=OCR_CONNECT_BACKOFF_S)
         ws.set_status_listener(self._forward_status)
         self._ws = ws
         exited = asyncio.ensure_future(proc.wait())

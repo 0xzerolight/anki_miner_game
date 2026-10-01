@@ -517,3 +517,17 @@ async def test_owocr_that_hangs_on_a_minimised_window_is_replaced_from_its_log(m
     assert launcher.settings[:2] == [WINDOW_SETTINGS, dataclasses.replace(WINDOW_SETTINGS, rects=None)]
     assert sleep.delays == []
     assert banners.raised == []
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="a refused loopback connect takes 1-2 s on Windows; P8 checks the gap on the VM"
+)
+async def test_a_line_owocr_sends_soon_after_its_server_is_up_is_not_lost(make_source, tmp_path):
+    """B3-01: owocr sends a line only to the clients connected at that moment, never again. With the
+    hookers' 1, 2, 5 s schedule the source was still waiting (attempts at 0, 1, 3 s) when owocr, up
+    at about 1.4 s, sent the line on screen at about 2.2 s."""
+    addon = _installed_addon(tmp_path, {"once": ["岡部だ"], "serve_after_s": 1.2, "once_after_s": 0.8})
+    source = make_source(addon, now=lambda: 7.5, sleep=asyncio.sleep)
+    sink = Sink()
+    source.start(sink)
+    assert await sink.next() == ("岡部だ", 7.5, "ocr")
