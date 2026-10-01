@@ -1,16 +1,14 @@
 """The main window (spec 16): status row, game row, Arm/Start with elapsed time and cue count, live
-list, recent sessions, banners, the hand-off text; requests for the dialogs and the wizard; close to tray."""
+list, banners; requests for the dialogs and the wizard; close to tray. The recent sessions and the
+hand-off are in ``test_main_window_sessions.py`` (audit 2026-10-01 plan, section 4.10)."""
 
 from collections.abc import Callable
-from pathlib import Path
 
 import pytest
-from PyQt6.QtCore import QUrl
 
 from anki_miner_game.gui.main_window import MainWindow
 from anki_miner_game.gui.presenters.qt_presenter import QtPresenter
 from anki_miner_game.models.lines import GameLine
-from anki_miner_game.models.manifest import ManifestState, VadRecord, VadState
 from anki_miner_game.models.messages import (
     OBS_SOURCE_ID,
     AppState,
@@ -22,7 +20,6 @@ from anki_miner_game.models.messages import (
     SourceStatus,
     UserCommand,
 )
-from tests.gui.session_fakes import TITLE, Jobs, manifest, place
 
 GAMES = [("steins-gate", "Steins;Gate"), ("zero-escape", "Zero Escape")]
 LINE = GameLine(text="はい", raw="はい", t_mono=1.0, source_id="textractor")
@@ -261,54 +258,3 @@ def test_closing_while_idle_quits_even_with_a_tray(rig):
     window.show()
     window.close()
     assert quits == [1]
-
-
-# Recent sessions and the hand-off ----------------------------------------------------------------
-
-
-def session_window(qtbot, root: Path, jobs: Jobs, opened: list[QUrl]) -> tuple[MainWindow, QtPresenter]:
-    presenter = QtPresenter()
-    window = MainWindow(
-        Control(),
-        presenter.signals,
-        GAMES,
-        on_quit=lambda: None,
-        output_root=lambda: root,
-        vad_jobs=jobs,
-        open_url=opened.append,
-    )
-    qtbot.addWidget(window)
-    return window, presenter
-
-
-def test_recent_sessions_load_at_launch_and_interrupted_passes_are_handed_on(qtbot, tmp_path):
-    root, jobs = tmp_path / "out", Jobs()
-    interrupted = place(root, manifest(1, state=ManifestState.VAD_RUNNING, vad=VadRecord(VadState.QUEUED)))
-    place(root, manifest(2, vad=VadRecord(VadState.DONE), started_at="2026-10-03T18:04:11Z"), age_s=5.0)
-    window, _ = session_window(qtbot, root, jobs, [])
-    assert [cells[0] for cells in window.recent.cells()] == [f"{TITLE} - 02", f"{TITLE} - 01"]
-    assert jobs.calls == [("rerun", interrupted)]
-
-
-def test_a_finished_session_is_listed_and_its_hand_off_shown(qtbot, tmp_path):
-    root, opened = tmp_path / "out", []
-    window, presenter = session_window(qtbot, root, Jobs(), opened)
-    assert window.handoff.isHidden()
-    path = place(root, manifest(3))
-    presenter.session_finished(path)
-    qtbot.waitUntil(lambda: not window.handoff.isHidden())
-    assert window.recent.cells()[0][0] == f"{TITLE} - 03"
-    assert window.handoff.label.text().startswith(f'Saved "{TITLE} - 03".')
-    window.handoff.open_button.click()
-    assert opened == [QUrl.fromLocalFile(str(path.parent))]
-
-
-def test_vad_progress_and_outcome_reach_the_session_row(qtbot, tmp_path):
-    root = tmp_path / "out"
-    path = place(root, manifest(3))
-    window, presenter = session_window(qtbot, root, Jobs(), [])
-    presenter.vad_progress(path, 1, 4)
-    qtbot.waitUntil(lambda: window.recent.cells()[0][3] == "VAD 25%")
-    path.write_text(path.read_text(encoding="utf-8").replace('"vad": null', '"vad": {"state": "done"}'), "utf-8")
-    presenter.vad_finished(path, VadState.DONE)
-    qtbot.waitUntil(lambda: window.recent.cells()[0][3] == "VAD done")
