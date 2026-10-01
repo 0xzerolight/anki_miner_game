@@ -94,16 +94,18 @@ from anki_miner_game.models.messages import (
 from anki_miner_game.models.obs import (
     ObsAuthError,
     ObsConfigError,
-    ObsConnectError,
     ObsError,
     ObsEventName,
     ObsRequestError,
+    ObsServerOffError,
+    ObsStartStage,
     ObsUnsupportedError,
     OutputState,
     ProvisionResult,
 )
 from anki_miner_game.models.pipeline import DROP_COUNTER, Accepted, Dropped
 from anki_miner_game.models.profile import GameProfile, validate
+from anki_miner_game.obs.startup import LocalObsStarter
 from anki_miner_game.session.clock import EventClock, OutputDurationClock
 from anki_miner_game.session.finalise import FinaliseError, FinaliseResult, finalise
 from anki_miner_game.session.journal import (
@@ -163,6 +165,10 @@ SWITCH_TIMEOUT_S: Final = 15.0
 """Spec 6.2 step 3: one profile or scene collection switch, request to ``...Changed`` event."""
 OBS_LAUNCH_TIMEOUT_S: Final = 30.0
 """Spec 17: Arm launches OBS and waits up to 30 s for it to answer."""
+OBS_SERVER_OFF_TEXT: Final = "OBS's WebSocket server is off. Close OBS and press Set up OBS: the app turns it on."
+"""Banner (key ``obs``) when OBS runs with its WebSocket server off; the window puts Set up OBS… on it (UJ-10)."""
+OBS_AUTH_TEXT: Final = "OBS rejected the app's password. Press Set up OBS to enter it."
+"""Banner (key ``obs``) when OBS refuses the password (UJ-10)."""
 FREE_SPACE_WARN_BYTES: Final = 5 * 10**9
 """Spec 17: under 5 GB free at Arm, arm anyway with a warning."""
 REANCHOR_S: Final = 10.0
@@ -398,6 +404,8 @@ class SessionActor:
         self._loop = loop
         self._gateway = gateway
         self._discovery = discovery
+        self._starter = LocalObsStarter(discovery, gateway, timeout_s=OBS_LAUNCH_TIMEOUT_S)
+        """The one start-OBS sequence the wizard and the window picker use too (D-03)."""
         self._provisioner = provisioner
         self._recorder = recorder
         self._finaliser = finaliser
@@ -795,7 +803,8 @@ class SessionActor:
                 self._holding_obs = False
 
     async def _ensure_connected(self, *, banner_on_failure: bool = True) -> bool:
-        """Connect, launching OBS first when it is not running (spec 11.1, 17); a banner on failure.
+        """Connect, starting OBS first when it is not running (spec 11.1, 17; ``LocalObsStarter``, D-03);
+        a banner on failure.
 
         ``banner_on_failure=False`` (the idle restore retry, S5-2): a failure keeps whatever banner
         is already shown instead of replacing it with this attempt's own, usually less specific, text.
@@ -803,16 +812,17 @@ class SessionActor:
         if self._connected:
             return True
         self._obs_status(SourceStatus.CONNECTING)
-        running = await asyncio.to_thread(self._discovery.is_running)
+        launched = False
+
+        def heard(stage: ObsStartStage) -> None:
+            nonlocal launched
+            launched = launched or stage is not ObsStartStage.CONNECTING
+
         try:
-            if not running:
-                await asyncio.to_thread(self._discovery.ensure_server_enabled)
-                await asyncio.to_thread(self._discovery.launch)
-                if not await self._discovery.wait_ready(OBS_LAUNCH_TIMEOUT_S):
-                    raise ObsConnectError(
-                        f"OBS did not answer within {OBS_LAUNCH_TIMEOUT_S:g} s; an OBS dialog may be waiting"
-                    )
-            info = await self._gateway.connect()
+            info = await self._starter.start(heard)
+        except ObsServerOffError:
+            self._obs_failed(OBS_SERVER_OFF_TEXT, banner=banner_on_failure)
+            return False
         except ObsUnsupportedError as exc:
             self._obs_failed(
                 f"OBS {exc.obs_version} lacks {', '.join(exc.missing)}; update OBS to version 30.0 or newer.",
@@ -820,18 +830,15 @@ class SessionActor:
             )
             return False
         except ObsAuthError:
-            self._obs_failed(
-                "OBS rejected the websocket password; enter it in the app's settings.", banner=banner_on_failure
-            )
+            self._obs_failed(OBS_AUTH_TEXT, banner=banner_on_failure)
             return False
         except ObsConfigError as exc:
             self._obs_failed(
-                f"OBS's websocket settings cannot be read ({exc}); run the setup wizard again.",
-                banner=banner_on_failure,
+                f"OBS's WebSocket settings cannot be read ({exc}); press Set up OBS.", banner=banner_on_failure
             )
             return False
         except ObsError as exc:
-            text = await self._connect_failure_text(exc, was_running=running)
+            text = await self._connect_failure_text(exc, was_running=not launched)
             self._obs_failed(text, banner=banner_on_failure)
             return False
         self._obs_versions = (info.obs_version, info.websocket_version)
@@ -842,8 +849,8 @@ class SessionActor:
 
     async def _connect_failure_text(self, exc: ObsError, *, was_running: bool) -> str:
         """S5-3: OBS was already running (this attempt never had to launch it) and refused the
-        connection outright. Point at the websocket server being off, reusing the wizard's own check
-        (``ObsSetup._start_obs``) and instructions; otherwise a short Safe-Mode/dialog hint.
+        connection outright. Point at the WebSocket server being off, which Set up OBS turns on once
+        OBS is closed; otherwise a short Safe-Mode/dialog hint.
         """
         if not was_running:
             return f"Cannot connect to OBS: {exc}"
@@ -852,11 +859,7 @@ class SessionActor:
         except ObsConfigError:
             ws = None
         if ws is None or not ws.server_enabled:
-            return (
-                "Cannot connect to OBS: OBS's websocket server is off. In OBS, tick Tools -> "
-                "WebSocket Server Settings -> Enable WebSocket server and press OK, then arm again. "
-                "Or close OBS and use File -> Setup wizard… -> OBS -> Fix: the app turns it on."
-            )
+            return OBS_SERVER_OFF_TEXT
         return f"Cannot connect to OBS: {exc} (OBS may be in Safe Mode, or showing a dialog in its window)"
 
     def _obs_failed(self, text: str, *, banner: bool = True) -> None:

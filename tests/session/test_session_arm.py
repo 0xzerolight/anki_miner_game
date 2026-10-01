@@ -21,6 +21,7 @@ from anki_miner_game.models.messages import (
 from anki_miner_game.models.obs import (
     REQUIRED_REQUESTS,
     ObsAuthError,
+    ObsConfigError,
     ObsConnectError,
     ObsError,
     ObsEventName,
@@ -31,7 +32,7 @@ from anki_miner_game.models.obs import (
 from anki_miner_game.obs.provision import ObsProvisioner
 from anki_miner_game.session import session as session_mod
 from anki_miner_game.session.restore import ObsRestore, load_restore, restore_path, save_restore
-from anki_miner_game.session.session import BannerKey
+from anki_miner_game.session.session import OBS_AUTH_TEXT, OBS_SERVER_OFF_TEXT, BannerKey
 from tests.gui.obs_listing_fake import ListingObs
 from tests.obs.fake_obs import LINUX_X11_KINDS
 from tests.session.actor_harness import SLUG, T0, FakeSource, Harness, profile
@@ -224,9 +225,8 @@ async def test_the_idle_restore_retry_shows_its_failure_when_no_obs_banner_is_up
     assert "Cannot connect to OBS" in h.banners()[BannerKey.OBS]
 
 
-async def test_arm_with_the_server_off_points_at_the_wizards_fix(rig: Harness):
-    """S5-3: OBS runs with its websocket server off; Arm's banner gives the wizard's own instructions
-    and points at File -> Setup wizard… -> OBS -> Fix, instead of only the raw connect error."""
+async def test_arm_with_the_server_off_says_how_set_up_obs_turns_it_on(rig: Harness):
+    """S5-3, UJ-10: OBS runs with its WebSocket server off; the banner names Set up OBS (no menu path)."""
     rig.discovery.running = True
     rig.discovery.ws_config = WsConfig(server_enabled=False, port=4455, password=None, auth_required=False)
     rig.gateway.connect_error = ObsConnectError(
@@ -234,9 +234,20 @@ async def test_arm_with_the_server_off_points_at_the_wizards_fix(rig: Harness):
     )
     await rig.start()
     await rig.arm()
-    text = rig.banners()[BannerKey.OBS]
-    assert "websocket server is off" in text
-    assert "Setup wizard" in text and "Fix" in text
+    assert rig.banners()[BannerKey.OBS] == OBS_SERVER_OFF_TEXT
+    assert OBS_SERVER_OFF_TEXT == "OBS's WebSocket server is off. Close OBS and press Set up OBS: the app turns it on."
+    assert rig.actor.state is AppState.IDLE
+
+
+async def test_obs_started_meanwhile_with_its_server_off_is_the_server_off_banner(rig: Harness):
+    """D-03: the shared starter cannot turn the server on once OBS runs (``ObsServerOffError``)."""
+    rig.discovery.running = False
+    await rig.start()  # the launch's own look: not running
+    rig.discovery.answers = [False, True]  # not running, then running once the enable failed
+    rig.discovery.ensure_server_enabled = lambda: False  # type: ignore[method-assign]
+    await rig.arm()
+    assert rig.banners()[BannerKey.OBS] == OBS_SERVER_OFF_TEXT
+    assert rig.discovery.launches == 0
     assert rig.actor.state is AppState.IDLE
 
 
@@ -264,12 +275,22 @@ async def test_missing_request_names_the_request_and_the_version(rig: Harness):
     assert rig.actor.state is AppState.IDLE
 
 
-async def test_authentication_failure_asks_for_the_password(rig: Harness):
+async def test_authentication_failure_points_at_set_up_obs(rig: Harness):
     rig.gateway.connect_error = ObsAuthError("authentication failed")
     await rig.start()
     await rig.arm()
-    assert "password" in rig.banners()[BannerKey.OBS]
+    assert rig.banners()[BannerKey.OBS] == OBS_AUTH_TEXT
+    assert OBS_AUTH_TEXT == "OBS rejected the app's password. Press Set up OBS to enter it."
     assert SourceStatusChanged(OBS_SOURCE_ID, SourceStatus.DISCONNECTED) in rig.events
+
+
+async def test_unreadable_websocket_settings_point_at_set_up_obs(rig: Harness):
+    rig.gateway.connect_error = ObsConfigError("Expecting value: line 1 column 1")
+    await rig.start()
+    await rig.arm()
+    assert rig.banners()[BannerKey.OBS] == (
+        "OBS's WebSocket settings cannot be read (Expecting value: line 1 column 1); press Set up OBS."
+    )
 
 
 @pytest.mark.parametrize(
