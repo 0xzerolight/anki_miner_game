@@ -116,8 +116,10 @@ def test_the_window_shows_the_enabled_sources_and_the_sessions_in_the_output_fol
     )
     place(rig.output_root, manifest(3))
     app = rig.start()
-    assert app.window.status_row.names() == ["OBS", "Textractor"]
+    assert app.window.status_row.names() == []  # no lights while idle (UJ-04)
     assert [cells[0] for cells in app.window.recent.cells()] == [f"{SESSION_TITLE} - 03"]
+    rig.arm()
+    rig.wait(lambda: app.window.status_row.names() == ["OBS", "Game text: Textractor"])
 
 
 # Launch duties (spec 6.2, 6.3, 10.3, 17 "Unclean previous exit") ----------------------------------

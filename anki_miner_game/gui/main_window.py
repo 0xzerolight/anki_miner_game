@@ -103,6 +103,7 @@ class MainWindow(QMainWindow):
         self._build_menu()
 
         self.status_row = StatusRow(text_sources)
+        self.status_row.set_shown(False)
         self.game = QComboBox()
         self.new_game_button = QPushButton("New game…")
         self.new_game_button.clicked.connect(lambda _checked=False: self.new_game_requested.emit())
@@ -237,7 +238,8 @@ class MainWindow(QMainWindow):
             self._recording_since = None
             self._timer.stop()
         if state is AppState.IDLE:
-            self.status_row.clear_armed_only()
+            self.status_row.clear_sources()
+        self.status_row.set_shown(state is not AppState.IDLE)
         self._state = state
         if slug is not None and (index := self.game.findData(slug)) >= 0:
             self.game.setCurrentIndex(index)

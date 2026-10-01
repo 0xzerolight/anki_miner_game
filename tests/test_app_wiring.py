@@ -28,7 +28,7 @@ from anki_miner_game.session.manifest import load_manifest
 from anki_miner_game.text.sources.clipboard_source import CLIPBOARD_SOURCE_ID, ClipboardSource
 from anki_miner_game.text.sources.ocr_source import OCR_SOURCE_ID
 from anki_miner_game.text.sources.websocket_source import WebsocketSource
-from tests.app_rig import PROFILE, SLUG, TITLE, WAIT_MS, Rig
+from tests.app_rig import PROFILE, SLUG, TITLE, WAIT_MS, Rig, Source
 from tests.gui.session_fakes import manifest, place
 from tests.session.actor_harness import T0
 
@@ -109,7 +109,7 @@ def test_an_armed_game_that_takes_the_clipboard_listens_to_it(rig):
     app = rig.start()
     rig.arm()
     rig.wait(lambda: ("source_status", (CLIPBOARD_SOURCE_ID, SourceStatus.CONNECTED)) in rig.events)
-    rig.wait(lambda: "Clipboard" in app.window.status_row.names())
+    rig.wait(lambda: "Game text: Clipboard" in app.window.status_row.names())
 
 
 # VAD jobs (spec 13; VadJobs docstring) -------------------------------------------------------------
@@ -233,16 +233,20 @@ def test_a_hotkey_another_program_holds_is_a_banner_and_new_settings_register_ag
 
 
 def test_saved_settings_reach_the_window(rig, tmp_path):
+    """A new text source names the Game text light; a new output folder lists its sessions."""
     place(tmp_path / "elsewhere", manifest(7))
+    rig.sources = [Source("mine")]
     app = rig.start()
     app.window.settings_requested.emit()
     dialog = shown(app, SettingsDialog)
     assert dialog is not None
-    added = TextSourceConfig(id="mine", name="New source", uri="localhost:7000")
-    saved = replace(app.config, output_root=str(tmp_path / "elsewhere"), text_sources=(*app.config.text_sources, added))
-    dialog.config_saved.emit(saved)
-    assert app.window.status_row.names()[-1] == "New source"
+    mine = TextSourceConfig(id="mine", name="My hooker", uri="localhost:7777")
+    dialog.config_saved.emit(
+        replace(app.config, output_root=str(tmp_path / "elsewhere"), text_sources=(*app.config.text_sources, mine))
+    )
     assert [cells[0] for cells in app.window.recent.cells()] == ["Steins;Gate - 07"]
+    rig.arm()
+    rig.wait(lambda: app.window.status_row.names() == ["OBS", "Game text: My hooker"])
 
 
 # The last armed game (AppConfig.last_game) ---------------------------------------------------------

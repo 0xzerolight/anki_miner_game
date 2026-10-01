@@ -177,19 +177,24 @@ def test_a_merge_the_actor_journals_as_a_new_line_is_counted(qtbot, rig):
 
 def test_the_status_row_follows_the_source_status(qtbot, rig):
     window, _, presenter, *_ = rig
-    assert window.status_row.names() == ["OBS", "Textractor", "Agent"]
+    assert window.status_row.names() == []  # no lights in Idle (UJ-04)
+    presenter.state_changed(AppState.ARMED, "steins-gate")
     presenter.source_status(OBS_SOURCE_ID, SourceStatus.CONNECTED)
     presenter.source_status("ocr", SourceStatus.CONNECTING)
-    qtbot.waitUntil(lambda: window.status_row.status("ocr") is SourceStatus.CONNECTING)
-    assert window.status_row.status(OBS_SOURCE_ID) is SourceStatus.CONNECTED
-    presenter.state_changed(AppState.IDLE, None)  # disarmed: the game's own lights go
-    qtbot.waitUntil(lambda: window.status_row.names() == ["OBS", "Textractor", "Agent"])
+    presenter.source_status("textractor", SourceStatus.RECEIVING)
+    qtbot.waitUntil(lambda: window.status_row.names() == ["OBS", "Game text: Textractor"])
+    assert window.status_row.status("ocr") is SourceStatus.CONNECTING
+    presenter.state_changed(AppState.IDLE, None)
+    qtbot.waitUntil(lambda: window.status_row.names() == [])
+    assert window.status_row.status("ocr") is None  # the game's sources are forgotten
 
 
-def test_the_configured_sources_can_change(rig):
-    window, *_ = rig
+def test_the_configured_sources_name_the_lights(qtbot, rig):
+    window, _, presenter, *_ = rig
     window.set_text_sources([("luna", "LunaTranslator")])
-    assert window.status_row.names() == ["OBS", "LunaTranslator"]
+    presenter.state_changed(AppState.ARMED, "steins-gate")
+    presenter.source_status("luna", SourceStatus.CONNECTED)
+    qtbot.waitUntil(lambda: window.status_row.names() == ["OBS", "Game text: LunaTranslator"])
 
 
 # The game row and the requests for dialogs -------------------------------------------------------
