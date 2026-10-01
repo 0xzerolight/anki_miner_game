@@ -16,7 +16,7 @@ from anki_miner_game import paths, store
 from anki_miner_game.app import App
 from anki_miner_game.gui.settings_dialog import SettingsDialog
 from anki_miner_game.gui.wizard import SetupWizard, WizardStep
-from anki_miner_game.models.config import AppConfig, FeedSettings
+from anki_miner_game.models.config import AppConfig, FeedSettings, TextSourceConfig
 from anki_miner_game.store import StoreWriteError
 from tests.app_rig import Rig
 
@@ -168,6 +168,55 @@ def test_a_step_run_again_from_settings_opens_over_them_and_shows_the_password_i
     assert wizard.store(replace(app.config, obs=replace(app.config.obs, password_override="typed"))) is None
     assert app.config.obs.password_override == "typed"
     assert settings.password_edit.text() == "typed"
+
+
+# One wizard page at a time, all three on the first run (UJ-17, UJ-22; master 4.8 G4, G5) -----------
+
+
+def test_the_first_launch_walks_all_three_steps_and_a_banner_opens_only_the_obs_step(rig):
+    app = rig.start(write_config=False)
+    first = shown(app, SetupWizard)
+    assert first is not None
+    assert not first.single_step
+    assert first.pageIds() == [WizardStep.OBS, WizardStep.SOURCES, WizardStep.ADDONS]
+    first.close()
+    app.window.setup_requested.emit()  # the Set up OBS… button on an OBS banner
+    again = shown(app, SetupWizard)
+    assert again is not None and again is not first
+    # P5 adds every page; a single-step run starts at its page and ends there (nextId() == -1).
+    assert again.single_step and again.currentId() == WizardStep.OBS and again.currentPage().nextId() == -1
+
+
+@pytest.mark.parametrize("step", [WizardStep.OBS, WizardStep.ADDONS])
+def test_a_step_settings_asks_for_opens_alone_over_them_and_refreshes_them_when_it_closes(rig, monkeypatch, step):
+    app = rig.start()
+    app.window.settings_requested.emit()
+    settings = shown(app, SettingsDialog)
+    assert settings is not None
+    refreshed: list[int] = []
+    monkeypatch.setattr(settings, "refresh_addons", lambda: refreshed.append(1))
+    settings.setup_step_requested.emit(step)
+    wizard = shown(app, SetupWizard)
+    assert wizard is not None and wizard.parent() is settings
+    assert wizard.single_step and wizard.currentId() == step and wizard.currentPage().nextId() == -1
+    wizard.reject()
+    assert refreshed == [1]
+
+
+def test_test_in_settings_checks_the_tables_rows_without_saving_them(rig):
+    app = rig.start()
+    before = app.config
+    app.window.settings_requested.emit()
+    settings = shown(app, SettingsDialog)
+    assert settings is not None
+    rows = (TextSourceConfig(id="mine", name="Mine", uri="localhost:7000"),)
+    settings.test_sources_requested.emit(rows)
+    wizard = shown(app, SetupWizard)
+    assert wizard is not None and wizard.parent() is settings
+    assert wizard.single_step and wizard.currentId() == WizardStep.SOURCES
+    assert wizard.currentPage().nextId() == -1
+    assert wizard.config.text_sources == rows
+    assert app.config == before and store.load_config() == before
 
 
 # Quitting ------------------------------------------------------------------------------------------

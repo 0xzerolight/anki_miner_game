@@ -47,7 +47,7 @@ from typing import Final
 
 from PyQt6.QtCore import QObject, Qt, QUrl, pyqtSignal
 from PyQt6.QtGui import QDesktopServices
-from PyQt6.QtWidgets import QDialog
+from PyQt6.QtWidgets import QDialog, QWidget
 
 from anki_miner_game import paths, store
 from anki_miner_game.addons.ocr_addon import OcrAddon
@@ -65,7 +65,7 @@ from anki_miner_game.interfaces.obs import ObsDiscovery, ObsGateway, Provisioner
 from anki_miner_game.interfaces.presenter import Presenter
 from anki_miner_game.interfaces.text_source import TextSource
 from anki_miner_game.lifecycle.auto import AutoMode
-from anki_miner_game.models.config import AppConfig
+from anki_miner_game.models.config import AppConfig, TextSourceConfig
 from anki_miner_game.models.messages import (
     AppState,
     Banner,
@@ -346,7 +346,7 @@ class App(QObject):
             self._cli.listen()
         window.show()
         if self._first_run:
-            self._open_wizard(WizardStep.OBS)
+            self._open_wizard(WizardStep.OBS, single_step=False)  # the first run walks every step (UJ-17)
 
     def _load_settings(self) -> list[Banner]:
         banners: list[Banner] = []
@@ -591,7 +591,12 @@ class App(QObject):
         )
         dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         dialog.config_saved.connect(self._save_settings)
-        dialog.setup_step_requested.connect(lambda step: self._open_wizard(step, settings=dialog))
+        dialog.setup_step_requested.connect(
+            lambda step: self._open_wizard(step, settings=dialog, on_finished=dialog.refresh_addons)
+        )
+        dialog.test_sources_requested.connect(
+            lambda rows: self._open_wizard(WizardStep.SOURCES, settings=dialog, text_sources=tuple(rows))
+        )
         dialog.open()
 
     def _save_settings(self, cfg: AppConfig) -> None:
@@ -603,8 +608,24 @@ class App(QObject):
             return
         self.presenter.banner_cleared(CONFIG_BANNER_KEY)
 
-    def _open_wizard(self, step: WizardStep, *, settings: SettingsDialog | None = None) -> None:
-        """The setup wizard at ``step``; over ``settings`` when a step is re-run from there (spec 16)."""
+    def _open_wizard(
+        self,
+        step: WizardStep,
+        *,
+        parent: QWidget | None = None,
+        settings: SettingsDialog | None = None,
+        single_step: bool = True,
+        text_sources: tuple[TextSourceConfig, ...] | None = None,
+        on_finished: Callable[[], None] | None = None,
+    ) -> None:
+        """The setup wizard at ``step`` (spec 16 as amended): every page on a first run
+        (``single_step=False``), that page alone otherwise (UJ-17).
+
+        Over ``parent``, else over ``settings`` when a step is run from there (it then shows what the
+        step saved, ``take_setup``), else over the main window. ``text_sources``: the Game text page
+        checks these rows (Settings' Test…, UJ-22) instead of the saved ones; that page never saves.
+        ``on_finished`` runs once the wizard closes (an add-on line to read again).
+        """
         running = self._running
         if running is None:
             return
@@ -614,19 +635,23 @@ class App(QObject):
             if settings is not None:
                 settings.take_setup(cfg)
 
+        config = self._config if text_sources is None else replace(self._config, text_sources=text_sources)
         wizard = SetupWizard(
             obs=running.obs_setup,
-            config=self._config,
+            config=config,
             save_config=save,
             run=self._io.submit,
             source_factory=lambda source: WebsocketSource(source.id, source.uri),
             vad_addon=self._vad_addon,
             ocr_addon=self._ocr_addon,
             start=step,
+            single_step=single_step,
             open_url=open_url,
-            parent=settings if settings is not None else self.window,
+            parent=parent or settings or self.window,
         )
         wizard.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        if on_finished is not None:
+            wizard.finished.connect(lambda _result: on_finished())
         wizard.open()
 
     def _adopt_config(self, cfg: AppConfig) -> None:
