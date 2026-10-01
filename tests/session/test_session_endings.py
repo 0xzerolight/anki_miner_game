@@ -2,7 +2,7 @@
 RecordFileChanged, connection lost while recording, OBS exits while recording; R2 items 10, 12)."""
 
 from anki_miner_game.models.manifest import Flag
-from anki_miner_game.models.messages import AppState, LineAccepted
+from anki_miner_game.models.messages import AppState, BannerCleared, CommandKind, LineAccepted
 from anki_miner_game.models.obs import ObsEventName
 from anki_miner_game.session import session as session_mod
 from anki_miner_game.session.journal import LineRecord, StopRecord, read_journal
@@ -122,3 +122,25 @@ async def test_a_journal_that_cannot_be_written_still_ends_the_session(h: Harnes
     assert BannerKey.INTERNAL not in h.banners()
     assert BannerKey.SESSION_FILES in h.banners()
     assert len(h.finalised()) == 1
+
+
+async def test_the_last_sessions_no_lines_warning_clears_when_the_next_recording_starts(h: Harness):
+    """B1-04: it describes a session that ended; during the next one it would read as current."""
+    await h.arm()
+    await h.started(ZERO)
+    await h.stopped(ZERO + 5.0)  # no lines
+    assert BannerKey.NO_CUES in h.banners()
+    await h.send(CommandKind.START)
+    await h.started(ZERO + 10.0, stem=SECOND_STEM)
+    assert BannerKey.NO_CUES not in h.banners()
+    assert BannerCleared(BannerKey.NO_CUES) in h.events
+
+
+async def test_obs_exited_clears_when_the_next_recording_starts(h: Harness):
+    await h.arm()
+    await h.started(ZERO)
+    await h.emit(ObsEventName.EXIT_STARTED, {}, ZERO + 8.0)
+    assert BannerKey.OBS_EXITED in h.banners()
+    await h.send(CommandKind.START)
+    await h.started(ZERO + 20.0, stem=SECOND_STEM)
+    assert BannerKey.OBS_EXITED not in h.banners()

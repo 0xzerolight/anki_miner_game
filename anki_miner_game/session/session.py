@@ -1387,7 +1387,15 @@ class SessionActor:
         s = self._session = _Session(
             files.manifest, manifest, files, journal, clock, next_sample=ev.t_mono + DRIFT_SAMPLE_AFTER_S
         )
-        self._clear(START_FAILED_BANNER_KEY, BannerKey.FOREIGN_RECORDING, BannerKey.SESSION_FILES)
+        self._clear(  # B1-04: the last session's warnings; finalise stays (that session is still in _incoming/)
+            START_FAILED_BANNER_KEY,
+            BannerKey.FOREIGN_RECORDING,
+            BannerKey.SESSION_FILES,
+            BannerKey.NO_CUES,
+            BannerKey.CLOCK,
+            BannerKey.SPLIT,
+            BannerKey.OBS_EXITED,
+        )
         journalled: list[LineAccepted] = []
         if held:
             for line in held:
