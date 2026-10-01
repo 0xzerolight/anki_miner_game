@@ -5,10 +5,13 @@ dialogs open through the window's requests, never its buttons or menu."""
 from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 import pytest
-from PyQt6.QtWidgets import QDialog, QWidget
+from PyQt6.QtCore import QUrl
+from PyQt6.QtWidgets import QDialog, QLabel, QWidget
 
+from anki_miner_game import app as app_mod
 from anki_miner_game import paths, store
 from anki_miner_game.app import App
 from anki_miner_game.gui.settings_dialog import SettingsDialog
@@ -75,6 +78,45 @@ def test_settings_that_cannot_be_saved_are_a_banner(rig, monkeypatch):
     dialog.config_saved.emit(replace(app.config, output_root="/elsewhere"))
     assert "read-only" in rig.banners()["config"]
     assert app.config == before
+
+
+def test_settings_refuse_a_new_output_folder_while_a_game_is_ready(rig, tmp_path):
+    """D-05: the finishing session would go to the old folder and never show in Recent sessions."""
+    app = rig.start()
+    rig.arm()
+    before = app.config.output_root
+    app.window.settings_requested.emit()
+    dialog = shown(app, SettingsDialog)
+    assert dialog is not None
+    dialog.output_edit.setText(str(tmp_path / "elsewhere"))
+    dialog.ws_port_spin.setValue(2)  # the rig's feed ports are both 0, which the dialog shows as 1 and 1
+    dialog.accept()
+    assert dialog.isVisible()
+    assert app.config.output_root == before and store.load_config().output_root == before
+    texts = [label.text() for label in dialog.findChildren(QLabel)]
+    assert any("Press Done playing before changing the folder" in text for text in texts)
+
+
+def test_the_feed_page_link_in_settings_opens_through_the_apps_opener(rig, monkeypatch):
+    """A frozen Linux build needs ``app.open_url``'s library-path fix for the While playing link (UJ-21)."""
+    opened: list[QUrl] = []
+    monkeypatch.setattr(app_mod, "open_url", lambda url: opened.append(url) or True)
+    built: list[dict[str, Any]] = []
+    real = app_mod.SettingsDialog
+
+    def capture(*args: Any, **kwargs: Any) -> SettingsDialog:
+        built.append(kwargs)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(app_mod, "SettingsDialog", capture)
+    app = rig.start()
+    app.window.settings_requested.emit()
+    dialog = shown(app, SettingsDialog)
+    assert dialog is not None and built
+    # Checked before the link is used: without open_url the click would reach the real browser.
+    assert "open_url" in built[-1]
+    dialog.feed_link.linkActivated.emit("http://127.0.0.1:6679/")
+    assert [url.toString() for url in opened] == ["http://127.0.0.1:6679/"]
 
 
 # The setup wizard (spec 16) ------------------------------------------------------------------------

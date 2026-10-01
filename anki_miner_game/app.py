@@ -580,8 +580,15 @@ class App(QObject):
         idle = self._running is None or self._running.actor.state is AppState.IDLE
         self.window.set_games(self._games(), profile.slug if idle else None)
 
+    def _busy(self) -> bool:
+        """A game is ready or recording (D-05): Settings then refuses a changed output folder."""
+        running = self._running
+        return running is not None and running.actor.state is not AppState.IDLE
+
     def _open_settings(self) -> None:
-        dialog = SettingsDialog(self._config, vad_addon=self._vad_addon, parent=self.window)
+        dialog = SettingsDialog(
+            self._config, vad_addon=self._vad_addon, busy=self._busy, open_url=open_url, parent=self.window
+        )
         dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         dialog.config_saved.connect(self._save_settings)
         dialog.setup_step_requested.connect(lambda step: self._open_wizard(step, settings=dialog))
