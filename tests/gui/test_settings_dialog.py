@@ -10,6 +10,7 @@ import pytest
 from PyQt6.QtCore import QDir, Qt, QUrl
 from PyQt6.QtGui import QKeySequence
 from PyQt6.QtWidgets import (
+    QDialog,
     QFileDialog,
     QGroupBox,
     QHeaderView,
@@ -33,7 +34,7 @@ from anki_miner_game.gui.settings_dialog import (
     linux_toggle_command,
     vad_install_text,
 )
-from anki_miner_game.gui.widgets.layout import available_size
+from anki_miner_game.gui.widgets.layout import DIALOG_SCREEN_FRACTION, available_size
 from anki_miner_game.gui.wizard import WizardStep
 from anki_miner_game.models.addons import AddonStatus
 from anki_miner_game.models.config import (
@@ -195,10 +196,20 @@ def test_the_dialog_opens_wide_enough_for_its_content(qtbot, platform: str) -> N
     dialog = open_dialog(qtbot, replace(CUSTOM, output_root="/data/Game Sessions/Visual novels"), platform=platform)
     dialog.show()
     scroll = dialog.findChild(QScrollArea)
-    assert scroll is not None and scroll.widget() is not None
-    assert scroll.viewport().width() >= scroll.widget().minimumSizeHint().width()
+    assert scroll is not None
+    assert opens_wide_enough(dialog, scroll)
     dialog.advanced_button.click()
-    qtbot.waitUntil(lambda: scroll.viewport().width() >= scroll.widget().minimumSizeHint().width(), timeout=1000)
+    qtbot.waitUntil(lambda: opens_wide_enough(dialog, scroll), timeout=1000)
+
+
+def opens_wide_enough(dialog: QDialog, scroll: QScrollArea) -> bool:
+    """The viewport holds the content's minimum width, or the dialog is as wide as ``fit_dialog`` lets it
+    be on this screen. Windows's offscreen platform has no fonts: its fallback measures the content wider
+    than 90 % of its 800 px screen, which the real app at 100 % and 150 % never meets."""
+    content = scroll.widget()
+    assert content is not None
+    bound = int(available_size(dialog).width() * DIALOG_SCREEN_FRACTION)
+    return scroll.viewport().width() >= content.minimumSizeHint().width() or dialog.width() >= bound
 
 
 def test_a_very_long_folder_still_fits_the_screen(qtbot) -> None:

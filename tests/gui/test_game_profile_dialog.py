@@ -14,7 +14,7 @@ from typing import Any
 
 import pytest
 from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QAbstractButton, QComboBox, QLabel, QScrollArea, QStyle, QStyleOptionComboBox
+from PyQt6.QtWidgets import QAbstractButton, QComboBox, QDialog, QLabel, QScrollArea, QStyle, QStyleOptionComboBox
 
 from anki_miner_game.gui import strings
 from anki_miner_game.gui.game_profile_dialog import (
@@ -31,6 +31,7 @@ from anki_miner_game.gui.game_profile_dialog import (
     window_label,
     window_title,
 )
+from anki_miner_game.gui.widgets.layout import DIALOG_SCREEN_FRACTION, available_size
 from anki_miner_game.models.addons import AddonStatus
 from anki_miner_game.models.config import DEFAULT_TEXT_SOURCES, TextSourceConfig
 from anki_miner_game.models.constants import OBS_COLLECTION_NAME
@@ -1022,16 +1023,22 @@ def test_the_dialog_opens_wide_enough_for_its_content(io_loop, qtbot, platform: 
     dialog.show()
     qtbot.waitExposed(dialog)
     scroll = dialog.findChild(QScrollArea)
-    assert scroll is not None and scroll.widget() is not None
-
-    def fits() -> bool:
-        return scroll.viewport().width() >= scroll.widget().minimumSizeHint().width()
-
-    assert fits()
+    assert scroll is not None
+    assert opens_wide_enough(dialog, scroll)
     dialog.text_from_combo.setCurrentIndex(dialog.text_from_combo.findData(TextFrom.OCR))
     if not dialog.advanced_button.isChecked():
         dialog.advanced_button.click()
-    qtbot.waitUntil(fits, timeout=1000)
+    qtbot.waitUntil(lambda: opens_wide_enough(dialog, scroll), timeout=1000)
+
+
+def opens_wide_enough(dialog: QDialog, scroll: QScrollArea) -> bool:
+    """The viewport holds the content's minimum width, or the dialog is as wide as ``fit_dialog`` lets it
+    be on this screen. Windows's offscreen platform has no fonts: its fallback measures the content wider
+    than 90 % of its 800 px screen, which the real app at 100 % and 150 % never meets."""
+    content = scroll.widget()
+    assert content is not None
+    bound = int(available_size(dialog).width() * DIALOG_SCREEN_FRACTION)
+    return scroll.viewport().width() >= content.minimumSizeHint().width() or dialog.width() >= bound
 
 
 def test_the_game_window_dropdown_is_as_wide_as_the_title(win_rig: Rig):
