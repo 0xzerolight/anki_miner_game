@@ -42,6 +42,16 @@ def test_two_verbs_at_once_are_refused():
     assert exc.value.code == 2
 
 
+def test_the_help_names_the_game_by_title_or_slug_and_never_says_armed(capsys, monkeypatch):
+    monkeypatch.setenv("COLUMNS", "200")  # one help line per option
+    with pytest.raises(SystemExit):
+        parse_verb(["--help"])
+    out = capsys.readouterr().out
+    assert "--arm GAME" in out and "get this game ready (its title or slug)" in out
+    assert "start recording (once a game is ready)" in out
+    assert "armed" not in out
+
+
 def test_arm_needs_a_game():
     with pytest.raises(SystemExit):
         parse_verb(["--arm"])

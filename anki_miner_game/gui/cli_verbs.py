@@ -1,9 +1,10 @@
 """CLI verbs and the single-instance guard (spec 16 "Global control").
 
-``anki_miner_game --arm <slug> | --start | --stop | --toggle`` sends its verb to the running
+``anki_miner_game --arm <game> | --start | --stop | --toggle`` sends its verb to the running
 instance and exits; users bind that command in their desktop's shortcut settings, which works on
 Wayland, where no application can grab a global key. A launch without a verb while an instance runs
-asks it to show its window instead of starting a second one.
+asks it to show its window instead of starting a second one. ``<game>`` is the game's title or slug;
+the app maps a title to its game.
 
 The running instance listens on a ``QLocalServer`` whose name is derived from the app's home folder,
 so two homes (tests, a second user profile) never reach each other, and whose socket only this user
@@ -45,8 +46,8 @@ def parse_verb(args: Sequence[str]) -> tuple[UserCommand | None, list[str]]:
     """
     parser = argparse.ArgumentParser(prog="anki_miner_game", description="Records game sessions for Anki Miner.")
     verbs = parser.add_mutually_exclusive_group()
-    verbs.add_argument("--arm", metavar="SLUG", help="arm the game with this profile slug")
-    verbs.add_argument("--start", action="store_true", help="start recording (while armed)")
+    verbs.add_argument("--arm", metavar="GAME", help="get this game ready (its title or slug)")
+    verbs.add_argument("--start", action="store_true", help="start recording (once a game is ready)")
     verbs.add_argument("--stop", action="store_true", help="stop recording")
     verbs.add_argument("--toggle", action="store_true", help="start or stop recording")
     known, rest = parser.parse_known_args(list(args))

@@ -296,10 +296,25 @@ class App(QObject):
         return self._feed
 
     def post(self, command: UserCommand) -> None:
-        """Hand a command to the session actor; safe from any thread once started."""
+        """Hand a command to the session actor; safe from any thread once started.
+
+        An ``ARM`` whose slug is no game's gets the game whose title matches it, ignoring case (B4-09:
+        ``--arm "Steins;Gate"``); any other name goes on as given and the actor banners it. The CLI
+        server posts every verb here, and ``launch.main`` the first instance's own.
+        """
         if self._running is None:
             raise RuntimeError("the app has not started")
-        self._running.actor.post(command)
+        self._running.actor.post(self._with_slug(command))
+
+    def _with_slug(self, command: UserCommand) -> UserCommand:
+        name = command.slug
+        if command.kind is not CommandKind.ARM or name is None or name in self._profiles:
+            return command
+        wanted = name.casefold()
+        for slug, profile in sorted(self._profiles.items()):
+            if profile.title.casefold() == wanted:
+                return replace(command, slug=slug)
+        return command
 
     # --- starting -------------------------------------------------------------------------------
 
@@ -343,7 +358,7 @@ class App(QObject):
             self.presenter.banner(banner)
         self._io.submit(self._run()).result()
         if self._server_name is not None:
-            self._cli = CliServer(self._server_name, on_command=actor.post, on_show=self._show_window, parent=self)
+            self._cli = CliServer(self._server_name, on_command=self.post, on_show=self._show_window, parent=self)
             self._cli.listen()
         window.show()
         if self._first_run:

@@ -306,6 +306,31 @@ def test_closing_the_window_stops_the_app_in_the_background(rig):
     assert rig.obs.profile == "Untitled"
 
 
+@pytest.mark.parametrize("given", [TITLE, TITLE.upper(), TITLE.casefold(), SLUG])
+def test_a_cli_arm_takes_the_games_title_or_slug(rig, given):
+    """B4-09: no screen shows the slug; users type the title."""
+    name = server_name(paths.home())
+    rig.start(name=name)
+    assert send_from_a_worker(rig, name, UserCommand(CommandKind.ARM, slug=given)) is True
+    rig.wait(lambda: rig.state() is AppState.ARMED)
+    assert [args[1] for kind, args in rig.events if kind == "state_changed"][-1] == SLUG
+
+
+def test_the_first_launchs_own_arm_takes_the_title_too(rig):
+    """``launch.main`` posts the first instance's verb through ``App.post``."""
+    app = rig.start()
+    app.post(UserCommand(CommandKind.ARM, slug=TITLE))
+    rig.wait(lambda: rig.state() is AppState.ARMED)
+
+
+def test_a_cli_arm_with_an_unknown_name_still_says_so(rig):
+    name = server_name(paths.home())
+    rig.start(name=name)
+    assert send_from_a_worker(rig, name, UserCommand(CommandKind.ARM, slug="Chaos;Head")) is True
+    rig.wait(lambda: "Chaos;Head" in rig.banners().get("arm", ""))
+    assert rig.state() is not AppState.ARMED
+
+
 def test_a_quit_stops_answering_cli_verbs_at_once(rig):
     """B2-03: a launch during the quit must not re-show the quitting window; with the instance lock
     held until the old process ends (B2-01) it waits and starts afresh."""
