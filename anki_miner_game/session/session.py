@@ -155,6 +155,8 @@ not at all while OBS's modal restart question is open. No answer this long after
 question."""
 QUIT_STOP_TIMEOUT_S: Final = 5.0
 """Quit while recording: how long to wait for ``STOPPED`` after ``StopRecord`` (R2 item 9: 0.6-1.3 s)."""
+QUIT_START_WAIT_S: Final = START_TIMEOUT_S
+"""Quit with a start in flight (B1-03): how long to wait for its ``STARTED`` before quitting without it."""
 RECORD_INACTIVE_WAIT_S: Final = 1.0
 """Quit, after ``STOPPED``: how long to wait for ``GetRecordStatus`` to say inactive before the restore
 (R2 item 9: it still says active for about 170 ms)."""
@@ -511,7 +513,8 @@ class SessionActor:
         to the user's profile). While recording it first stops OBS and finalises the session, then
         disarms; if OBS cannot be stopped, the journal is closed and the next launch resumes the
         session (reconcile row 4) or finalises it (last row). While idle and connected with
-        ``obs_restore.json`` still present, it restores once. At most about ``QUIT_STOP_TIMEOUT_S``
+        ``obs_restore.json`` still present, it restores once. With a start in flight it first waits up to
+        ``QUIT_START_WAIT_S`` for that recording to start, then stops it. At most about ``QUIT_STOP_TIMEOUT_S``
         plus one finalise (up to 10 s of rename retries on Windows) plus ``RECORD_INACTIVE_WAIT_S``
         plus the restore's two switches (up to ``SWITCH_TIMEOUT_S`` each, plus
         ``RESTART_QUESTION_S`` when OBS asks to restart).
@@ -568,6 +571,8 @@ class SessionActor:
             self.post(Tick(self._now()))
 
     async def _shutdown(self) -> None:
+        if self._start_deadline is not None:
+            await self._finish_start_for_quit()
         if self._state is AppState.RECORDING:
             await self._stop_for_quit()
         if self._state is AppState.ARMED:
@@ -584,6 +589,41 @@ class SessionActor:
             # idle tick (R2 item 9); a quit before that tick restores once, when OBS says inactive.
             await self._await_record_inactive()
             await self._restore_obs()
+
+    async def _finish_start_for_quit(self) -> None:
+        """B1-03: a quit with a start in flight (``StartRecord`` answered, ``STARTED`` not handled yet).
+
+        Messages already queued are handled first, a ``STARTED`` among them included (a waiter registered
+        now would never see it); then the quit waits up to ``QUIT_START_WAIT_S`` for ``STARTED`` or the
+        ``STOPPED`` of a failed start. A recording that starts is then stopped and finished like any other
+        (``_stop_for_quit``) instead of running on in ``_incoming/`` with no owner.
+        """
+        while self._start_deadline is not None and not self._queue.empty():
+            msg = self._queue.get_nowait()
+            try:
+                if isinstance(msg, _Shutdown):  # a second quit: it waits behind this one
+                    self._queue.put_nowait(msg)
+                    break
+                await self._guarded(self._handle(msg))
+            finally:
+                self._queue.task_done()
+        if self._start_deadline is None:
+            return
+
+        def ends_the_start(ev: ObsEvent) -> bool:
+            return ev.name == ObsEventName.RECORD_STATE_CHANGED and ev.data.get("outputState") in (
+                OutputState.STARTED,
+                OutputState.STOPPED,
+            )
+
+        with self._expecting(ends_the_start) as ended:
+            try:
+                async with asyncio.timeout(QUIT_START_WAIT_S):
+                    event = await ended
+            except TimeoutError:
+                log.warning("quit with a start in flight: no STARTED within %g s", QUIT_START_WAIT_S)
+                return
+        await self._guarded(self._handle(event))
 
     async def _on_tick(self, t: float) -> None:
         if self._start_deadline is not None and t >= self._start_deadline:
@@ -1061,7 +1101,7 @@ class SessionActor:
         return True
 
     async def _disarm(self) -> None:
-        if self._state is AppState.RECORDING:
+        if self._state is AppState.RECORDING or self._start_deadline is not None:  # B1-03: a start in flight
             self._banner(BannerKey.ARM, BannerLevel.INFO, "Stop the recording before pressing Done playing.")
             return
         if self._state is AppState.ARMED:

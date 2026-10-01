@@ -2,6 +2,7 @@
 normal stop (spec 6.2 ownership, 7, 8.2, 10.2, 10.3, 12 actor side; 17 rows StartRecord fails, no
 text source connected at Start, zero cues; R2 items 9 and 11)."""
 
+import asyncio
 import json
 import logging
 import os
@@ -567,3 +568,60 @@ async def test_a_start_whose_relaunch_fails_is_a_failed_start_and_stays_ready(h:
     assert "StartRecord" not in h.gateway.names()
     assert h.actor.state is AppState.ARMED
     assert h.actor._held is None
+
+
+async def test_done_playing_is_refused_while_a_start_is_in_flight(h: Harness):
+    """B1-03: StartRecord answered, STARTED not in yet: going Idle now would orphan the recording."""
+    await h.arm()
+    await h.send(CommandKind.START)
+    h.obs.record_active = True  # OBS is starting the output
+    await h.send(CommandKind.DISARM)
+    assert h.actor.state is AppState.ARMED
+    assert h.banners()[BannerKey.ARM] == "Stop the recording before pressing Done playing."
+    await h.started(ZERO)
+    assert h.actor.state is AppState.RECORDING
+
+
+def _start_obs_recording(h: Harness) -> str:
+    video = h.video_path()
+    video.parent.mkdir(parents=True, exist_ok=True)
+    video.write_bytes(b"\x1a\x45\xdf\xa3 not really matroska")
+    h.obs.record_active = True
+    h.obs.output_path = str(video)
+    return str(video)
+
+
+async def test_a_quit_waits_for_the_started_of_a_start_in_flight_and_finishes_that_recording(h: Harness, monkeypatch):
+    """B1-03: the STARTED that comes after the quit began is waited for, then the recording is stopped and saved."""
+    monkeypatch.setattr(session_mod, "QUIT_START_WAIT_S", 5.0)
+    await h.arm()
+    h.obs.stops_on_request = True
+    await h.send(CommandKind.START)
+    quitting = asyncio.create_task(h.actor.shutdown())
+    await asyncio.sleep(0.01)
+    assert not quitting.done()
+    assert "StopRecord" not in h.gateway.names()
+    h.gateway.record_event(OutputState.STARTED, _start_obs_recording(h), ZERO)
+    await asyncio.wait_for(quitting, 5)
+    assert h.gateway.names().count("StopRecord") == 1
+    assert len(h.finalised()) == 1
+    assert not restore_path().exists()
+
+
+async def test_a_quit_queued_ahead_of_the_started_still_finishes_that_recording(h: Harness):
+    """B1-03: a STARTED already queued behind the quit is handled first (a waiter would never see it)."""
+    await h.arm()
+    h.obs.stops_on_request = True
+    await h.send(CommandKind.START)
+    h.gateway.record_event(OutputState.STARTED, _start_obs_recording(h), ZERO)  # queued, not handled yet
+    await h.actor.shutdown()
+    assert h.gateway.names().count("StopRecord") == 1
+    assert len(h.finalised()) == 1
+
+
+async def test_a_quit_whose_start_never_reports_quits_after_the_wait(h: Harness):
+    await h.arm()
+    await h.send(CommandKind.START)
+    await h.actor.shutdown()  # QUIT_START_WAIT_S is 0.05 s here
+    assert "StopRecord" not in h.gateway.names()
+    assert not restore_path().exists()  # OBS said inactive: the quit restored it
