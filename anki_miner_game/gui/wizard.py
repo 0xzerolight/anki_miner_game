@@ -24,10 +24,10 @@ import threading
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, replace
 from enum import IntEnum, StrEnum
-from pathlib import Path, PurePath
+from pathlib import Path
 from typing import Any, Final
 
-from PyQt6.QtCore import QObject, Qt, QUrl, pyqtSignal, pyqtSlot
+from PyQt6.QtCore import QDir, QObject, Qt, QUrl, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import (
     QFileDialog,
@@ -96,23 +96,27 @@ NEEDS_RESTART_TEXT: Final = (
 )
 
 
+def native_path(path: str) -> str:
+    """``path`` as the user's system writes it: ``~`` expanded, native separators (UJ-33)."""
+    return QDir.toNativeSeparators(os.path.expanduser(path))
+
+
 def obs_changes_text(cfg: AppConfig) -> str:
-    """What the app changes in OBS, shown before step 1 runs (spec 11.1, 11.3; R2 item 14)."""
-    incoming = PurePath(cfg.output_root) / INCOMING_DIRNAME
+    """What the app changes in OBS (spec 11.1, 11.3; R2 item 14): the OBS page's "What exactly changes in OBS"."""
+    incoming = native_path(os.path.join(os.path.expanduser(cfg.output_root), INCOMING_DIRNAME))
     return "\n".join(
         [
-            "What the app changes in OBS:",
-            "- Turns on OBS's websocket server when it is off, only while OBS is closed. Its port and "
+            "- Turns on OBS's WebSocket server when it is off, only while OBS is closed. Its port and "
             "password stay as they are; a password is created only when OBS requires one and has none.",
             f'- Adds a profile "{OBS_PROFILE_NAME}" that records .mkv files into {incoming}, at most '
             f"{cfg.recording.max_height} lines high at {cfg.recording.fps} fps, without file splitting or "
             "automatic remux, with your profile's audio sample rate and channels.",
-            "- Creating that profile turns off OBS's offer to run its auto-configuration wizard for new " "profiles.",
+            "- Creating that profile turns off OBS's offer to run its auto-configuration wizard for new profiles.",
             f'- Adds a scene collection "{OBS_COLLECTION_NAME}" whose scene "Game" holds the game capture '
             "and audio.",
             "- Your own profiles and scene collections keep their settings. OBS uses the app's profile and "
-            "collection only while a game is armed, and after this step it is switched back to yours. "
-            "The app never restarts OBS.",
+            "collection only while a game is ready or recording, and after this step it is switched back to "
+            "yours. The app never restarts OBS.",
         ]
     )
 
@@ -127,7 +131,7 @@ class ObsStatus(StrEnum):
     UNSUPPORTED = "unsupported"
     OUTPUT_ACTIVE = "output_active"
     BUSY = "busy"
-    """A game is armed or recording; provisioning now would change the armed game's scene."""
+    """A game is ready or recording; provisioning now would change its scene."""
     FAILED = "failed"
 
 
@@ -152,7 +156,7 @@ _STAGE_TEXT: Final = {
 def _server_off() -> ObsCheck:
     return ObsCheck(
         ObsStatus.SERVER_OFF,
-        "OBS's websocket server is off. In OBS, tick Tools -> WebSocket Server Settings -> "
+        "OBS's WebSocket server is off. In OBS, tick Tools -> WebSocket Server Settings -> "
         "Enable WebSocket server and press OK, then press Fix. Or close OBS and press Fix: "
         "the app turns it on.",
     )
@@ -188,7 +192,9 @@ _COLLECTION: Final = _Switch(
     ObsEventName.CURRENT_SCENE_COLLECTION_CHANGED,
 )
 _APP_NAMES: Final = {_PROFILE: OBS_PROFILE_NAME, _COLLECTION: OBS_COLLECTION_NAME}
-_BUSY: Final = ObsCheck(ObsStatus.BUSY, "A game is armed. Disarm it first, then run this step again.")
+_BUSY: Final = ObsCheck(
+    ObsStatus.BUSY, "A game is ready or recording. Press Done playing first, then run this step again."
+)
 
 
 @dataclass
@@ -275,7 +281,7 @@ class ObsSetup:
         except ObsAuthError:
             return ObsCheck(
                 ObsStatus.AUTH_FAILED,
-                "OBS rejected the websocket password. Enter the password shown in OBS under "
+                "OBS rejected the WebSocket password. Enter the password shown in OBS under "
                 "Tools -> WebSocket Server Settings -> Show Connect Info, then try again.",
             )
         except ObsUnsupportedError as exc:

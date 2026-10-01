@@ -6,10 +6,12 @@ back is checked against the provisioner's own switching.
 """
 
 import asyncio
+import os
 from collections.abc import Callable
 from pathlib import Path
 
 import pytest
+from PyQt6.QtCore import QDir
 
 from anki_miner_game.gui.wizard import (
     NEEDS_RESTART_TEXT,
@@ -17,6 +19,7 @@ from anki_miner_game.gui.wizard import (
     OBS_LAUNCH_TIMEOUT_S,
     ObsSetup,
     ObsStatus,
+    native_path,
     obs_changes_text,
 )
 from anki_miner_game.models.config import AppConfig, RecordingSettings
@@ -89,6 +92,7 @@ async def test_server_off_while_obs_runs_asks_the_user_and_leaves_the_file_alone
     setup, discovery = make_setup(obs, FakeDiscovery(ws=off, running=True))
     check = await setup.run(AppConfig())
     assert check.status is ObsStatus.SERVER_OFF
+    assert check.text.startswith("OBS's WebSocket server is off.")
     assert "Tools -> WebSocket Server Settings" in check.text
     assert "close OBS" in check.text
     assert "ensure_server_enabled" not in discovery.calls and "launch" not in discovery.calls
@@ -155,6 +159,7 @@ async def test_a_refused_password_asks_for_the_override(where):
     check = await setup.run(AppConfig())
     assert check.status is ObsStatus.AUTH_FAILED
     assert "password" in check.text
+    assert "WebSocket password" in check.text
     assert obs.calls == []
 
 
@@ -191,7 +196,7 @@ async def test_nothing_is_touched_while_a_game_is_armed():
     setup, discovery = make_setup(obs, session=FakeSession(AppState.ARMED))
     check = await setup.run(AppConfig())
     assert check.status is ObsStatus.BUSY
-    assert "Disarm" in check.text
+    assert check.text == "A game is ready or recording. Press Done playing first, then run this step again."
     assert discovery.calls == [] and obs.calls == []
 
 
@@ -426,6 +431,7 @@ async def test_stages_are_reported_while_it_runs():
     assert stages[0].startswith("Looking for OBS")
     assert any(stage.startswith("Starting OBS") for stage in stages)
     assert any("back" in stage for stage in stages)
+    assert not [stage for stage in stages if "websocket" in stage]
 
 
 # The "what the app changes in OBS" text ------------------------------------------------------------
@@ -436,10 +442,23 @@ def test_the_changes_text_names_every_change_including_the_auto_configuration_of
     assert f'"{OBS_PROFILE_NAME}"' in text and f'"{OBS_COLLECTION_NAME}"' in text
     assert str(Path("/games") / INCOMING_DIRNAME) in text
     assert "720" in text and "30 fps" in text and ".mkv" in text
-    assert "websocket server" in text
+    assert "WebSocket server" in text
     assert "auto-configuration wizard" in text  # R2 item 14: CreateProfile sets ConfigOnNewProfile=false
     assert "switched back" in text
     assert "never restarts OBS" in text
+    assert "ready or recording" in text and "armed" not in text
+
+
+def test_the_changes_text_shows_the_real_recording_folder():
+    """UJ-33: a stored ``~/...`` folder is shown expanded, with the system's separators."""
+    text = obs_changes_text(AppConfig())
+    incoming = os.path.join(os.path.expanduser(AppConfig().output_root), INCOMING_DIRNAME)
+    assert native_path(incoming) in text
+    assert "~" not in text
+
+
+def test_native_path_expands_the_home_folder_and_uses_native_separators():
+    assert native_path("~/Videos") == QDir.toNativeSeparators(os.path.expanduser("~/Videos"))
 
 
 async def test_a_failure_before_any_switch_sends_no_switch_back():

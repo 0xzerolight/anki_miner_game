@@ -219,7 +219,6 @@ def test_opens_on_obs_and_next_waits_until_obs_is_set_up(qtbot, io_loop):
     h = Harness(qtbot, io_loop)
     page = h.wizard.obs_page
     assert h.wizard.currentId() == WizardStep.OBS
-    assert "What the app changes in OBS" in page.changes.text()
     assert "auto-configuration wizard" in page.changes.text()
     assert not h.next_enabled()
     qtbot.mouseClick(page.button, Qt.MouseButton.LeftButton)
