@@ -90,7 +90,7 @@ def names(index: int) -> list[str]:
 
 
 def test_launching_the_app_registers_no_real_system_wide_hotkey(scripted):
-    """The harness must not build the platform hotkey (Windows CI would register Ctrl+Shift+F9)."""
+    """The harness must not build the platform hotkey (Windows CI would register Alt+F9)."""
     s = scripted("normal.jsonl")
     assert s.app is not None and s.app._hotkey is None
 
