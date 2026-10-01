@@ -1,13 +1,18 @@
-"""Recent sessions (spec 16 item 5): name, duration, cue count and VAD state; **Open folder**.
+"""Recent sessions (spec 16 item 5 as amended by UJ-09): Session, Length, Lines and a plain Status.
 
 A row is one session manifest under the output folder: in its game folder once placed, in
 ``_incoming/`` while ``finalise_pending``. A manifest still ``recording`` is no finished session and
 is not listed. The rows are the ``RECENT_LIMIT`` manifests written last, newest session first.
 
-VAD **Re-run** and **Restore untrimmed subtitle** live in a row's context menu (master plan ruling on
-spec 16 and 13.3) and go to ``VadJobs``, which only queues; ``Presenter.vad_progress`` and
+The status is one plain word (``status_of``) and its reason the cell's tooltip: Ready; Trimming 75%
+(Trimming before the first progress report); Waiting to trim; Trim failed; Ready (not trimmed)
+(trimming undone, or not trimmed while the voice-trimming add-on is installed or damaged); No lines;
+Not filed yet. A double-click opens the session's folder. The right-click menu offers Open folder,
+then Trim again and Undo trimming while the voice-trimming add-on is ready (``vad_addon``; ``None``
+counts as not ready, D-08). Both go to ``VadJobs``, which only queues; ``Presenter.vad_progress`` and
 ``vad_finished`` then drive the row. A session with a job asked for or running in this run offers
-neither until that job ends.
+neither until that job ends. A row whose manifest has gone, or lost its subtitle, since the list was
+read reloads the list instead (B4-04): ``VadJobs`` skips such a job without a ``vad_finished``.
 
 Interrupted passes (``VadJobs`` docstring): the first ``load`` hands each listed manifest whose
 ``state`` is ``vad_running`` or whose ``vad.state`` is ``queued`` to ``VadJobs.rerun``, once per
@@ -28,15 +33,16 @@ from PyQt6.QtWidgets import (
     QAbstractItemView,
     QHeaderView,
     QMenu,
-    QPushButton,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
+from anki_miner_game.gui import strings
 from anki_miner_game.gui.widgets import clock_text
-from anki_miner_game.interfaces.addons import VadJobs
+from anki_miner_game.interfaces.addons import AddonService, VadJobs
+from anki_miner_game.models.addons import AddonStatus
 from anki_miner_game.models.codec import DecodeError
 from anki_miner_game.models.manifest import ManifestState, SessionManifest, VadState, from_json
 
@@ -44,22 +50,27 @@ log = logging.getLogger(__name__)
 
 RECENT_LIMIT: Final = 30
 MANIFEST_SUFFIX: Final = ".session.json"
-RERUN_TEXT: Final = "Re-run VAD"
-RESTORE_TEXT: Final = "Restore untrimmed subtitle"
-COLUMNS: Final = ("Session", "Duration", "Cues", "VAD", "")
+COLUMNS: Final = ("Session", "Length", "Lines", "Status")
+STATUS_COLUMN: Final = 3
+ROW_TOOLTIP: Final = "Double-click to open the folder"
+TRIM_AGAIN_TEXT: Final = "Trim again"
+UNDO_TRIMMING_TEXT: Final = "Undo trimming"
+
+READY: Final = "Ready"
+READY_NOT_TRIMMED: Final = "Ready (not trimmed)"
+TRIMMING: Final = "Trimming"
+WAITING_TO_TRIM: Final = "Waiting to trim"
+TRIM_FAILED: Final = "Trim failed"
+NO_LINES: Final = "No lines"
+NOT_FILED: Final = "Not filed yet"
+NO_LINES_WHY: Final = "No lines were recorded, so this session has no subtitle."
+NOT_FILED_WHY: Final = "Moved to its game folder at the next launch."
+UNDONE_WHY: Final = "Trimming was undone; choose Trim again to trim it."
 
 UrlOpener = Callable[[QUrl], object]
 """``QDesktopServices.openUrl`` by default; the composition may pass one with a cleaned environment."""
 
 _PLACED: Final = (ManifestState.READY, ManifestState.VAD_RUNNING)
-_VAD_TEXT: Final = {
-    VadState.QUEUED: "VAD queued",
-    VadState.DONE: "VAD done",
-    VadState.FAILED: "VAD failed",
-    VadState.UNAVAILABLE: "VAD unavailable",
-    VadState.RESTORED: "Untrimmed subtitle",
-}
-_VAD_RUNNING_TEXT: Final = "VAD running"
 
 
 @dataclass(frozen=True)
@@ -98,19 +109,29 @@ class SessionRow:
         vad = self.manifest.vad
         return self.manifest.state is ManifestState.VAD_RUNNING or (vad is not None and vad.state is VadState.QUEUED)
 
-    @property
-    def vad_text(self) -> str:
-        m = self.manifest
-        if m.state is ManifestState.FINALISE_PENDING:
-            return "Not moved yet; retried at next launch"
-        if not self.has_subtitle:
-            return "No subtitle"
-        if m.state is ManifestState.VAD_RUNNING:
-            return _VAD_RUNNING_TEXT
-        if m.vad is None:
-            return "No VAD pass"
-        text = _VAD_TEXT[m.vad.state]
-        return f"{text}: {m.vad.message}" if m.vad.message else text
+
+def status_of(row: SessionRow, addon: AddonStatus | None) -> tuple[str, str]:
+    """``(status word, reason)`` for ``row`` as its manifest stands; ``addon`` is the voice-trimming
+    add-on's status now (``None`` without one). The reason is ``""`` when the word says it all."""
+    m = row.manifest
+    if m.state is ManifestState.FINALISE_PENDING:
+        return NOT_FILED, NOT_FILED_WHY
+    if not row.has_subtitle:
+        return NO_LINES, NO_LINES_WHY
+    if m.state is ManifestState.VAD_RUNNING:
+        return TRIMMING, ""
+    vad = m.vad
+    if vad is None or vad.state is VadState.DONE:
+        return READY, ""
+    if vad.state is VadState.QUEUED:
+        return WAITING_TO_TRIM, ""
+    if vad.state is VadState.FAILED:
+        return TRIM_FAILED, vad.message or ""
+    if vad.state is VadState.RESTORED:
+        return READY_NOT_TRIMMED, UNDONE_WHY
+    if addon is None or addon is AddonStatus.MISSING:  # unavailable, and the user chose no add-on
+        return READY, ""
+    return READY_NOT_TRIMMED, vad.message or ""
 
 
 def read_session(path: Path) -> SessionRow | None:
@@ -150,12 +171,14 @@ class RecentSessions(QWidget):
         self,
         *,
         vad_jobs: VadJobs | None = None,
+        vad_addon: AddonService | None = None,
         open_url: UrlOpener = QDesktopServices.openUrl,
         limit: int = RECENT_LIMIT,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self._vad_jobs = vad_jobs
+        self._vad_addon = vad_addon
         self._open_url = open_url
         self._limit = limit
         self._root: Path | None = None
@@ -169,8 +192,10 @@ class RecentSessions(QWidget):
         self.tree.setHeaderLabels(COLUMNS)
         self.tree.setRootIsDecorated(False)
         self.tree.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.tree.setTextElideMode(Qt.TextElideMode.ElideMiddle)  # "Steins;Gate…- 12" keeps the number
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._context_menu)
+        self.tree.itemDoubleClicked.connect(self._double_clicked)
         header = self.tree.header()
         if header is not None:
             header.setStretchLastSection(False)
@@ -210,7 +235,7 @@ class RecentSessions(QWidget):
         if not self._listed(manifest_path):
             return
         self._busy.add(manifest_path)
-        self._progress[manifest_path] = f"VAD {min(100, done_ms * 100 // total_ms)}%" if total_ms else _VAD_RUNNING_TEXT
+        self._progress[manifest_path] = f"{TRIMMING} {min(100, done_ms * 100 // total_ms)}%" if total_ms else TRIMMING
         self._fill()
 
     def vad_finished(self, manifest_path: Path, state: VadState) -> None:
@@ -226,6 +251,10 @@ class RecentSessions(QWidget):
         jobs = self._vad_jobs
         if jobs is None:
             return
+        fresh = read_session(row.manifest_path)
+        if fresh is None or not fresh.has_subtitle:  # gone or changed outside the app (B4-04)
+            self.reload()
+            return
         (jobs.rerun if rerun else jobs.restore)(row.manifest_path)
         self._busy.add(row.manifest_path)
         self._fill()
@@ -233,7 +262,7 @@ class RecentSessions(QWidget):
     # --- the widget -----------------------------------------------------------------------------
 
     def cells(self) -> list[tuple[str, str, str, str]]:
-        """``(name, duration, cues, VAD)`` per row, as shown."""
+        """``(Session, Length, Lines, Status)`` per row, as shown."""
         shown: list[tuple[str, str, str, str]] = []
         for i in range(self.tree.topLevelItemCount()):
             item = self.tree.topLevelItem(i)
@@ -247,29 +276,30 @@ class RecentSessions(QWidget):
             raise IndexError(index)
         return item
 
-    def open_button(self, manifest_path: Path) -> QPushButton:
-        for i, row in enumerate(self._rows):
-            if row.manifest_path == manifest_path:
-                button = self.tree.itemWidget(self.item(i), len(COLUMNS) - 1)
-                if isinstance(button, QPushButton):
-                    return button
-        raise KeyError(manifest_path)
-
     def menu_for(self, manifest_path: Path) -> QMenu:
-        """The row's context menu: Re-run VAD and Restore untrimmed subtitle, each only when it can run."""
+        """The row's menu: Open folder; then, while the add-on is ready, Trim again and Undo trimming,
+        each enabled only when it can run."""
         row = next(row for row in self._rows if row.manifest_path == manifest_path)
+        menu = QMenu(self)
+        open_folder = menu.addAction(strings.OPEN_FOLDER)
+        if open_folder is not None:
+            open_folder.triggered.connect(lambda _checked=False: self._open_folder(row.manifest_path.parent))
+        if self._addon_status() is not AddonStatus.READY:
+            return menu
         ready = self._vad_jobs is not None and row.has_subtitle and not self._pending(row)
         vad = row.manifest.vad
-        menu = QMenu(self)
-        rerun = menu.addAction(RERUN_TEXT)
-        restore = menu.addAction(RESTORE_TEXT)
-        if rerun is not None:
-            rerun.setEnabled(ready)
-            rerun.triggered.connect(lambda _checked=False: self._ask(row, rerun=True))
-        if restore is not None:
-            restore.setEnabled(ready and vad is not None and vad.state is VadState.DONE)
-            restore.triggered.connect(lambda _checked=False: self._ask(row, rerun=False))
+        trim = menu.addAction(TRIM_AGAIN_TEXT)
+        undo = menu.addAction(UNDO_TRIMMING_TEXT)
+        if trim is not None:
+            trim.setEnabled(ready)
+            trim.triggered.connect(lambda _checked=False: self._ask(row, rerun=True))
+        if undo is not None:
+            undo.setEnabled(ready and vad is not None and vad.state is VadState.DONE)
+            undo.triggered.connect(lambda _checked=False: self._ask(row, rerun=False))
         return menu
+
+    def _addon_status(self) -> AddonStatus | None:
+        return None if self._vad_addon is None else self._vad_addon.status()
 
     def _pending(self, row: SessionRow) -> bool:
         return row.manifest_path in self._busy or row.interrupted
@@ -279,24 +309,29 @@ class RecentSessions(QWidget):
 
     def _fill(self) -> None:
         self.tree.clear()
+        addon = self._addon_status()
         for row in self._rows:
             path = row.manifest_path
             if path in self._progress:
-                vad = self._progress[path]
+                status, why = self._progress[path], ""
             elif path in self._busy:
-                vad = _VAD_TEXT[VadState.QUEUED]
+                status, why = WAITING_TO_TRIM, ""
             else:
-                vad = row.vad_text
-            item = QTreeWidgetItem([row.name, row.duration, str(len(row.manifest.live_cues)), vad, ""])
-            item.setToolTip(0, str(path.parent))
-            item.setToolTip(3, vad)
+                status, why = status_of(row, addon)
+            item = QTreeWidgetItem([row.name, row.duration, str(len(row.manifest.live_cues)), status])
+            for column in range(len(COLUMNS)):
+                item.setToolTip(column, ROW_TOOLTIP)
+            if why:
+                item.setToolTip(STATUS_COLUMN, why)
             self.tree.addTopLevelItem(item)
-            button = QPushButton("Open folder")
-            button.clicked.connect(lambda _checked=False, folder=path.parent: self._open_folder(folder))
-            self.tree.setItemWidget(item, len(COLUMNS) - 1, button)
 
     def _open_folder(self, folder: Path) -> None:
         self._open_url(QUrl.fromLocalFile(str(folder)))
+
+    def _double_clicked(self, item: QTreeWidgetItem | None, _column: int) -> None:
+        index = self.tree.indexOfTopLevelItem(item)
+        if 0 <= index < len(self._rows):
+            self._open_folder(self._rows[index].manifest_path.parent)
 
     def _context_menu(self, pos: QPoint) -> None:
         item = self.tree.itemAt(pos)
