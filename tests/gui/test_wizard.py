@@ -14,11 +14,13 @@ from typing import Any
 
 import pytest
 from PyQt6.QtCore import Qt, QUrl
-from PyQt6.QtWidgets import QWizard
+from PyQt6.QtWidgets import QLabel, QWizard
 
 import anki_miner_game.gui.wizard as wizard_module
 from anki_miner_game.gui.wizard import (
+    FIREWALL_TEXT,
     OBS_DOWNLOAD_URL,
+    OBS_SUMMARY,
     ObsCheck,
     ObsSetup,
     ObsStatus,
@@ -221,12 +223,64 @@ def test_opens_on_obs_and_next_waits_until_obs_is_set_up(qtbot, io_loop):
     h = Harness(qtbot, io_loop)
     page = h.wizard.obs_page
     assert h.wizard.currentId() == WizardStep.OBS
-    assert "auto-configuration wizard" in page.changes.text()
     assert not h.next_enabled()
     qtbot.mouseClick(page.button, Qt.MouseButton.LeftButton)
     qtbot.waitUntil(h.next_enabled)
     assert page.status.text() == "OBS 32.2.2 is set up."
+    assert page.button.isHidden()  # UJ-15: nothing left to press once OBS is ready
+    assert page.error.text() == ""
     assert h.obs.threads[0].name == "io-loop"
+
+
+def test_the_obs_page_says_what_obs_is_and_keeps_the_details_one_click_away(qtbot, io_loop):
+    h = Harness(qtbot, io_loop)
+    page = h.wizard.obs_page
+    assert page.subTitle() == "OBS is the free recorder this app uses to record your game."
+    assert page.summary.text() == OBS_SUMMARY
+    assert OBS_SUMMARY == (
+        'The app adds its own profile and scene collection, both named "Anki Miner Game", and uses them '
+        "only while a game is ready or recording. Your own OBS profiles, scenes and stream settings are left alone."
+    )
+    assert page.details_button.text() == "What exactly changes in OBS"
+    assert page.changes.isHidden()
+    page.details_button.click()
+    assert not page.changes.isHidden()
+    assert native_path(AppConfig().output_root) in page.changes.text()
+    assert "auto-configuration wizard" in page.changes.text()
+    page.details_button.click()
+    assert page.changes.isHidden()
+
+
+@pytest.mark.parametrize("windows", [True, False])
+def test_starting_obs_mentions_the_windows_network_question_only_on_windows(qtbot, io_loop, monkeypatch, windows):
+    monkeypatch.setattr(wizard_module, "_on_windows", lambda: windows)
+    obs = StubObsSetup(ObsCheck(ObsStatus.READY, "done"))
+    obs.stages = ["Starting OBS…"]
+    obs.proceed.clear()
+    h = Harness(qtbot, io_loop, obs=obs)
+    page = h.wizard.obs_page
+    page.button.click()
+    qtbot.waitUntil(lambda: page.status.text().startswith("Starting OBS…"))
+    assert (FIREWALL_TEXT in page.status.text()) is windows
+    assert FIREWALL_TEXT == "If Windows asks whether OBS may use networks, you can press Cancel."
+    obs.proceed.set()
+    qtbot.waitUntil(h.next_enabled)
+
+
+def test_a_refused_password_is_typed_above_the_button_and_retried_with_enter(qtbot, io_loop):
+    obs = StubObsSetup(ObsCheck(ObsStatus.AUTH_FAILED, "rejected"), ObsCheck(ObsStatus.READY, "ok"))
+    h = Harness(qtbot, io_loop, obs=obs)
+    page = h.wizard.obs_page
+    page.button.click()
+    qtbot.waitUntil(lambda: not page.password.isHidden())
+    assert h.wizard.focusWidget() is page.password
+    column = page.body.layout()
+    assert column.indexOf(page.password) < column.indexOf(page.button_row)
+    assert page.password.placeholderText() == "OBS WebSocket password"
+    qtbot.keyClicks(page.password, "typed-secret")
+    qtbot.keyClick(page.password, Qt.Key.Key_Return)
+    qtbot.waitUntil(h.next_enabled)
+    assert obs.configs[1].obs.password_override == "typed-secret"
 
 
 def test_stages_show_while_the_step_runs_and_the_button_waits(qtbot, io_loop):
@@ -275,6 +329,7 @@ def test_websocket_server_off_offers_fix(qtbot, io_loop):
     page = h.wizard.obs_page
     page.button.click()
     qtbot.waitUntil(lambda: page.button.text() == "Fix")
+    assert not page.error.isHidden()
     assert not h.next_enabled()
 
 
@@ -304,7 +359,7 @@ def test_a_password_that_cannot_be_saved_is_reported_and_not_retried(qtbot, io_l
     qtbot.waitUntil(lambda: not page.password.isHidden())
     page.password.setText("typed-secret")
     page.button.click()
-    assert "disk full" in page.status.text()
+    assert "disk full" in page.error.text()
     assert len(obs.configs) == 1
 
 
@@ -322,7 +377,7 @@ def test_an_unexpected_error_is_shown_on_the_page(qtbot, io_loop, caplog):
     h = Harness(qtbot, io_loop, obs=StubObsSetup(ValueError("boom")))
     page = h.wizard.obs_page
     page.button.click()
-    qtbot.waitUntil(lambda: "see the log" in page.status.text())
+    qtbot.waitUntil(lambda: "see the log" in page.error.text())
     assert page.button.isEnabled() and not h.next_enabled()
 
 
@@ -334,7 +389,7 @@ def test_work_that_cannot_reach_the_io_loop_is_reported_and_the_step_stays_usabl
     h = Harness(qtbot, io_loop, obs=obs, run=stopped)
     page = h.wizard.obs_page
     page.button.click()
-    assert "see the log" in page.status.text()
+    assert "see the log" in page.error.text()
     assert page.button.isEnabled() and not h.next_enabled()
     assert obs.configs == []  # the coroutine was closed, never run
 
@@ -343,8 +398,9 @@ def test_obs_errors_are_plain_text_not_markup(qtbot, io_loop):
     h = Harness(qtbot, io_loop, obs=StubObsSetup(ObsCheck(ObsStatus.FAILED, "Cannot connect to OBS: <b>x</b>")))
     page = h.wizard.obs_page
     page.button.click()
-    qtbot.waitUntil(lambda: "Cannot connect" in page.status.text())
-    assert page.status.textFormat() == Qt.TextFormat.PlainText
+    qtbot.waitUntil(lambda: "Cannot connect" in page.error.text())
+    shown = [label for label in page.error.findChildren(QLabel) if label.text() == "Cannot connect to OBS: <b>x</b>"]
+    assert shown and shown[0].textFormat() == Qt.TextFormat.PlainText
 
 
 def test_the_real_obs_step_runs_on_the_io_loop_and_returns_obs_to_the_users_names(qtbot, io_loop):
@@ -546,7 +602,7 @@ def test_any_step_can_be_opened_on_its_own(qtbot, io_loop, step):
     assert h.wizard.currentId() == step
 
 
-def test_gui_reaches_the_rest_only_through_interfaces():
+def test_gui_reaches_the_rest_only_through_interfaces_models_and_gui():
     tree = ast.parse(Path(wizard_module.__file__).read_text(encoding="utf-8"))
     imported = [
         node.module or ""
@@ -562,5 +618,7 @@ def test_gui_reaches_the_rest_only_through_interfaces():
     ]
     assert imported
     assert [
-        name for name in imported if not name.startswith(("anki_miner_game.models.", "anki_miner_game.interfaces."))
+        name
+        for name in imported
+        if not name.startswith(("anki_miner_game.models.", "anki_miner_game.interfaces.", "anki_miner_game.gui."))
     ] == []

@@ -29,18 +29,22 @@ from typing import Any, Final
 from PyQt6.QtCore import QDir, QObject, Qt, QUrl, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import (
+    QFrame,
     QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QProgressBar,
     QPushButton,
+    QScrollArea,
+    QToolButton,
     QVBoxLayout,
     QWidget,
     QWizard,
     QWizardPage,
 )
 
+from anki_miner_game.gui.widgets.layout import error_label, show_message
 from anki_miner_game.interfaces.addons import AddonService
 from anki_miner_game.interfaces.obs import ObsDiscovery, ObsGateway, ObsStarter, Provisioner
 from anki_miner_game.interfaces.session import SessionControl
@@ -94,6 +98,19 @@ NEEDS_RESTART_TEXT: Final = (
 )
 
 
+OBS_SUBTITLE: Final = "OBS is the free recorder this app uses to record your game."
+OBS_SUMMARY: Final = (
+    f'The app adds its own profile and scene collection, both named "{OBS_PROFILE_NAME}", and uses them '
+    "only while a game is ready or recording. Your own OBS profiles, scenes and stream settings are left alone."
+)
+"""UJ-15; the profile and the collection share one name (``models.constants``)."""
+OBS_DETAILS: Final = "What exactly changes in OBS"
+STARTING_OBS: Final = "Starting OBS…"
+"""The stage ``ObsSetup`` reports while OBS launches (``ObsStartStage.LAUNCHING``)."""
+FIREWALL_TEXT: Final = "If Windows asks whether OBS may use networks, you can press Cancel."
+"""Windows Firewall asks once when OBS first listens (F#3); OBS needs no network beyond this machine."""
+
+
 def native_path(path: str) -> str:
     """``path`` as the user's system writes it: ``~`` expanded, native separators (UJ-33)."""
     return QDir.toNativeSeparators(os.path.expanduser(path))
@@ -145,7 +162,7 @@ class ObsCheck:
 
 _STAGE_TEXT: Final = {
     ObsStartStage.ENABLING_SERVER: "Turning on OBS's WebSocket server…",
-    ObsStartStage.LAUNCHING: "Starting OBS…",
+    ObsStartStage.LAUNCHING: STARTING_OBS,
     ObsStartStage.CONNECTING: "Connecting to OBS…",
 }
 """What step 1 says while the starter runs (spec 16: the page shows each stage)."""
@@ -479,6 +496,23 @@ def _plain_label(text: str = "") -> QLabel:
     return label
 
 
+def _on_windows() -> bool:
+    return sys.platform == "win32"
+
+
+def _scrolled(page: QWizardPage, body: QWidget) -> QScrollArea:
+    """UJ-19: ``body`` in a frameless, resizable scroll area filling ``page``, never scrolling sideways."""
+    scroll = QScrollArea()
+    scroll.setFrameShape(QFrame.Shape.NoFrame)
+    scroll.setWidgetResizable(True)
+    scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+    scroll.setWidget(body)
+    layout = QVBoxLayout(page)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.addWidget(scroll)
+    return scroll
+
+
 class _MainThread(QObject):
     """Runs each callable posted from any thread on the thread this object lives in (the Qt main thread)."""
 
@@ -592,7 +626,7 @@ class SetupWizard(QWizard):
 
 
 class ObsPage(QWizardPage):
-    """Step 1: shows what the app changes in OBS, then runs ``ObsSetup`` when the user asks."""
+    """Step 1: what OBS is and what the app does with it, the details one click away; runs ``ObsSetup`` on request."""
 
     def __init__(self, wizard: SetupWizard, obs: ObsSetup) -> None:
         super().__init__()
@@ -601,12 +635,21 @@ class ObsPage(QWizardPage):
         self._check: ObsCheck | None = None
         self._running = False
         self.setTitle("OBS")
-        self.setSubTitle("Find OBS, turn on its websocket server and create the app's profile and scene collection.")
+        self.setSubTitle(OBS_SUBTITLE)
+        self.summary = _plain_label(OBS_SUMMARY)
+        self.details_button = QToolButton()
+        self.details_button.setText(OBS_DETAILS)
+        self.details_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.details_button.setArrowType(Qt.ArrowType.RightArrow)
+        self.details_button.setAutoRaise(True)
+        self.details_button.clicked.connect(self._toggle_details)
         self.changes = _plain_label(obs_changes_text(wizard.config))
-        self.button = QPushButton("Set up OBS")
-        self.button.clicked.connect(self._start)
+        self.changes.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.changes.hide()
         self.status = _plain_label()
         self.status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.status.hide()
+        self.error = error_label()
         self.link = QLabel(f'<a href="{OBS_DOWNLOAD_URL}">{OBS_DOWNLOAD_URL}</a>')
         self.link.setTextFormat(Qt.TextFormat.RichText)
         self.link.setOpenExternalLinks(False)
@@ -614,18 +657,34 @@ class ObsPage(QWizardPage):
         self.link.hide()
         self.password = QLineEdit()
         self.password.setEchoMode(QLineEdit.EchoMode.Password)
-        self.password.setPlaceholderText("OBS websocket password")
+        self.password.setPlaceholderText("OBS WebSocket password")
+        self.password.returnPressed.connect(self._start)  # UJ-20: Enter runs the check
         self.password.hide()
         self.notes = _plain_label()
         self.notes.hide()
-        row = QHBoxLayout()
+        self.button = QPushButton("Set up OBS")
+        self.button.clicked.connect(self._start)
+        self.button_row = QWidget()
+        row = QHBoxLayout(self.button_row)
+        row.setContentsMargins(0, 0, 0, 0)
         row.addWidget(self.button)
         row.addStretch(1)
-        layout = QVBoxLayout(self)
-        for widget in (self.changes, self.status, self.link, self.password, self.notes):
-            layout.addWidget(widget)
-        layout.insertLayout(1, row)
-        layout.addStretch(1)
+        self.body = QWidget()
+        column = QVBoxLayout(self.body)
+        for widget in (
+            self.summary,
+            self.details_button,
+            self.changes,
+            self.status,
+            self.error,
+            self.link,
+            self.password,  # UJ-20: the field comes before the button that uses it
+            self.notes,
+            self.button_row,
+        ):
+            column.addWidget(widget)
+        column.addStretch(1)
+        self.scroll_area = _scrolled(self, self.body)  # not "scroll": QWidget.scroll() is a method
 
     def initializePage(self) -> None:
         self.changes.setText(obs_changes_text(self._wizard.config))
@@ -637,6 +696,11 @@ class ObsPage(QWizardPage):
         """A single-step run ends on this page (UJ-17)."""
         return -1 if self._wizard.single_step else super().nextId()
 
+    def _toggle_details(self) -> None:
+        opened = self.changes.isHidden()
+        self.changes.setVisible(opened)
+        self.details_button.setArrowType(Qt.ArrowType.DownArrow if opened else Qt.ArrowType.RightArrow)
+
     def _start(self) -> None:
         if self._running:
             return
@@ -645,18 +709,20 @@ class ObsPage(QWizardPage):
             cfg = self._wizard.config
             error = self._wizard.store(replace(cfg, obs=replace(cfg.obs, password_override=typed)))
             if error is not None:
-                self.status.setText(error)
+                self.error.set_error(error)
                 return
         self._running = True
         self.button.setEnabled(False)
         for widget in (self.link, self.password, self.notes):
             widget.hide()
-        self.status.setText("Starting…")
+        self.error.clear()
+        show_message(self.status, "Starting…")
         self.completeChanged.emit()
         post = self._wizard.main_thread.post
 
         def report(stage: str) -> None:
-            post(lambda: self.status.setText(stage))
+            text = f"{stage} {FIREWALL_TEXT}" if stage == STARTING_OBS and _on_windows() else stage
+            post(lambda: show_message(self.status, text))
 
         self._wizard.submit(self._obs.run(self._wizard.config, report), self._finished)
 
@@ -668,17 +734,18 @@ class ObsPage(QWizardPage):
             check = ObsCheck(ObsStatus.FAILED, "Setting up OBS failed unexpectedly; see the log.")
         self._running = False
         self._check = check
-        self.status.setText(check.text)
+        ready = check.status is ObsStatus.READY
+        show_message(self.status, check.text if ready else "")
+        self.error.set_error("" if ready else check.text)  # UJ-31: every failure in the one error style
         self.link.setVisible(check.status is ObsStatus.NOT_INSTALLED)
         self.password.setVisible(check.status is ObsStatus.AUTH_FAILED)
         self.notes.setText("\n".join(check.notes))
         self.notes.setVisible(bool(check.notes))
-        self.button.setText(
-            "Fix"
-            if check.status is ObsStatus.SERVER_OFF
-            else "Run again" if check.status is ObsStatus.READY else "Check again"
-        )
+        self.button.setText("Fix" if check.status is ObsStatus.SERVER_OFF else "Check again")
         self.button.setEnabled(True)
+        self.button.setVisible(not ready)
+        if check.status is ObsStatus.AUTH_FAILED:
+            self.password.setFocus()
         self.completeChanged.emit()
 
 
