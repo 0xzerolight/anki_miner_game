@@ -136,6 +136,10 @@ class CliServer(QObject):
         self._server = QLocalServer(self)
         self._server.setSocketOptions(QLocalServer.SocketOption.UserAccessOption)
         self._server.newConnection.connect(self._accept)
+        self._clients: set[QLocalSocket] = set()
+        """Accepted connections until they close. Held here because the socket and its ``readyRead``
+        slot only refer to each other, and a garbage collection would end that cycle before the verb
+        is read."""
 
     def listen(self) -> bool:
         """Listen, replacing a socket file a crashed instance left; ``False`` (logged) when it cannot.
@@ -157,8 +161,13 @@ class CliServer(QObject):
             sock = self._server.nextPendingConnection()
             if sock is None:
                 return
-            sock.disconnected.connect(sock.deleteLater)
+            self._clients.add(sock)
+            sock.disconnected.connect(lambda sock=sock: self._forget(sock))
             sock.readyRead.connect(lambda sock=sock: self._read(sock))
+
+    def _forget(self, sock: QLocalSocket) -> None:
+        self._clients.discard(sock)
+        sock.deleteLater()
 
     def _read(self, sock: QLocalSocket) -> None:
         if not sock.canReadLine():

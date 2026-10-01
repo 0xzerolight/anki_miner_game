@@ -1,5 +1,6 @@
 """CLI verbs and the single-instance guard (spec 16 "Global control")."""
 
+import gc
 import socket
 import sys
 import threading
@@ -142,6 +143,21 @@ def test_the_instance_leaves_the_connection_open_for_the_client_to_close(qtbot, 
     assert bytes(client.readLine().data()).strip() == cli_verbs.OK
     qtbot.wait(200)  # time for a server-side close to arrive
     assert client.state() is QLocalSocket.LocalSocketState.ConnectedState
+    client.abort()
+
+
+def test_a_garbage_collection_before_the_verb_arrives_does_not_lose_it(qtbot, instance, name):
+    """The accepted connection outlives a cyclic garbage collection: its ``readyRead`` slot holds the
+    socket, and that cycle alone did not keep it (a ``--toggle`` from a desktop shortcut went unanswered)."""
+    client = QLocalSocket()
+    client.connectToServer(name)
+    assert client.waitForConnected(1000)
+    qtbot.wait(50)  # the instance accepts the connection
+    gc.collect()
+    client.write(cli_verbs.encode(UserCommand(CommandKind.TOGGLE)))
+    qtbot.waitUntil(client.canReadLine, timeout=2000)
+    assert bytes(client.readLine().data()).strip() == cli_verbs.OK
+    assert instance.commands == [UserCommand(CommandKind.TOGGLE)]
     client.abort()
 
 
