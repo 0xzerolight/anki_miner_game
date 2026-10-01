@@ -2,6 +2,7 @@
 (``tests/app_rig.py``). Split from ``test_app_wiring.py`` by owner (audit 2026-10-01 plan, section 4.10):
 the profile dialog opens through the window's requests, never its buttons."""
 
+import sys
 from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
@@ -11,8 +12,10 @@ from PyQt6.QtWidgets import QWidget
 
 from anki_miner_game import paths, store
 from anki_miner_game.app import App
+from anki_miner_game.gui import game_profile_dialog
 from anki_miner_game.gui.game_profile_dialog import GameProfileDialog
 from anki_miner_game.models.messages import AppState, CommandKind, UserCommand
+from anki_miner_game.models.obs import WindowItem
 from anki_miner_game.models.profile import AudioMode, AudioSettings, AutoSettings, GameProfile
 from anki_miner_game.obs.startup import LocalObsStarter
 from anki_miner_game.session.naming import slugify
@@ -102,3 +105,36 @@ def test_the_obs_step_and_the_picker_start_obs_through_one_starter_over_the_apps
     assert isinstance(starter, LocalObsStarter)
     assert running.obs_setup._starter is starter
     assert starter._discovery is rig.discovery and starter._gateway is rig.gateway
+
+
+def test_a_new_game_lists_its_window_with_obs_closed_at_launch_and_saves_it(rig, monkeypatch):
+    """B4-01, D-03: OBS was not running when the app started (the usual case); opening the Game window
+    list starts it, connects, lists, and the game saves with its window."""
+    monkeypatch.setattr(game_profile_dialog, "is_wayland_session", lambda: False)
+    rig.discovery.running = False
+    game = WindowItem("[chaoshead.exe]: Chaos;Head", "Chaos;Head:UnityWndClass:chaoshead.exe", True)
+
+    async def windows() -> list[WindowItem]:
+        return [game]
+
+    monkeypatch.setattr(rig.provisioner, "list_windows", windows)
+    app = rig.start()
+    assert not rig.gateway.connected
+    app.window.new_game_requested.emit()
+    dialog = shown(app, game_profile_dialog.GameProfileDialog)
+    assert dialog is not None
+    dialog.title_edit.setText("Chaos;Head")
+
+    dialog.window_combo.showPopup()
+    rig.wait(lambda: not dialog.listing_windows)
+    dialog.window_combo.hidePopup()
+
+    assert (rig.discovery.launches, rig.gateway.connected) == (1, True)
+    index = dialog.window_combo.findData(game.value)
+    assert index > 0
+    dialog.window_combo.setCurrentIndex(index)
+    dialog.window_combo.activated.emit(index)
+    dialog.accept()
+    saved = store.load_profiles().profiles[slugify("Chaos;Head")]
+    assert saved.capture.window == game.value
+    assert saved.audio.mode is (AudioMode.APP if sys.platform == "win32" else AudioMode.DESKTOP)
