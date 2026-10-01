@@ -5,8 +5,10 @@ server live on the Qt main thread; the session actor, OBS, the text sources, aut
 feed's websocket live on the I/O loop (``runtime.io_thread.IoThread``); VAD passes run on the
 trimmer's job thread. The actor is built on the loop and publishes every ``SessionEvent`` there;
 ``forward`` turns each into one ``Presenter`` call, whose signals reach the window and the tray on
-the main thread, and every accepted line also goes to the text feed (spec 8.2, 15). Dialogs and the
-wizard hand their coroutines to the loop through ``IoThread.submit``.
+the main thread, and every accepted line also goes to the text feed (spec 8.2, 15). The window asks
+auto mode whether the next line starts a recording (``AutoMode.auto_start_pending``), which auto mode
+settles on the loop before the presenter forwards each state. Dialogs and the wizard hand their
+coroutines to the loop through ``IoThread.submit``.
 
 Launch (spec 17 "Unclean previous exit"): the actor itself restores ``obs_restore.json`` and
 finalises orphans once reconcile allows it (``SessionActor._launch``), on the one ``FinaliseWorker``
@@ -304,6 +306,8 @@ class App(QObject):
         banners = self._load_settings()
         self._io.start_loop()
         actor = self._io.submit(self._build()).result()
+        running = self._running
+        assert running is not None
         window = self._window = MainWindow(
             actor,
             self.presenter.signals,
@@ -313,8 +317,10 @@ class App(QObject):
             text_sources=_enabled_sources(self._config),
             output_root=lambda: paths.output_root(self._config),
             vad_jobs=self._vad_jobs,  # the recent sessions hand interrupted passes on before the actor runs
+            vad_addon=self._vad_addon,  # Trim again / Undo trimming only while it is installed (UJ-09)
             open_url=open_url,
             auto_start_game=self._auto_start_game,
+            auto_start_pending=running.auto.auto_start_pending,  # D-06: paused after a manual Stop
         )
         window.new_game_requested.connect(lambda: self._open_profile_dialog(None))
         window.edit_game_requested.connect(self._open_profile_dialog)
