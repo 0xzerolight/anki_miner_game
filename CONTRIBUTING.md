@@ -5,7 +5,7 @@ Thanks for helping out. Anki Miner Game is a solo-maintained companion to [Anki 
 ## Before you start
 
 - Bugs and feature requests: open an [Issue](https://github.com/0xzerolight/anki_miner_game/issues) using the appropriate template.
-- General questions and chat: use [Discord](https://discord.com/invite/aDtQyZzUVP).
+- General questions and chat: use [Discussions](https://github.com/0xzerolight/anki_miner_game/discussions) or [Discord](https://discord.com/invite/aDtQyZzUVP).
 - Security vulnerabilities: see [SECURITY.md](SECURITY.md). Do not open a public issue.
 - Code of Conduct: see [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
 
