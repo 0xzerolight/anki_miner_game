@@ -106,7 +106,7 @@ Contributions of any kind are welcome.
 - Security: [SECURITY.md](SECURITY.md).
 
 Bug reports and feature requests -> [Issues](https://github.com/0xzerolight/anki_miner_game/issues).
-General questions and discussion -> [Discord](https://discord.com/invite/aDtQyZzUVP).
+General questions and discussion -> [Discussions](https://github.com/0xzerolight/anki_miner_game/discussions) or [Discord](https://discord.com/invite/aDtQyZzUVP).
 
 See [CONTRIBUTORS.md](CONTRIBUTORS.md) for everyone who has contributed.
 
