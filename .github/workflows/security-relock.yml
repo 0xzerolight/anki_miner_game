@@ -1,0 +1,97 @@
+name: Security relock
+
+# Dependabot's uv security update can end in "No files have changed!" and open
+# no PR: it did for setuptools in uv.lock on 2026-10-27, where setuptools is
+# also the build backend in pyproject.toml. This audits the lock once a day and,
+# when a locked package has a patched release, upgrades it with `uv lock` and
+# opens an auto-merging PR. The merge still waits for main's required checks.
+
+on:
+  schedule:
+    - cron: "53 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+concurrency:
+  group: security-relock
+
+jobs:
+  relock:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+
+      - name: Audit the lock
+        id: audit
+        run: |
+          set -euo pipefail
+          uv export --frozen --all-extras --all-groups --no-emit-project --quiet \
+            -o "$RUNNER_TEMP/requirements.txt"
+          # OSV carries the GitHub advisories Dependabot alerts on.
+          # pip-audit exits 1 when it finds anything; a real failure leaves no JSON and jq fails below.
+          uvx pip-audit==2.10.1 -s osv --disable-pip -r "$RUNNER_TEMP/requirements.txt" \
+            -f json -o "$RUNNER_TEMP/audit.json" || true
+          # Only advisories with a patched release: there is nothing to upgrade to for the others.
+          vulnerable='.dependencies[] | select(any(.vulns[]; .fix_versions | length > 0))'
+          jq -r "$vulnerable | \"\(.name)>\(.version)\"" "$RUNNER_TEMP/audit.json" > "$RUNNER_TEMP/specs.txt"
+          jq -r "$vulnerable | \"- \(.name) \(.version): \([.vulns[].id] | unique | join(\", \"))\"" \
+            "$RUNNER_TEMP/audit.json" > "$RUNNER_TEMP/advisories.txt"
+          cat "$RUNNER_TEMP/advisories.txt"
+          if [ -s "$RUNNER_TEMP/specs.txt" ]; then
+            echo "vulnerable=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upgrade the vulnerable packages
+        if: steps.audit.outputs.vulnerable == 'true'
+        run: |
+          set -euo pipefail
+          # `name>current`, not a bare name: the floor forces the move even when
+          # the other pins still allow the vulnerable version.
+          upgrade_args=()
+          while IFS= read -r spec; do
+            upgrade_args+=(--upgrade-package "$spec")
+          done < "$RUNNER_TEMP/specs.txt"
+          uv lock "${upgrade_args[@]}"
+          git diff --stat
+
+      - name: Open the relock PR
+        if: steps.audit.outputs.vulnerable == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          branch=security-relock
+          title="fix(deps): upgrade packages with known vulnerabilities"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$branch"
+          git commit -am "$title" -m "$(cat "$RUNNER_TEMP/advisories.txt")"
+          git push --force origin "$branch"
+          if [ -z "$(gh pr list --head "$branch" --state open --json number --jq '.[].number')" ]; then
+            gh pr create --head "$branch" --title "$title" --body-file "$RUNNER_TEMP/advisories.txt"
+          fi
+          gh pr merge "$branch" --auto --merge --delete-branch
+          # GitHub holds the pull_request CI run on a PR opened or pushed with
+          # GITHUB_TOKEN until it is approved (conclusion action_required), and the
+          # required checks only count that run. Wait for it to appear and approve it.
+          head_sha="$(git rev-parse HEAD)"
+          for _ in $(seq 30); do
+            run="$(gh run list --workflow ci.yml --event pull_request --commit "$head_sha" \
+              --json databaseId,conclusion --jq '.[0] | select(.) | "\(.databaseId) \(.conclusion)"')"
+            [ -n "$run" ] && break
+            sleep 10
+          done
+          if [ -z "$run" ]; then
+            echo "::error::no pull_request CI run appeared for $head_sha"
+            exit 1
+          fi
+          read -r run_id conclusion <<< "$run"
+          if [ "$conclusion" = "action_required" ]; then
+            gh api -X POST "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/approve"
+          fi
