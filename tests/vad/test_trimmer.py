@@ -100,8 +100,9 @@ class Session:
 
     @property
     def started(self) -> dict | None:
-        path = Path(f"{self.video}.argv.json")
-        return json.loads(path.read_text()) if path.exists() else None
+        if not Path(f"{self.video}.started").exists():  # the worker's marker, made after argv.json is closed
+            return None
+        return json.loads(Path(f"{self.video}.argv.json").read_text())
 
     def load(self) -> SessionManifest:
         return load_manifest(self.manifest)

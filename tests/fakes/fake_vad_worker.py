@@ -9,11 +9,12 @@ its script from ``<video>.fake.json``::
      "exit": 0}                           exit code
 
 and records how it was started in ``<video>.argv.json``: its arguments and whether the interpreter
-ran isolated (``-I``).
+ran isolated (``-I``). Once that file is closed it creates an empty ``<video>.started``: a test polls
+that marker, never the argv file, because Windows refuses to open a file another process is still
+writing or renaming.
 """
 
 import json
-import os
 import sys
 import time
 from pathlib import Path
@@ -22,9 +23,8 @@ from pathlib import Path
 def main() -> int:
     args = sys.argv[1:]
     video = Path(args[args.index("--video") + 1])
-    started = Path(f"{video}.argv.json")
-    started.with_suffix(".tmp").write_text(json.dumps({"argv": args, "isolated": sys.flags.isolated}))
-    os.replace(started.with_suffix(".tmp"), started)  # a test polling for it never reads half a file
+    Path(f"{video}.argv.json").write_text(json.dumps({"argv": args, "isolated": sys.flags.isolated}))
+    Path(f"{video}.started").touch()  # only now: a test polling for it never reads half a file
     script = json.loads(Path(f"{video}.fake.json").read_text(encoding="utf-8"))
     for line in script.get("lines", []):
         sys.stdout.write(line + "\n")
