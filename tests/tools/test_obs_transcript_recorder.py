@@ -79,8 +79,11 @@ class FakeObs:
                 if isinstance(message, bytes):
                     await ws.send(message)
                     continue
-                if json.loads(message)["op"] == 6:
-                    await ws.send(json.dumps(RESPONSE))
+                request = json.loads(message)
+                if request["op"] == 6:
+                    # obs-websocket echoes the request's id; obsws-python >= 1.8.1 skips any other reply.
+                    reply = {**RESPONSE, "d": {**RESPONSE["d"], "requestId": request["d"]["requestId"]}}
+                    await ws.send(json.dumps(reply))
                     await ws.send(json.dumps(EVENT))
         except ConnectionClosed:
             pass
