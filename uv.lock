@@ -451,14 +451,13 @@ wheels = [
 
 [[package]]
 name = "obsws-python"
-version = "1.8.0"
+version = "1.8.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "websocket-client" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/d6/2f/624af34a5b0f09fbf858bf6743521a8626d712671ac49573e625ad1c97d3/obsws_python-1.8.0.tar.gz", hash = "sha256:e082894f80deb0836861fdc3c222e497308c8f66328da6075baba5b456a20971", size = 28727, upload-time = "2025-07-01T08:24:11.652Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/97/4b/537f3d372f065b2aeeac3812228066eb70f47436adf88aaacc94eb5fd4e1/obsws_python-1.8.0-py3-none-any.whl", hash = "sha256:537bde416e149b6f59e0b2f31761d4a40329feafec171bde6fc1346ab8516e28", size = 30819, upload-time = "2025-07-01T08:24:10.086Z" },
+    { url = "https://files.pythonhosted.org/packages/aa/ba/0bafc1bdb5502e0ea5004d1d1eb0a1c3b4700edd1edb156075c9223a3088/obsws_python-1.8.1-py3-none-any.whl", hash = "sha256:dbdba02b8641ac3f30bff16107c1bba11c6e5b6884ae85698038f0d593baaf6c", size = 31266, upload-time = "2026-10-31T06:43:07.242Z" },
 ]
 
 [[package]]
