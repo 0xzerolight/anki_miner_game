@@ -59,7 +59,7 @@ class ClipboardSource:
         self._clipboard: QClipboard | None = None
         self._sink: LineSink | None = None
         self._main = _MainThreadCalls()
-        app = QCoreApplication.instance()
+        app: QCoreApplication | None = QCoreApplication.instance()
         if app is not None:
             self._main.moveToThread(app.thread())
 

@@ -196,7 +196,7 @@ class GlobalHotkey(QObject):
 
     def __init__(self, parent: QObject | None = None, *, api: HotkeyApi | None = None) -> None:
         super().__init__(parent)
-        app = QCoreApplication.instance()
+        app: QCoreApplication | None = QCoreApplication.instance()
         if app is None:
             raise RuntimeError("GlobalHotkey needs a QApplication")
         self._app = app
