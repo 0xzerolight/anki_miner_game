@@ -52,7 +52,7 @@ class StatusLight(QWidget):
     """A coloured dot and a name; the tooltip says the state."""
 
     def __init__(self, name: str, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
+        super().__init__(parent)  # type: ignore[arg-type]  # PyQt6 6.12 stubs: parent typed Self
         self.status = SourceStatus.DISCONNECTED
         self.dot = QLabel()
         self.dot.setFixedSize(_DOT_PX, _DOT_PX)
@@ -80,7 +80,7 @@ class StatusRow(QWidget):
     """``text_sources`` lists ``(id, name)`` of the configured text sources (their names)."""
 
     def __init__(self, text_sources: Sequence[tuple[str, str]] = (), parent: QWidget | None = None) -> None:
-        super().__init__(parent)
+        super().__init__(parent)  # type: ignore[arg-type]  # PyQt6 6.12 stubs: parent typed Self
         self._names: dict[str, str] = {}
         self._states: dict[str, SourceStatus] = {}
         """The game's sources, in the order they first reported."""

@@ -24,7 +24,7 @@ CLIPBOARD_SOURCE_ID: Final = "clipboard"
 class _MainThreadCalls(QObject):
     """Runs each callable it is sent on the thread it lives in: at once from that thread, else queued."""
 
-    call = pyqtSignal(object)
+    call = pyqtSignal(object)  # type: ignore[call-arg]  # PyQt6 6.12 stubs: arguments= made required
 
     def __init__(self) -> None:
         super().__init__()

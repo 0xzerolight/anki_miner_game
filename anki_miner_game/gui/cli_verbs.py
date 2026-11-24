@@ -156,7 +156,7 @@ class CliServer(QObject):
         on_show: Callable[[], None],
         parent: QObject | None = None,
     ) -> None:
-        super().__init__(parent)
+        super().__init__(parent)  # type: ignore[arg-type]  # PyQt6 6.12 stubs: parent typed Self
         self._name = name
         self._on_command = on_command
         self._on_show = on_show

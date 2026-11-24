@@ -18,21 +18,21 @@ from anki_miner_game.models.messages import AppState, Banner, SourceStatus
 class PresenterSignals(QObject):
     """One signal per ``Presenter`` method, with the method's arguments. Build it on the main thread."""
 
-    state_changed = pyqtSignal(object, object)
+    state_changed = pyqtSignal(object, object)  # type: ignore[call-arg]  # PyQt6 6.12 stubs: arguments= made required
     """``(AppState, slug | None)``."""
-    source_status = pyqtSignal(object, object)
+    source_status = pyqtSignal(object, object)  # type: ignore[call-arg]  # PyQt6 6.12 stubs: arguments= made required
     """``(source_id, SourceStatus)``."""
-    line_accepted = pyqtSignal(object, object, object)
+    line_accepted = pyqtSignal(object, object, object)  # type: ignore[call-arg]  # PyQt6 6.12 stubs: arguments= made required
     """``(GameLine, offset_ms | None, replaces_previous)``."""
-    banner = pyqtSignal(object)
+    banner = pyqtSignal(object)  # type: ignore[call-arg]  # PyQt6 6.12 stubs: arguments= made required
     """``Banner``."""
-    banner_cleared = pyqtSignal(object)
+    banner_cleared = pyqtSignal(object)  # type: ignore[call-arg]  # PyQt6 6.12 stubs: arguments= made required
     """``key``."""
-    session_finished = pyqtSignal(object)
+    session_finished = pyqtSignal(object)  # type: ignore[call-arg]  # PyQt6 6.12 stubs: arguments= made required
     """``manifest_path``."""
-    vad_progress = pyqtSignal(object, object, object)
+    vad_progress = pyqtSignal(object, object, object)  # type: ignore[call-arg]  # PyQt6 6.12 stubs: arguments= made required
     """``(manifest_path, done_ms, total_ms | None)``."""
-    vad_finished = pyqtSignal(object, object)
+    vad_finished = pyqtSignal(object, object)  # type: ignore[call-arg]  # PyQt6 6.12 stubs: arguments= made required
     """``(manifest_path, VadState)``."""
 
 

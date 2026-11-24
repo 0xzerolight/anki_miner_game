@@ -157,7 +157,7 @@ class ErrorLabel(QWidget):
     text in the palette's ``WindowText``. Hidden while it has no text."""
 
     def __init__(self, text: str = "", parent: QWidget | None = None) -> None:
-        super().__init__(parent)
+        super().__init__(parent)  # type: ignore[arg-type]  # PyQt6 6.12 stubs: parent typed Self
         self.icon = QLabel()
         self.icon.setPixmap(level_pixmap(BannerLevel.ERROR, self))
         self.label = QLabel()

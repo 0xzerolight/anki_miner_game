@@ -551,10 +551,10 @@ def _scrolled(page: QWizardPage, body: QWidget) -> QScrollArea:
 class _MainThread(QObject):
     """Runs each callable posted from any thread on the thread this object lives in (the Qt main thread)."""
 
-    _call = pyqtSignal(object)
+    _call = pyqtSignal(object)  # type: ignore[call-arg]  # PyQt6 6.12 stubs: arguments= made required
 
     def __init__(self, parent: QObject) -> None:
-        super().__init__(parent)
+        super().__init__(parent)  # type: ignore[arg-type]  # PyQt6 6.12 stubs: parent typed Self
         self._call.connect(self._run)
 
     def post(self, fn: Callable[[], None]) -> None:

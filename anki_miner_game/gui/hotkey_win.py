@@ -192,10 +192,10 @@ class GlobalHotkey(QObject):
     and the native event filter sees only the main thread's. Unregisters when the application quits.
     """
 
-    activated = pyqtSignal()
+    activated = pyqtSignal()  # type: ignore[call-arg]  # PyQt6 6.12 stubs: arguments= made required
 
     def __init__(self, parent: QObject | None = None, *, api: HotkeyApi | None = None) -> None:
-        super().__init__(parent)
+        super().__init__(parent)  # type: ignore[arg-type]  # PyQt6 6.12 stubs: parent typed Self
         app: QCoreApplication | None = QCoreApplication.instance()
         if app is None:
             raise RuntimeError("GlobalHotkey needs a QApplication")

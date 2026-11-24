@@ -57,8 +57,8 @@ def state_icon(state: AppState, base: QIcon | None = None) -> QIcon:
 
 
 class Tray(QObject):
-    show_requested = pyqtSignal()
-    quit_requested = pyqtSignal()
+    show_requested = pyqtSignal()  # type: ignore[call-arg]  # PyQt6 6.12 stubs: arguments= made required
+    quit_requested = pyqtSignal()  # type: ignore[call-arg]  # PyQt6 6.12 stubs: arguments= made required
 
     def __init__(
         self,
@@ -70,7 +70,7 @@ class Tray(QObject):
         supports_messages: Callable[[], bool] = QSystemTrayIcon.supportsMessages,
         parent: QObject | None = None,
     ) -> None:
-        super().__init__(parent)
+        super().__init__(parent)  # type: ignore[arg-type]  # PyQt6 6.12 stubs: parent typed Self
         self._controls = controls
         self._game_title = game_title
         self._feed_url = feed_url

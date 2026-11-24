@@ -113,7 +113,7 @@ class RecordingControls(QObject):
     those (P1 pins it). ``changed`` follows every command, state change and pending end.
     """
 
-    changed = pyqtSignal()
+    changed = pyqtSignal()  # type: ignore[call-arg]  # PyQt6 6.12 stubs: arguments= made required
 
     def __init__(
         self,
@@ -125,7 +125,7 @@ class RecordingControls(QObject):
         now: Callable[[], float] = time.monotonic,
         parent: QObject | None = None,
     ) -> None:
-        super().__init__(parent)
+        super().__init__(parent)  # type: ignore[arg-type]  # PyQt6 6.12 stubs: parent typed Self
         self._control = control
         self._game = game
         self._auto_start_game = auto_start_game
@@ -246,13 +246,13 @@ class MainWindow(QMainWindow):
     ``auto_start_pending()`` whether, while Ready, the next line starts a recording (D-06).
     """
 
-    new_game_requested = pyqtSignal()
-    edit_game_requested = pyqtSignal(str)
+    new_game_requested = pyqtSignal()  # type: ignore[call-arg]  # PyQt6 6.12 stubs: arguments= made required
+    edit_game_requested = pyqtSignal(str)  # type: ignore[call-arg]  # PyQt6 6.12 stubs: arguments= made required
     """The slug of the selected game."""
-    settings_requested = pyqtSignal()
-    setup_requested = pyqtSignal()
+    settings_requested = pyqtSignal()  # type: ignore[call-arg]  # PyQt6 6.12 stubs: arguments= made required
+    setup_requested = pyqtSignal()  # type: ignore[call-arg]  # PyQt6 6.12 stubs: arguments= made required
     """The Set up OBS… button of an OBS banner (UJ-10)."""
-    hidden_to_tray = pyqtSignal()
+    hidden_to_tray = pyqtSignal()  # type: ignore[call-arg]  # PyQt6 6.12 stubs: arguments= made required
 
     def __init__(
         self,
