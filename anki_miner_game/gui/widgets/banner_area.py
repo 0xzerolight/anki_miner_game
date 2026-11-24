@@ -59,10 +59,10 @@ class _BannerFrame(QFrame):
 class BannerArea(QWidget):
     """The banners shown, oldest first. ``actions`` maps a banner key to its button's text."""
 
-    action_clicked = pyqtSignal(str)
+    action_clicked = pyqtSignal(str)  # type: ignore[call-arg]  # PyQt6 6.12 stubs: arguments= made required
 
     def __init__(self, actions: Mapping[str, str] | None = None, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
+        super().__init__(parent)  # type: ignore[arg-type]  # PyQt6 6.12 stubs: parent typed Self
         self._actions = dict(actions or {})
         self._actions_shown = True
         self._column = QVBoxLayout(self)

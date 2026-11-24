@@ -453,15 +453,15 @@ def window_title(value: str | None) -> str | None:
 class _Relay(QObject):
     """Carries results from the I/O loop's thread to the dialog on the main thread."""
 
-    done = pyqtSignal(object, object)
-    stage = pyqtSignal(int, object)
+    done = pyqtSignal(object, object)  # type: ignore[call-arg]  # PyQt6 6.12 stubs: arguments= made required
+    stage = pyqtSignal(int, object)  # type: ignore[call-arg]  # PyQt6 6.12 stubs: arguments= made required
     """``(listing number, ObsStartStage)``: what starting OBS for a window listing is doing (D-03)."""
 
 
 class _WindowCombo(QComboBox):
     """The Game window dropdown: opening its popup asks OBS for the window list again (UJ-26)."""
 
-    opening = pyqtSignal()
+    opening = pyqtSignal()  # type: ignore[call-arg]  # PyQt6 6.12 stubs: arguments= made required
 
     def showPopup(self) -> None:
         self.opening.emit()
@@ -490,7 +490,7 @@ class GameProfileDialog(QDialog):
     Whatever a stored profile holds that the controls cannot express is kept as it was (Review Focus 3).
     """
 
-    profile_saved = pyqtSignal(object)
+    profile_saved = pyqtSignal(object)  # type: ignore[call-arg]  # PyQt6 6.12 stubs: arguments= made required
 
     def __init__(
         self,
@@ -534,7 +534,7 @@ class GameProfileDialog(QDialog):
         self._rects: str | None = base.ocr.rects
         self._pending: set[concurrent.futures.Future[Any]] = set()
         self._capture_request = 0
-        self._relay = _Relay(self)
+        self._relay = _Relay(self)  # type: ignore[arg-type]  # PyQt6 6.12 stubs: parent typed Self
         self._relay.done.connect(self._deliver)
         self._relay.stage.connect(self._stage_heard)
 

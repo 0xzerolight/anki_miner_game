@@ -225,11 +225,11 @@ def _hotkey_problem(text: str) -> str | None:
 class SettingsDialog(QDialog):
     """Edit the app's settings (spec 5); emits ``config_saved(AppConfig)`` on Save."""
 
-    config_saved = pyqtSignal(object)
+    config_saved = pyqtSignal(object)  # type: ignore[call-arg]  # PyQt6 6.12 stubs: arguments= made required
     """The new ``AppConfig``, on Save."""
-    setup_step_requested = pyqtSignal(object)
+    setup_step_requested = pyqtSignal(object)  # type: ignore[call-arg]  # PyQt6 6.12 stubs: arguments= made required
     """A ``WizardStep`` to open alone: ``OBS`` (Set up OBS…) or ``ADDONS`` (Install…/Repair…)."""
-    test_sources_requested = pyqtSignal(object)
+    test_sources_requested = pyqtSignal(object)  # type: ignore[call-arg]  # PyQt6 6.12 stubs: arguments= made required
     """The table's current rows (``tuple[TextSourceConfig, ...]``) for the Game text page (Test…)."""
 
     def __init__(

@@ -236,7 +236,7 @@ class App(QObject):
     (``gui.cli_verbs``); the caller has made sure no other instance does.
     """
 
-    stopped = pyqtSignal()
+    stopped = pyqtSignal()  # type: ignore[call-arg]  # PyQt6 6.12 stubs: arguments= made required
     """The quit ``request_quit`` began has finished; the caller ends the Qt loop."""
 
     def __init__(

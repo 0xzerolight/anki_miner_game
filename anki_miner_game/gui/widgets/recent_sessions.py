@@ -177,7 +177,7 @@ class RecentSessions(QWidget):
         limit: int = RECENT_LIMIT,
         parent: QWidget | None = None,
     ) -> None:
-        super().__init__(parent)
+        super().__init__(parent)  # type: ignore[arg-type]  # PyQt6 6.12 stubs: parent typed Self
         self._vad_jobs = vad_jobs
         self._vad_addon = vad_addon
         self._open_url = open_url

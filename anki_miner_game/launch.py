@@ -123,7 +123,7 @@ def claim_instance(
 def main(argv: Sequence[str] | None = None) -> int:
     command, qt_args = cli_verbs.parse_verb(sys.argv[1:] if argv is None else argv)
     program = sys.argv[0] if sys.argv else "anki_miner_game"
-    qapp = QApplication.instance() or QApplication([program, *qt_args])
+    qapp: QCoreApplication = QApplication.instance() or QApplication([program, *qt_args])
     home = paths.home()
     name = cli_verbs.server_name(home)
     answered = cli_verbs.send(name, command)
