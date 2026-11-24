@@ -175,9 +175,9 @@ class _WmHotkeyFilter(QAbstractNativeEventFilter):
         self._on_hotkey = on_hotkey
 
     def nativeEventFilter(
-        self, event_type: QByteArray | bytes | bytearray | memoryview, message: sip.voidptr
+        self, event_type: QByteArray | bytes | bytearray | memoryview, message: sip.voidptr | None
     ) -> tuple[bool, sip.voidptr]:
-        if QByteArray(event_type).data() in _MSG_EVENT_TYPES:
+        if message is not None and QByteArray(event_type).data() in _MSG_EVENT_TYPES:
             msg = wintypes.MSG.from_address(int(message))
             if msg.message == WM_HOTKEY and msg.wParam == self._hotkey_id:
                 self._on_hotkey()
